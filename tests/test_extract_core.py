@@ -1,6 +1,6 @@
 import pytest
 
-from veritas.claims.extract import extract_claims
+from author_ai.claims.extract import extract_claims
 
 
 def _get_claim(claims, claim_type):

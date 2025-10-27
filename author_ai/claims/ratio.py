@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
-from veritas.claims import normalize, patterns
-from veritas.utils import numbers
+from author_ai.claims import normalize, patterns
+from author_ai.utils import numbers
 
 WORD_NUMBERS: Dict[str, float] = {
     "zero": 0.0,
@@ -62,8 +62,8 @@ def _token_to_float(token: str) -> Optional[float]:
     return _word_to_number(token)
 
 
-def find_candidates(text: str, reserved: Iterable[tuple[int, int]]) -> list[dict]:
-    candidates: list[dict] = []
+def find_candidates(text: str, reserved: Iterable[tuple[int, int]]) -> List[dict]:
+    candidates: List[dict] = []
     occupied = list(reserved)
 
     for match in patterns.RATIO_PATTERN.finditer(text):
@@ -90,3 +90,9 @@ def find_candidates(text: str, reserved: Iterable[tuple[int, int]]) -> list[dict
         )
         occupied.append((start, end))
     return candidates
+
+
+def find_ratios(text: str) -> List[dict]:
+    """Public entry point mirroring newer extraction API."""
+
+    return find_candidates(text, reserved=())

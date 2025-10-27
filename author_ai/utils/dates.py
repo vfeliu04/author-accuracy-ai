@@ -6,7 +6,7 @@ from typing import Optional
 
 import dateparser
 
-from veritas.claims import patterns
+from author_ai.claims import patterns
 
 
 def _normalize_year(year_str: str) -> Optional[str]:

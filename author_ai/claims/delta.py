@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, List
 
-from veritas.claims import normalize, patterns
-from veritas.utils import dates, numbers
+from author_ai.claims import normalize, patterns
+from author_ai.utils import dates, numbers
 
 _DIRECTION_MAP = {
     "up": "up",
@@ -22,8 +22,8 @@ _DIRECTION_MAP = {
 }
 
 
-def find_candidates(text: str, reserved: Iterable[tuple[int, int]]) -> list[dict]:
-    candidates: list[dict] = []
+def find_candidates(text: str, reserved: Iterable[tuple[int, int]]) -> List[dict]:
+    candidates: List[dict] = []
     occupied = list(reserved)
 
     for match in patterns.DELTA_PATTERN.finditer(text):
@@ -60,3 +60,9 @@ def find_candidates(text: str, reserved: Iterable[tuple[int, int]]) -> list[dict
         )
         occupied.append((start, end))
     return candidates
+
+
+def find_deltas(text: str) -> List[dict]:
+    """Public entry point mirroring newer extraction API."""
+
+    return find_candidates(text, reserved=())

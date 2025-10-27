@@ -36,3 +36,12 @@ def extract_window(text: str, start: int, end: int, width: int = 48) -> str:
     left = max(start - width, 0)
     right = min(end + width, len(text))
     return text[left:right]
+
+
+def slice_text(text: str, span: Tuple[int, int]) -> str:
+    """Return a safe substring for the provided span."""
+
+    start, end = span
+    start = max(0, min(len(text), start))
+    end = max(start, min(len(text), end))
+    return text[start:end]

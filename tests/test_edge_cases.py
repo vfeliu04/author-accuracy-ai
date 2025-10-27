@@ -1,4 +1,4 @@
-from veritas.claims.extract import extract_claims
+from author_ai.claims.extract import extract_claims
 
 
 def test_locale_decimal_parsing() -> None:

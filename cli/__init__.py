@@ -1,2 +1,1 @@
-"""CLI entry point package for veritas."""
-
+"""CLI entry point package for author_ai."""

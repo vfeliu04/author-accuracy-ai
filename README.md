@@ -6,7 +6,7 @@ author.ai extracts atomic quantitative claims from raw prose and returns strict 
 - Detects statistics, ratios (e.g. `1 in 5`), ranges (`10–12%`), and deltas (`up 2pp vs 2023`).
 - Normalises numbers, percentage points, `per N` units, and locale-specific formats.
 - Heuristically captures qualifiers, subjects, and nearby temporal references (years, quarters).
-- Ships with a Click-powered CLI (`veritas-extract`) plus pytest-based regression tests and pre-commit hooks.
+- Ships with a Click-powered CLI (`author-extract`) plus pytest-based regression tests and pre-commit hooks.
 
 ## Getting Started
 
@@ -28,7 +28,7 @@ poetry run pytest
 Read from stdin and pretty-print JSON:
 ```bash
 echo "About 23.5% of UK A&E attendances in Q2 2024 breached the four-hour standard, up 2pp vs 2023." \
-  | poetry run veritas-extract --pretty
+  | poetry run author-extract --pretty
 ```
 
 Example output:
@@ -75,7 +75,7 @@ Example output:
 
 Point the CLI at a file instead of stdin:
 ```bash
-poetry run veritas-extract --infile data/sample.txt --pretty
+poetry run author-extract --infile data/sample.txt --pretty
 ```
 
 ## Tooling

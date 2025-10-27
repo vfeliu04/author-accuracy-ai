@@ -8,8 +8,8 @@ from typing import Iterable, Optional
 
 import click
 
-from veritas.claims import extract
-from veritas.claims.schema import Claim
+from author_ai.claims import extract
+from author_ai.claims.schema import Claim
 
 
 def _read_input(infile: Optional[Path]) -> str:
@@ -26,7 +26,7 @@ def _emit_spans(claims: Iterable[Claim]) -> None:
         )
 
 
-@click.command("veritas-extract")
+@click.command("author-extract")
 @click.option(
     "--infile",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),

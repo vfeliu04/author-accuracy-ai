@@ -1,12 +1,12 @@
 [tool.poetry]
-name = "veritas"
+name = "author_ai"
 version = "0.1.0"
 description = "Extract atomic quantitative claims from free text into structured JSON."
 authors = ["Author AI"]
 license = "MIT"
 readme = "README.md"
 packages = [
-    { include = "veritas" },
+    { include = "author_ai" },
     { include = "cli" }
 ]
 
@@ -26,7 +26,7 @@ ruff = "^0.3.7"
 black = "^24.3.0"
 
 [tool.poetry.scripts]
-veritas-extract = "cli.main:main"
+author-extract = "cli.main:main"
 
 [build-system]
 requires = ["poetry-core>=1.5.0"]

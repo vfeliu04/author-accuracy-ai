@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from veritas.claims.schema import Claim, Span
+from author_ai.claims.schema import Claim, Span
 
 
 def _base_span() -> Span:

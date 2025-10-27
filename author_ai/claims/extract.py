@@ -6,9 +6,9 @@ from typing import Dict, List, Tuple
 
 from rapidfuzz import fuzz
 
-from veritas.claims import delta, normalize, range_, ratio, patterns
-from veritas.claims.schema import Claim, Span
-from veritas.utils import dates, text as text_utils
+from author_ai.claims import delta, normalize, range_, ratio, patterns
+from author_ai.claims.schema import Claim, Span
+from author_ai.utils import dates, text as text_utils
 
 
 def extract_claims(text: str) -> List[Claim]:
@@ -99,14 +99,27 @@ def _candidate_to_claim(
         base_fields["quantity"] = candidate.get("quantity")
     elif candidate["type"] == "ratio":
         base_fields["ratio"] = candidate.get("ratio")
-    elif candidate["type"] == "range":
-        base_fields["range"] = candidate.get("range")
     elif candidate["type"] == "delta":
         base_fields["delta"] = candidate.get("delta")
         base_fields["delta_direction"] = candidate.get("delta_direction")
         base_fields["baseline_time"] = candidate.get("baseline_time")
 
-    return Claim(**base_fields)
+    if candidate["type"] == "range":
+        base_fields["range"] = candidate.get("range")
+
+    claim = Claim(**base_fields)
+
+    if candidate["type"] == "range":
+        claim.type = "range"
+        rng = candidate.get("range")
+        if rng:
+            claim.range = (float(rng[0]), float(rng[1]))
+        unit = candidate.get("unit")
+        if unit:
+            claim.unit = str(unit)
+        return claim
+
+    return claim
 
 
 def _overlaps(span: Tuple[int, int], occupied: List[Tuple[int, int]]) -> bool:
