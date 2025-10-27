@@ -1,6 +1,6 @@
-# Veritas
+# author.ai
 
-Author Accuracy AI extracts atomic quantitative claims from raw prose and returns strict JSON via Pydantic models.
+author.ai extracts atomic quantitative claims from raw prose and returns strict JSON via Pydantic models.
 
 ## Features
 - Detects statistics, ratios (e.g. `1 in 5`), ranges (`10–12%`), and deltas (`up 2pp vs 2023`).
