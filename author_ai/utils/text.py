@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Tuple
+from typing import Iterable, Optional, Tuple
+
+# A simple list of locations to check for.
+# This could be expanded or replaced with a more sophisticated NER approach.
+KNOWN_LOCATIONS = [
+    "UK",
+    "United Kingdom",
+    "USA",
+    "United States",
+    "China",
+    "India",
+    "Germany",
+    "France",
+]
+
+
+def extract_location_from_subject(subject: Optional[str]) -> Optional[str]:
+    """Extract a known location from the subject text."""
+    if not subject:
+        return None
+    for location in KNOWN_LOCATIONS:
+        if location in subject:
+            return location
+    return None
 
 
 def spans_overlap(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
@@ -45,3 +68,13 @@ def slice_text(text: str, span: Tuple[int, int]) -> str:
     start = max(0, min(len(text), start))
     end = max(start, min(len(text), end))
     return text[start:end]
+
+
+def extract_subject(text: str, span: Tuple[int, int]) -> Optional[str]:
+    """Extract the subject of a claim."""
+    # This is a placeholder implementation. A more sophisticated implementation
+    # would use NLP to identify the true subject of the claim.
+    start, end = span
+    window = extract_window(text, start, end)
+    # For now, we'll just return the window as the subject.
+    return window

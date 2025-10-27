@@ -56,10 +56,22 @@ def _find_statistics(text: str, occupied: List[Tuple[int, int]]) -> List[Dict[st
         if _overlaps(span, occupied):
             continue
         number_text = match.group("number")
+        unit = normalize.normalize_unit(match.group("unit"))
+
+        if unit is None:
+            # ignore years
+            if patterns.YEAR_PATTERN.fullmatch(number_text.strip()):
+                continue
+
+            # ignore phone numbers and other hyphenated numbers
+            if (end < len(text) and text[end] == "-") or (
+                start > 0 and text[start - 1] == "-"
+            ):
+                continue
+
         quantity = normalize.normalize_quantity(number_text)
         if quantity is None:
             continue
-        unit = normalize.normalize_unit(match.group("unit"))
         qualifier = normalize.normalize_qualifier(match.group("qualifier"))
         candidates.append(
             {
@@ -82,7 +94,11 @@ def _candidate_to_claim(
 
     subject = text_utils.extract_subject(text, span)
     location = text_utils.extract_location_from_subject(subject)
-    time = dates.find_nearest_time(text, span) if candidate["type"] != "delta" else None
+    time = (
+        dates.extract_time_context(text, span[0], span[1])
+        if candidate["type"] != "delta"
+        else None
+    )
 
     base_fields: Dict[str, object] = {
         "type": candidate["type"],

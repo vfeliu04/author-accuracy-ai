@@ -24,6 +24,7 @@ def test_statistic_and_delta_extraction() -> None:
     assert statistic.unit == "%"
     assert statistic.qualifier == "about"
     assert statistic.time == "2024-Q2"
+    assert statistic.location == "UK"
     assert text[statistic.span.start : statistic.span.end] == statistic.text
 
     delta = _get_claim(claims, "delta")
