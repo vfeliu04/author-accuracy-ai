@@ -1,0 +1,70 @@
+Collecting pydantic
+  Downloading pydantic-2.12.3-py3-none-any.whl.metadata (87 kB)
+Collecting regex
+  Downloading regex-2025.10.23-cp311-cp311-macosx_11_0_arm64.whl.metadata (40 kB)
+Collecting quantulum3
+  Downloading quantulum3-0.9.2-py3-none-any.whl.metadata (16 kB)
+Collecting dateparser
+  Downloading dateparser-1.2.2-py3-none-any.whl.metadata (29 kB)
+Collecting rapidfuzz
+  Downloading rapidfuzz-3.14.1-cp311-cp311-macosx_11_0_arm64.whl.metadata (12 kB)
+Collecting click
+  Downloading click-8.3.0-py3-none-any.whl.metadata (2.6 kB)
+Collecting annotated-types>=0.6.0 (from pydantic)
+  Using cached annotated_types-0.7.0-py3-none-any.whl.metadata (15 kB)
+Collecting pydantic-core==2.41.4 (from pydantic)
+  Downloading pydantic_core-2.41.4-cp311-cp311-macosx_11_0_arm64.whl.metadata (7.3 kB)
+Collecting typing-extensions>=4.14.1 (from pydantic)
+  Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting typing-inspection>=0.4.2 (from pydantic)
+  Downloading typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting inflect (from quantulum3)
+  Downloading inflect-7.5.0-py3-none-any.whl.metadata (24 kB)
+Collecting num2words (from quantulum3)
+  Downloading num2words-0.5.14-py3-none-any.whl.metadata (13 kB)
+Collecting python-dateutil>=2.7.0 (from dateparser)
+  Using cached python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting pytz>=2024.2 (from dateparser)
+  Using cached pytz-2025.2-py2.py3-none-any.whl.metadata (22 kB)
+Collecting tzlocal>=0.2 (from dateparser)
+  Downloading tzlocal-5.3.1-py3-none-any.whl.metadata (7.6 kB)
+Collecting six>=1.5 (from python-dateutil>=2.7.0->dateparser)
+  Using cached six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting more_itertools>=8.5.0 (from inflect->quantulum3)
+  Downloading more_itertools-10.8.0-py3-none-any.whl.metadata (39 kB)
+Collecting typeguard>=4.0.1 (from inflect->quantulum3)
+  Downloading typeguard-4.4.4-py3-none-any.whl.metadata (3.3 kB)
+Collecting docopt>=0.6.2 (from num2words->quantulum3)
+  Downloading docopt-0.6.2.tar.gz (25 kB)
+  Preparing metadata (setup.py): started
+  Preparing metadata (setup.py): finished with status 'done'
+Downloading pydantic-2.12.3-py3-none-any.whl (462 kB)
+Downloading pydantic_core-2.41.4-cp311-cp311-macosx_11_0_arm64.whl (1.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.9/1.9 MB 2.8 MB/s  0:00:00
+Downloading regex-2025.10.23-cp311-cp311-macosx_11_0_arm64.whl (288 kB)
+Downloading quantulum3-0.9.2-py3-none-any.whl (10.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.6/10.6 MB 3.1 MB/s  0:00:03
+Downloading dateparser-1.2.2-py3-none-any.whl (315 kB)
+Downloading rapidfuzz-3.14.1-cp311-cp311-macosx_11_0_arm64.whl (1.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 2.0 MB/s  0:00:00
+Downloading click-8.3.0-py3-none-any.whl (107 kB)
+Using cached annotated_types-0.7.0-py3-none-any.whl (13 kB)
+Using cached python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Using cached pytz-2025.2-py2.py3-none-any.whl (509 kB)
+Using cached six-1.17.0-py2.py3-none-any.whl (11 kB)
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Downloading tzlocal-5.3.1-py3-none-any.whl (18 kB)
+Downloading inflect-7.5.0-py3-none-any.whl (35 kB)
+Downloading more_itertools-10.8.0-py3-none-any.whl (69 kB)
+Downloading typeguard-4.4.4-py3-none-any.whl (34 kB)
+Downloading num2words-0.5.14-py3-none-any.whl (163 kB)
+Building wheels for collected packages: docopt
+  Building wheel for docopt (setup.py): started
+  Building wheel for docopt (setup.py): finished with status 'done'
+  Created wheel for docopt: filename=docopt-0.6.2-py2.py3-none-any.whl size=13783 sha256=361b2296295ececaef2bcad36ebb89efe6017a655b601f769f8633a34cac4467
+  Stored in directory: /Users/vicentefeliu/Library/Caches/pip/wheels/1a/b0/8c/4b75c4116c31f83c8f9f047231251e13cc74481cca4a78a9ce
+Successfully built docopt
+Installing collected packages: pytz, docopt, tzlocal, typing-extensions, six, regex, rapidfuzz, num2words, more_itertools, click, annotated-types, typing-inspection, typeguard, python-dateutil, pydantic-core, pydantic, inflect, dateparser, quantulum3
+
+Successfully installed annotated-types-0.7.0 click-8.3.0 dateparser-1.2.2 docopt-0.6.2 inflect-7.5.0 more_itertools-10.8.0 num2words-0.5.14 pydantic-2.12.3 pydantic-core-2.41.4 python-dateutil-2.9.0.post0 pytz-2025.2 quantulum3-0.9.2 rapidfuzz-3.14.1 regex-2025.10.23 six-1.17.0 typeguard-4.4.4 typing-extensions-4.15.0 typing-inspection-0.4.2 tzlocal-5.3.1
