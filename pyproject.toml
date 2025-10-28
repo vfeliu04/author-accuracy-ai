@@ -26,7 +26,8 @@ ruff = "^0.3.7"
 black = "^24.3.0"
 
 [tool.poetry.scripts]
-author-extract = "cli.main:main"
+author-extract = "cli.main:extract_cli"
+author-verify = "cli.main:verify_cli"
 
 [build-system]
 requires = ["poetry-core>=1.5.0"]
