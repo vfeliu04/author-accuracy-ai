@@ -1,0 +1,13 @@
+python-dotenv
+pydantic
+tqdm
+sqlalchemy
+alembic
+faiss-cpu
+numpy
+pandas
+rapidfuzz
+pymupdf
+nltk
+httpx
+openai
