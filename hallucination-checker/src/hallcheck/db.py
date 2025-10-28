@@ -22,6 +22,14 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
 
 
+def reset_db() -> None:
+    """Drop and recreate all tables."""
+    from .models import Base  # Imported lazily to avoid circular import
+
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+
 @contextmanager
 def get_session() -> Iterator[Session]:
     """Context manager yielding a database session."""
@@ -34,4 +42,3 @@ def get_session() -> Iterator[Session]:
         raise
     finally:
         session.close()
-

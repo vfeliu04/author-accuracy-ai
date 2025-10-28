@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import math
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from textwrap import shorten
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import get_session, init_db
+from .db import get_session, init_db, reset_db
 from .embeddings import embed_texts
 from .extract_claims import find_claims
 from .chunking import chunk_text
@@ -23,7 +25,14 @@ from .models import (
     VerdictStatus,
     Chunk,
 )
-from .retrieval import build_faiss, load_faiss, load_metadata, save_metadata, search_faiss
+from .retrieval import (
+    INDEX_DIR,
+    build_faiss,
+    load_faiss,
+    load_metadata,
+    save_metadata,
+    search_faiss,
+)
 
 
 NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
@@ -31,6 +40,7 @@ NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
 
 def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> None:
     """Index a collection of source PDFs."""
+    _reset_environment(index_name)
     init_db()
     if not pdf_paths:
         print("No source PDFs provided.")
@@ -120,7 +130,11 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
         print("[verify] No text extracted from report; aborting.")
         return
 
+    summaries: List[dict] = []
+
     with get_session() as session:
+        _clear_previous_reports(session)
+
         report_doc = Document(
             kind=DocumentKind.REPORT,
             path=str(report_path.resolve()),
@@ -158,7 +172,7 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
         distances, indices = search_faiss(index, claim_embeddings, k=topk)
         doc_cache: Dict[int, Document] = {}
 
-        for claim_idx, (claim, claim_data) in enumerate(claim_records):
+        for claim_idx, (claim, _) in enumerate(claim_records):
             sims = distances[claim_idx]
             neighbors = indices[claim_idx]
             evidence = _collect_evidence(neighbors, sims, chunk_payloads, doc_cache, session)
@@ -170,8 +184,20 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
                 evidence=evidence,
             )
             session.add(verdict)
+            top_snippet = _top_evidence_snippet(evidence)
+            summaries.append(
+                {
+                    "status": verdict_status,
+                    "confidence": confidence,
+                    "claim_text": claim.sentence,
+                    "evidence_text": top_snippet.get("text") if top_snippet else None,
+                    "source_label": (top_snippet.get("doc_title") or top_snippet.get("doc_path")) if top_snippet else None,
+                }
+            )
 
         print(f"[verify] Generated verdicts for {len(claim_records)} claims.")
+
+    _print_summary(summaries)
 
 
 def _collect_evidence(
@@ -312,3 +338,66 @@ def _safe_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
+def _top_evidence_snippet(evidence: Dict[str, object]) -> dict | None:
+    if not isinstance(evidence, dict):
+        return None
+    candidates = evidence.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    first = candidates[0]
+    if not isinstance(first, dict):
+        return None
+    return first
+
+
+def _print_summary(summaries: Sequence[dict]) -> None:
+    if not summaries:
+        print("[verify] No verdicts to summarize.")
+        return
+
+    print("[verify] Verdict summary:")
+    for idx, item in enumerate(summaries, start=1):
+        status = item.get("status")
+        status_label = status.value if isinstance(status, VerdictStatus) else str(status)
+        confidence = item.get("confidence") or 0.0
+        claim_text = item.get("claim_text") or ""
+        evidence_text = item.get("evidence_text")
+        source_label = item.get("source_label")
+
+        print(f"  [{idx}] {status_label} (confidence {confidence:.2f})")
+        print(f"      report: {shorten(claim_text, width=120, placeholder='...')}")
+        if evidence_text:
+            snippet = shorten(evidence_text, width=120, placeholder="...")
+            if source_label:
+                print(f"      source: {snippet}  ← {source_label}")
+            else:
+                print(f"      source: {snippet}")
+        else:
+            print("      source: (no evidence snippet available)")
+
+
+def _reset_environment(index_name: str) -> None:
+    """Drop existing database tables and remove prior index artifacts."""
+    reset_db()
+    _delete_index_artifacts(index_name)
+    print(f"[index] Reset previous data for index '{index_name}'.")
+
+
+def _delete_index_artifacts(index_name: str) -> None:
+    targets = [
+        INDEX_DIR / f"{index_name}.faiss",
+        INDEX_DIR / f"{index_name}_docids.npy",
+        INDEX_DIR / f"{index_name}_chunks.jsonl",
+    ]
+    for path in targets:
+        path.unlink(missing_ok=True)
+
+
+def _clear_previous_reports(session: Session) -> None:
+    """Remove previously stored report documents (cascades clean up dependent rows)."""
+    reports = list(session.scalars(select(Document).where(Document.kind == DocumentKind.REPORT)))
+    for report in reports:
+        session.delete(report)
+    if reports:
+        session.flush()

@@ -59,7 +59,7 @@ A minimal command-line tool that flags factual claims in a PDF report as support
    python -m src.hallcheck.cli verify --report data/inputs/report.pdf
    ```
 
-The CLI prints progress messages. Re-run `index` whenever you change the set of source PDFs.
+Running `index` automatically clears the SQLite tables and any existing FAISS files for that index name, so each run starts from a clean slate. The CLI prints progress messages and, after verification, a summary showing each claim sentence, the highest-scoring source snippet, and whether the claim is SUPPORTED, CONTRADICTED, or NOT_FOUND. Re-run `index` whenever you change the set of source PDFs.
 
 ## Under the Hood
 The tool reads PDFs with PyMuPDF, splits source documents into overlapping sentence chunks, and stores them in SQLite alongside metadata. It embeds the chunks using `text-embedding-3-large`, stores vectors in a FAISS index, and writes aligned metadata files. During verification it extracts numeric statements from the report, embeds those sentences, retrieves the top-k similar source chunks, and applies lightweight heuristics (numeric matching, year detection, and similarity thresholds) to assign SUPPORTED/CONTRADICTED/NOT_FOUND verdicts.
