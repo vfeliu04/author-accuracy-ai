@@ -1,0 +1,148 @@
+/* A common reset to make layout calculations more predictable. */
+* {
+    box-sizing: border-box;
+}
+
+/* Basic styles for the entire page. */
+body {
+    margin: 0;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f4f6f8; /* A light gray background. */
+    color: #222; /* A dark gray for text. */
+}
+
+/* The main container for the two panels. */
+.container {
+    max-width: 960px;
+    margin: 0 auto; /* Center the container horizontally. */
+    padding: 2rem 1rem 3rem;
+    display: grid; /* Use CSS Grid for layout. */
+    grid-template-columns: 1fr; /* On small screens, stack the panels. */
+    gap: 1.5rem; /* Space between the panels. */
+}
+
+/* Styling for the white panels that hold the content. */
+.panel {
+    background: #fff;
+    border-radius: 12px;
+    padding: 1.5rem;
+    box-shadow: 0 16px 32px -24px rgba(0, 0, 0, 0.4); /* A subtle shadow for depth. */
+}
+
+/* Basic resets for headings. */
+h1, h2 {
+    margin-top: 0;
+}
+
+/* Basic styles for the forms. */
+form {
+    display: flex;
+    flex-direction: column; /* Stack form elements vertically. */
+    gap: 1rem;
+}
+
+/* The file upload area. */
+.dropzone {
+    border: 2px dashed #7a7a7a;
+    border-radius: 10px;
+    padding: 2rem;
+    text-align: center;
+    background: #fafbfc;
+    cursor: pointer;
+    transition: border-color 0.3s ease, background 0.3s ease; /* Smooth transition on hover. */
+}
+
+/* A visual cue when the user hovers over the drop zone. */
+.dropzone:hover {
+    border-color: #2563eb;
+    background: #f0f4ff;
+}
+
+/* General button styling. */
+button {
+    padding: 0.75rem 1.25rem;
+    border-radius: 8px;
+    border: none;
+    background: #2563eb; /* A nice blue color. */
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+/* Style for disabled buttons to provide visual feedback. */
+button:disabled {
+    background: #9aa5b1;
+    cursor: not-allowed;
+}
+
+/* A darker blue on hover for enabled buttons. */
+button:hover:not(:disabled) {
+    background: #1e4fb8;
+}
+
+/* Styling for the question text area. */
+textarea {
+    resize: vertical; /* Allow the user to resize it vertically. */
+    min-height: 100px;
+    padding: 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font-size: 1rem;
+}
+
+/* These classes are for the status and answer areas. */
+/* A minimum height prevents the layout from jumping around as content is loaded. */
+.status, .answer {
+    min-height: 1.5rem;
+}
+
+/* Slightly larger font and more line spacing for the answer to improve readability. */
+.answer {
+    font-size: 1.05rem;
+    line-height: 1.6;
+}
+
+/* Styling for the list of citations. */
+.citations {
+    list-style: none; /* Remove the default bullet points. */
+    padding-left: 0;
+    margin: 1rem 0 0;
+}
+
+/* A simple border to separate citation items. */
+.citations li {
+    padding: 0.35rem 0;
+    border-bottom: 1px solid #eee;
+}
+
+/* The notification pop-up (toast). */
+.toast {
+    position: fixed; /* Keep it in the same place on the screen even when scrolling. */
+    bottom: 1.5rem;
+    right: 1.5rem;
+    background: #1f2937;
+    color: #fff;
+    padding: 0.75rem 1.25rem;
+    border-radius: 8px;
+    box-shadow: 0 12px 24px -16px rgba(0, 0, 0, 0.4);
+    /* Start hidden and slightly offset. */
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 0.3s ease, transform 0.3s ease; /* Animate the appearance. */
+}
+
+/* This class is added by JavaScript to show the toast. */
+.toast.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* A media query for responsive design. */
+/* On screens wider than 768px, the layout changes. */
+@media (min-width: 768px) {
+    .container {
+        /* Create a two-column layout for the panels. */
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

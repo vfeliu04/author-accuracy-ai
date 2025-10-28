@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MVP RAG</title>
+    <!-- This line links to the CSS stylesheet. -->
+    <!-- `url_for` is a Flask function that generates the correct URL for a static file. -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <!-- The `main` element is the primary content area of the page. -->
+    <main class="container">
+        <!-- The left panel: for uploading and ingesting documents. -->
+        <section class="panel">
+            <h1>Document Ingestion</h1>
+            <!-- The form for file uploads. The `id` is used by JavaScript to handle submissions. -->
+            <form id="ingest-form">
+                <!-- A styled `label` acts as a drop zone for files. -->
+                <label class="dropzone">
+                    <span>Drop PDF files here or click to upload</span>
+                    <!-- The actual file input is hidden. Clicking the label will trigger it. -->
+                    <!-- `multiple` allows selecting more than one file. -->
+                    <input id="pdf-files" type="file" name="files" accept="application/pdf" multiple hidden>
+                </label>
+                <button id="ingest-button" type="submit">Ingest</button>
+            </form>
+            <!-- This div will display the status of the ingestion process (e.g., "Uploading..."). -->
+            <div id="ingest-status" class="status"></div>
+        </section>
+
+        <!-- The right panel: for asking questions and seeing results. -->
+        <section class="panel">
+            <h2>Ask the Documents</h2>
+            <!-- The form for submitting a question. -->
+            <form id="ask-form">
+                <textarea id="question" rows="3" placeholder="What would you like to know?" required></textarea>
+                <button id="ask-button" type="submit">Ask</button>
+            </form>
+            <!-- This div will display the AI's answer. -->
+            <div id="answer" class="answer"></div>
+            <!-- This unordered list will display the source citations for the answer. -->
+            <ul id="citations" class="citations"></ul>
+        </section>
+    </main>
+    <!-- A hidden element used for showing toast notifications (small pop-up messages). -->
+    <div id="toast" class="toast" hidden></div>
+    <!-- This line includes the JavaScript file that powers the page's interactivity. -->
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+</body>
+</html>
