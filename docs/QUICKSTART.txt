@@ -1,0 +1,14 @@
+- macOS/Linux: git clone https://github.com/your-org/author_-accuracy.ai.git && cd author_-accuracy.ai
+- macOS/Linux: conda create -n mvp_rag python=3.11 -y
+- macOS/Linux: conda activate mvp_rag
+- macOS/Linux: pip install -r requirements.txt
+- macOS/Linux: cp .env.example .env
+- macOS/Linux: python -m mvp_rag.app
+- Windows PowerShell: git clone https://github.com/your-org/author_-accuracy.ai.git ; Set-Location author_-accuracy.ai
+- Windows PowerShell: conda create -n mvp_rag python=3.11 -y
+- Windows PowerShell: conda activate mvp_rag
+- Windows PowerShell: pip install -r requirements.txt
+- Windows PowerShell: Copy-Item .env.example .env
+- Windows PowerShell: python -m mvp_rag.app
+Open http://localhost:8000
+and upload a PDF.
