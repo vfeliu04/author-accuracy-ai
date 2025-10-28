@@ -1,9 +1,9 @@
 flask==3.0.3
 qdrant-client==1.9.1
-pypdf==4.2.0
+pypdf==3.17.0
 tiktoken==0.7.0
 openai==1.53.0
 python-dotenv==1.0.1
 requests==2.32.3
-typing-extensions==4.12.2
+typing-extensions==4.14.0
 pytest==8.3.2
