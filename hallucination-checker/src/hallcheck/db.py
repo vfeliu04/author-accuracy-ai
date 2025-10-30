@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import settings
@@ -20,6 +20,7 @@ def init_db() -> None:
     from .models import Base  # Imported lazily to avoid circular import
 
     Base.metadata.create_all(bind=engine)
+    _ensure_verdict_explanation_column()
 
 
 def reset_db() -> None:
@@ -28,6 +29,7 @@ def reset_db() -> None:
 
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    _ensure_verdict_explanation_column()
 
 
 @contextmanager
@@ -42,3 +44,19 @@ def get_session() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+def _ensure_verdict_explanation_column() -> None:
+    """Add the verdict.explanation column if missing (for backward compatibility)."""
+    try:
+        with engine.begin() as connection:
+            inspector = inspect(connection)
+            if "verdicts" not in inspector.get_table_names():
+                return
+            column_names = {col["name"] for col in inspector.get_columns("verdicts")}
+            if "explanation" in column_names:
+                return
+            connection.execute(text("ALTER TABLE verdicts ADD COLUMN explanation TEXT"))
+    except Exception:
+        # Failing here should not block the app; legacy databases may require manual migration.
+        pass

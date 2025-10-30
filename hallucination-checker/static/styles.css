@@ -18,3 +18,9 @@ body {
 .claim-card .card-body {
   min-height: 12rem;
 }
+
+.text-block {
+  white-space: pre-wrap;
+  font-family: inherit;
+  line-height: 1.55;
+}

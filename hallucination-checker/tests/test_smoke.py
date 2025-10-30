@@ -5,6 +5,7 @@ from src.hallcheck import cli, extract_claims, verify
 def test_settings_defaults():
     assert settings.db_url.endswith("hallcheck.db")
     assert settings.openai_embed_model == "text-embedding-3-large"
+    assert settings.openai_chat_model == "gpt-4.1"
 
 
 def test_module_exports():

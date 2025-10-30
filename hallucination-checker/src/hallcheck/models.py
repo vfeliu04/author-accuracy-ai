@@ -81,6 +81,6 @@ class Verdict(Base):
     status: Mapped[VerdictStatus] = mapped_column(Enum(VerdictStatus), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    explanation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     claim: Mapped[Claim] = relationship("Claim", back_populates="verdicts")
-

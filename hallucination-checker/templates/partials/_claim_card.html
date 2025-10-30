@@ -1,9 +1,13 @@
-<div class="col-12 claim-card" data-search-text="{{ (claim.sentence or '')|lower }} {{ (claim.evidence_snippet or '')|lower }} {{ (claim.source_title or '')|lower }}">
-  <div class="card shadow-sm h-100">
+<div id="claim-{{ claim.claim_id }}" class="col-12 claim-card" data-search-text="{{ (claim.sentence or '')|lower }} {{ (claim.evidence_snippet or '')|lower }} {{ (claim.source_title or '')|lower }}">
+  <div class="card shadow-sm h-100 position-relative">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-start mb-2">
         <div class="me-2">
-          <p class="fw-semibold mb-1">{{ claim.sentence }}</p>
+          <p class="fw-semibold mb-1 mb-lg-0">
+            <a href="{{ url_for('claim_detail', claim_id=claim.claim_id) }}" class="stretched-link text-reset text-decoration-none">
+              {{ claim.sentence }}
+            </a>
+          </p>
         </div>
         {% set badge_class = STATUS_BADGES.get(claim.verdict_status, 'bg-secondary') %}
         <span class="badge {{ badge_class }}">{{ claim.verdict_status or 'UNKNOWN' }}</span>

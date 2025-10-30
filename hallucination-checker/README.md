@@ -71,6 +71,13 @@ Running `index` automatically clears the SQLite tables and any existing FAISS fi
 
 The original CLI (`python -m src.hallcheck.cli ...`) continues to work unchanged alongside the new web interface.
 
+## Claim detail page
+- From the verification results screen, click any claim card to open a dedicated detail view.
+- The page shows the full claim sentence, the highest-ranking evidence chunk, and a cached AI explanation for the verdict.
+- Explanations are generated with `OPENAI_CHAT_MODEL` (defaults to `gpt-4.1`) and stored in the database; use the **Regenerate explanation** button to refresh them on demand.
+- If you're using an older `openai` Python SDK where the Responses API is unavailable, set `OPENAI_CHAT_MODEL=gpt-4o-mini` (or upgrade `openai` to ≥1.2.0) so explanations can be generated via chat completions.
+- Placeholder screenshot: `![Claim detail screenshot](docs/claim-detail.png)`
+
 ## Under the Hood
 The tool reads PDFs with PyMuPDF, splits source documents into overlapping sentence chunks, and stores them in SQLite alongside metadata. It embeds the chunks using `text-embedding-3-large`, stores vectors in a FAISS index, and writes aligned metadata files. During verification it extracts numeric statements from the report, embeds those sentences, retrieves the top-k similar source chunks, and applies lightweight heuristics (numeric matching, year detection, and similarity thresholds) to assign SUPPORTED/CONTRADICTED/NOT_FOUND verdicts.
 

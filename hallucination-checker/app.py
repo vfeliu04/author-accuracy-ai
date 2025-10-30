@@ -16,7 +16,10 @@ from wtforms import SelectField, SelectMultipleField, SubmitField
 
 from src.hallcheck.config import settings
 from src.hallcheck.webbridge import (
+    clear_explanation,
+    fetch_claim_detail,
     fetch_results,
+    get_or_make_explanation,
     get_report_details,
     list_existing_pdfs,
     run_index,
@@ -71,6 +74,10 @@ class VerifyReportForm(FlaskForm):
         validate_choice=False,
     )
     submit = SubmitField("Verify report")
+
+
+class RegenerateExplanationForm(FlaskForm):
+    submit = SubmitField("Regenerate explanation")
 
 
 def allowed_file(filename: str) -> bool:
@@ -227,6 +234,59 @@ def results(report_doc_id: int):
         total_claims=len(claims),
         status_counts=status_counts,
     )
+
+
+@app.get("/claim/<int:claim_id>")
+def claim_detail(claim_id: int):
+    try:
+        detail = fetch_claim_detail(claim_id)
+    except ValueError as exc:
+        flash(str(exc), "warning")
+        return redirect(url_for("home"))
+    except Exception as exc:  # pragma: no cover - defensive handling
+        flash(f"Unable to load claim: {exc}", "danger")
+        return redirect(url_for("home"))
+
+    if not detail.get("explanation"):
+        try:
+            detail["explanation"] = get_or_make_explanation(claim_id)
+        except Exception as exc:  # pragma: no cover - defensive handling
+            flash(f"Explanation could not be generated: {exc}", "warning")
+
+    report_meta = None
+    report_doc_id = detail.get("report_doc_id")
+    if report_doc_id is not None:
+        report_meta = get_report_details(report_doc_id)
+
+    regen_form = RegenerateExplanationForm()
+
+    return render_template("claim_detail.html", detail=detail, report=report_meta, regen_form=regen_form)
+
+
+@app.post("/claim/<int:claim_id>/regenerate")
+def claim_regen(claim_id: int):
+    form = RegenerateExplanationForm()
+    if not form.validate_on_submit():
+        flash("Invalid submission. Please try again.", "danger")
+        return redirect(url_for("claim_detail", claim_id=claim_id))
+
+    try:
+        clear_explanation(claim_id)
+    except ValueError as exc:
+        flash(str(exc), "warning")
+        return redirect(url_for("claim_detail", claim_id=claim_id))
+    except Exception as exc:  # pragma: no cover - defensive handling
+        flash(f"Unable to reset explanation: {exc}", "danger")
+        return redirect(url_for("claim_detail", claim_id=claim_id))
+
+    try:
+        get_or_make_explanation(claim_id)
+    except Exception as exc:  # pragma: no cover - defensive handling
+        flash(f"Explanation could not be generated: {exc}", "warning")
+    else:
+        flash("Explanation regenerated.", "success")
+
+    return redirect(url_for("claim_detail", claim_id=claim_id))
 
 
 if __name__ == "__main__":  # pragma: no cover

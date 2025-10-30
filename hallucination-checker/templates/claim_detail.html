@@ -1,0 +1,88 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="mb-3">
+  {% if detail.report_doc_id %}
+    <a href="{{ url_for('results', report_doc_id=detail.report_doc_id) }}#claim-{{ detail.claim_id }}" class="btn btn-link px-0">
+      &larr; Back to verification results
+    </a>
+  {% else %}
+    <a href="{{ url_for('home') }}" class="btn btn-link px-0">&larr; Back to dashboard</a>
+  {% endif %}
+</div>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start flex-column flex-lg-row gap-4 mb-3">
+      <div>
+        <h1 class="h4 mb-2">Claim detail</h1>
+        {% if report %}
+          <div class="small text-muted">
+            Report: {{ report.title }}
+            {% if report.filename %}
+              <span class="ms-1 text-lowercase">({{ report.filename }})</span>
+            {% endif %}
+          </div>
+        {% endif %}
+        <div class="small text-muted mt-3">
+          {% if detail.value is not none %}
+            <span>Value: {{ "{:g}".format(detail.value) }}</span>
+          {% endif %}
+          {% if detail.units %}
+            <span class="ms-3">Units: {{ detail.units }}</span>
+          {% endif %}
+          {% if detail.year %}
+            <span class="ms-3">Year: {{ detail.year }}</span>
+          {% endif %}
+          {% if detail.source_title %}
+            <span class="ms-3">
+              Source:
+              {% if detail.report_doc_id %}
+                <a href="{{ url_for('results', report_doc_id=detail.report_doc_id) }}#claim-{{ detail.claim_id }}" class="link-secondary text-decoration-none">
+                  {{ detail.source_title }}
+                </a>
+              {% else %}
+                {{ detail.source_title }}
+              {% endif %}
+            </span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="text-lg-end w-100 w-lg-auto">
+        {% set badge_class = STATUS_BADGES.get(detail.status, 'bg-secondary') %}
+        <span class="badge {{ badge_class }} fs-6">{{ detail.status }}</span>
+        {% if detail.confidence is not none %}
+          <div class="small text-muted mt-2">Confidence: {{ (detail.confidence * 100) | round(1) }}%</div>
+        {% endif %}
+        <form action="{{ url_for('claim_regen', claim_id=detail.claim_id) }}" method="post" class="mt-3">
+          {{ regen_form.hidden_tag() }}
+          {{ regen_form.submit(class="btn btn-outline-secondary btn-sm") }}
+        </form>
+      </div>
+    </div>
+
+    <section class="mb-4">
+      <h2 class="h6 text-uppercase text-muted">Claim</h2>
+      <div class="text-block bg-light border rounded p-3">{{ detail.sentence }}</div>
+    </section>
+
+    <section class="mb-4">
+      <h2 class="h6 text-uppercase text-muted">Evidence</h2>
+      {% if detail.evidence_text %}
+        <div class="text-block bg-light border rounded p-3">{{ detail.evidence_text }}</div>
+      {% else %}
+        <p class="text-muted fst-italic mb-0">No evidence snippet recorded for this claim.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2 class="h6 text-uppercase text-muted">Why this verdict</h2>
+      {% if detail.explanation %}
+        <div class="text-block">{{ detail.explanation }}</div>
+      {% else %}
+        <p class="text-muted fst-italic mb-0">Explanation not available yet.</p>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}
