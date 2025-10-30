@@ -61,6 +61,16 @@ A minimal command-line tool that flags factual claims in a PDF report as support
 
 Running `index` automatically clears the SQLite tables and any existing FAISS files for that index name, so each run starts from a clean slate. The CLI prints progress messages and, after verification, a summary showing each claim sentence, the highest-scoring source snippet, and whether the claim is SUPPORTED, CONTRADICTED, or NOT_FOUND. Re-run `index` whenever you change the set of source PDFs.
 
+## Run the Web UI
+1. Ensure your `.env` file is configured (set `OPENAI_API_KEY`, optionally tweak chunking/index settings).
+2. Install dependencies, including the Flask extras: `pip install -r requirements.txt`.
+3. Download the NLTK tokenizer if you have not already: `python -m nltk.downloader punkt`.
+4. Place PDFs inside `data/inputs/` ahead of time or upload them directly from the UI (uploads are saved in this folder).
+5. Start the server with either `FLASK_APP=app.py flask run` or `python app.py`.
+6. Open http://127.0.0.1:5000 in your browser to index sources, verify a report, and browse results.
+
+The original CLI (`python -m src.hallcheck.cli ...`) continues to work unchanged alongside the new web interface.
+
 ## Under the Hood
 The tool reads PDFs with PyMuPDF, splits source documents into overlapping sentence chunks, and stores them in SQLite alongside metadata. It embeds the chunks using `text-embedding-3-large`, stores vectors in a FAISS index, and writes aligned metadata files. During verification it extracts numeric statements from the report, embeds those sentences, retrieves the top-k similar source chunks, and applies lightweight heuristics (numeric matching, year detection, and similarity thresholds) to assign SUPPORTED/CONTRADICTED/NOT_FOUND verdicts.
 

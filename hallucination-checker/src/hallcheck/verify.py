@@ -38,15 +38,17 @@ from .retrieval import (
 NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
 
 
-def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> None:
-    """Index a collection of source PDFs."""
+def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict:
+    """Index a collection of source PDFs and return a summary."""
+    summary = {"number_of_docs": 0, "number_of_chunks": 0, "index_name": index_name}
     _reset_environment(index_name)
     init_db()
     if not pdf_paths:
         print("No source PDFs provided.")
-        return
+        return summary
 
     chunk_records: List[Tuple[Chunk, str]] = []
+    documents_ingested = 0
 
     with get_session() as session:
         for path_str in pdf_paths:
@@ -75,6 +77,8 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> None
                 print(f"[index] No chunks produced for {pdf_path}.")
                 continue
 
+            documents_ingested += 1
+
             offset = 0
             for segment in segments:
                 start = offset
@@ -93,7 +97,8 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> None
 
         if not chunk_records:
             print("[index] No chunks persisted; aborting index build.")
-            return
+            summary["number_of_docs"] = documents_ingested
+            return summary
 
         print(f"[index] Embedding {len(chunk_records)} chunks...")
         embeddings = embed_texts([text for _, text in chunk_records])
@@ -112,10 +117,14 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> None
             for chunk, text in chunk_records
         ]
         save_metadata(index_name, doc_ids, chunk_payloads)
-        print(f"[index] Stored index '{index_name}' with {len(chunk_records)} vectors.")
+        summary["number_of_docs"] = documents_ingested
+        summary["number_of_chunks"] = len(chunk_records)
+        print(f"[index] Stored index '{index_name}' with {len(chunk_records)} vectors across {documents_ingested} documents.")
+
+    return summary
 
 
-def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -> None:
+def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -> int | None:
     """Verify claims found in a report PDF against the indexed sources."""
     init_db()
 
@@ -128,9 +137,10 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
     report_text = extract_text(str(report_path))
     if not report_text.strip():
         print("[verify] No text extracted from report; aborting.")
-        return
+        return None
 
     summaries: List[dict] = []
+    report_doc_id: int | None = None
 
     with get_session() as session:
         _clear_previous_reports(session)
@@ -143,6 +153,7 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
         )
         session.add(report_doc)
         session.flush()
+        report_doc_id = report_doc.id
 
         claim_records: List[Tuple[Claim, Dict[str, object]]] = []
         for claim_data in find_claims(report_text):
@@ -162,7 +173,7 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
 
         if not claim_records:
             print("[verify] No numeric claims detected in report.")
-            return
+            return report_doc_id
 
         print(f"[verify] Embedding {len(claim_records)} claims...")
         claim_embeddings = embed_texts([claim.sentence for claim, _ in claim_records])
@@ -198,6 +209,52 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
         print(f"[verify] Generated verdicts for {len(claim_records)} claims.")
 
     _print_summary(summaries)
+    return report_doc_id
+
+
+def get_verdicts(report_doc_id: int) -> List[dict]:
+    """Return verdict data for claims associated with a report document."""
+    init_db()
+    results: List[dict] = []
+
+    with get_session() as session:
+        claims = list(
+            session.scalars(
+                select(Claim).where(Claim.doc_id == report_doc_id).order_by(Claim.id)
+            )
+        )
+
+        for claim in claims:
+            verdict = claim.verdicts[0] if claim.verdicts else None
+            evidence_snippet = None
+            source_title = None
+            source_doc_id = None
+
+            if verdict and isinstance(verdict.evidence, dict):
+                candidates = verdict.evidence.get("candidates")
+                if isinstance(candidates, list) and candidates:
+                    top_candidate = candidates[0]
+                    if isinstance(top_candidate, dict):
+                        evidence_snippet = top_candidate.get("text")
+                        source_title = top_candidate.get("doc_title") or top_candidate.get("doc_path")
+                        source_doc_id = top_candidate.get("doc_id")
+
+            results.append(
+                {
+                    "claim_id": claim.id,
+                    "sentence": claim.sentence,
+                    "value": claim.value,
+                    "units": claim.units,
+                    "year": claim.year,
+                    "verdict_status": verdict.status.value if verdict else None,
+                    "verdict_confidence": verdict.confidence if verdict else None,
+                    "evidence_snippet": evidence_snippet,
+                    "source_title": source_title,
+                    "source_doc_id": source_doc_id,
+                }
+            )
+
+    return results
 
 
 def _collect_evidence(

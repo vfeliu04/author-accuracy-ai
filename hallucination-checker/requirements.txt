@@ -11,3 +11,6 @@ pymupdf
 nltk
 httpx
 openai
+Flask
+Flask-WTF
+WTForms
