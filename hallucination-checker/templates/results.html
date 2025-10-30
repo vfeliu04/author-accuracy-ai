@@ -5,6 +5,14 @@
   <div>
     <h1 class="h3 mb-1">Verification results</h1>
     <p class="mb-1"><strong>Report:</strong> {{ report.title }} <span class="text-muted">({{ report.filename }})</span></p>
+    <div class="small text-muted">
+      {% if report.author %}
+        <span>Author: {{ report.author }}</span>
+      {% endif %}
+      {% if report.year %}
+        <span class="ms-3">Year: {{ report.year }}</span>
+      {% endif %}
+    </div>
     <div class="small text-muted">Total claims: {{ total_claims }}</div>
     <div class="mt-2">
       <span class="badge bg-success me-2">Supported: {{ status_counts.get('SUPPORTED', 0) }}</span>

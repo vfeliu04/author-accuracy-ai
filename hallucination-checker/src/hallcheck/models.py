@@ -33,6 +33,7 @@ class Document(Base):
     kind: Mapped[DocumentKind] = mapped_column(Enum(DocumentKind), nullable=False)
     path: Mapped[str] = mapped_column(String(512), nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    author: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     chunks: Mapped[List["Chunk"]] = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")

@@ -15,8 +15,8 @@ from .config import settings
 from .db import get_session, init_db, reset_db
 from .embeddings import embed_texts
 from .extract_claims import find_claims
-from .chunking import chunk_text
-from .ingest_pdf import extract_text
+from .chunking import best_sentence_snippet, chunk_text
+from .ingest_pdf import extract_pdf_content
 from .models import (
     Claim,
     Document,
@@ -33,6 +33,7 @@ from .retrieval import (
     save_metadata,
     search_faiss,
 )
+from .gpt import OpenAIUnavailable, score_relevance
 
 
 NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
@@ -54,7 +55,8 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict
         for path_str in pdf_paths:
             pdf_path = Path(path_str)
             try:
-                text = extract_text(str(pdf_path))
+                content = extract_pdf_content(str(pdf_path))
+                text = content.text
             except Exception as exc:
                 print(f"[index] Skipping {pdf_path}: {exc}")
                 continue
@@ -66,13 +68,22 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict
             document = Document(
                 kind=DocumentKind.SOURCE,
                 path=str(pdf_path.resolve()),
-                title=pdf_path.stem,
-                year=None,
+                title=content.title or pdf_path.stem,
+                author=", ".join(content.authors) if content.authors else None,
+                year=content.year,
             )
             session.add(document)
             session.flush()
 
-            segments = chunk_text(text, settings.chunk_tokens, settings.chunk_overlap)
+            segments = chunk_text(
+                text,
+                settings.chunk_tokens,
+                settings.chunk_overlap,
+                min_overlap=settings.chunk_overlap_min,
+                max_overlap=settings.chunk_overlap_max,
+                topic_threshold=settings.chunk_topic_similarity,
+                stable_threshold=settings.chunk_stable_similarity,
+            )
             if not segments:
                 print(f"[index] No chunks produced for {pdf_path}.")
                 continue
@@ -134,7 +145,8 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
         raise RuntimeError("Metadata alignment mismatch.")
 
     report_path = Path(report_pdf)
-    report_text = extract_text(str(report_path))
+    report_content = extract_pdf_content(str(report_path))
+    report_text = report_content.text
     if not report_text.strip():
         print("[verify] No text extracted from report; aborting.")
         return None
@@ -148,8 +160,9 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
         report_doc = Document(
             kind=DocumentKind.REPORT,
             path=str(report_path.resolve()),
-            title=report_path.stem,
-            year=None,
+            title=report_content.title or report_path.stem,
+            author=", ".join(report_content.authors) if report_content.authors else None,
+            year=report_content.year,
         )
         session.add(report_doc)
         session.flush()
@@ -187,6 +200,7 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
             sims = distances[claim_idx]
             neighbors = indices[claim_idx]
             evidence = _collect_evidence(neighbors, sims, chunk_payloads, doc_cache, session)
+            evidence = _refine_evidence(claim, evidence)
             verdict_status, confidence = _decide_verdict(claim, sims, evidence)
             verdict = Verdict(
                 claim_id=claim.id,
@@ -201,7 +215,9 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
                     "status": verdict_status,
                     "confidence": confidence,
                     "claim_text": claim.sentence,
-                    "evidence_text": top_snippet.get("text") if top_snippet else None,
+                    "evidence_text": (
+                        top_snippet.get("snippet") or top_snippet.get("text") if top_snippet else None
+                    ),
                     "source_label": (top_snippet.get("doc_title") or top_snippet.get("doc_path")) if top_snippet else None,
                 }
             )
@@ -227,17 +243,25 @@ def get_verdicts(report_doc_id: int) -> List[dict]:
         for claim in claims:
             verdict = claim.verdicts[0] if claim.verdicts else None
             evidence_snippet = None
+            evidence_full = None
             source_title = None
             source_doc_id = None
+            source_author = None
+            rerank_score = None
+            rerank_label = None
 
             if verdict and isinstance(verdict.evidence, dict):
                 candidates = verdict.evidence.get("candidates")
                 if isinstance(candidates, list) and candidates:
                     top_candidate = candidates[0]
                     if isinstance(top_candidate, dict):
-                        evidence_snippet = top_candidate.get("text")
+                        evidence_snippet = top_candidate.get("snippet") or top_candidate.get("text")
+                        evidence_full = top_candidate.get("text")
                         source_title = top_candidate.get("doc_title") or top_candidate.get("doc_path")
                         source_doc_id = top_candidate.get("doc_id")
+                        source_author = top_candidate.get("doc_author")
+                        rerank_score = top_candidate.get("rerank_score")
+                        rerank_label = top_candidate.get("rerank_label")
 
             results.append(
                 {
@@ -249,8 +273,12 @@ def get_verdicts(report_doc_id: int) -> List[dict]:
                     "verdict_status": verdict.status.value if verdict else None,
                     "verdict_confidence": verdict.confidence if verdict else None,
                     "evidence_snippet": evidence_snippet,
+                    "evidence_full_text": evidence_full,
                     "source_title": source_title,
                     "source_doc_id": source_doc_id,
+                    "source_author": source_author,
+                    "rerank_score": rerank_score,
+                    "rerank_label": rerank_label,
                 }
             )
 
@@ -281,11 +309,72 @@ def _collect_evidence(
                 "doc_id": doc_id,
                 "doc_title": doc.title if doc else None,
                 "doc_path": doc.path if doc else None,
+                "doc_author": doc.author if doc else None,
                 "chunk_id": payload.get("chunk_id"),
                 "text": payload.get("text"),
             }
         )
     return {"candidates": evidence_list}
+
+
+def _refine_evidence(claim: Claim, evidence: Dict[str, object]) -> Dict[str, object]:
+    if not isinstance(evidence, dict):
+        return evidence
+    candidates = evidence.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return evidence
+
+    for candidate in candidates:
+        full_text = candidate.get("text") or ""
+        snippet, snippet_score = best_sentence_snippet(claim.sentence, full_text)
+        if snippet:
+            candidate["snippet"] = snippet
+            candidate["snippet_score"] = snippet_score
+
+    candidates = _apply_rerank(claim, candidates)
+    evidence["candidates"] = candidates
+    return evidence
+
+
+def _apply_rerank(claim: Claim, candidates: List[dict]) -> List[dict]:
+    if not candidates:
+        return candidates
+
+    should_rerank = settings.rerank_with_gpt and bool(settings.openai_api_key)
+    top_limit = max(0, settings.rerank_max_candidates)
+    if should_rerank and top_limit:
+        for candidate in candidates[:top_limit]:
+            snippet = candidate.get("snippet") or candidate.get("text")
+            if not snippet:
+                continue
+            try:
+                score, label = score_relevance(
+                    claim_sentence=claim.sentence,
+                    evidence_snippet=snippet,
+                    retrieval_score=candidate.get("score"),
+                )
+            except OpenAIUnavailable:
+                break
+            except Exception as exc:  # pragma: no cover - defensive logging
+                print(f"[verify] Rerank error for chunk {candidate.get('chunk_id')}: {exc}")
+                continue
+            candidate["rerank_score"] = score
+            if label:
+                candidate["rerank_label"] = label
+
+    sorted_candidates = sorted(
+        candidates,
+        key=lambda c: (
+            1 if c.get("rerank_score") is not None else 0,
+            c.get("rerank_score") if c.get("rerank_score") is not None else 0.0,
+            c.get("snippet_score", 0.0),
+            c.get("score", 0.0),
+        ),
+        reverse=True,
+    )
+    for idx, candidate in enumerate(sorted_candidates):
+        candidate["rank"] = idx
+    return sorted_candidates
 
 
 def _decide_verdict(
@@ -295,7 +384,11 @@ def _decide_verdict(
 ) -> Tuple[VerdictStatus, float]:
     best_score = float(sims[0]) if sims.size else 0.0
     candidates = evidence.get("candidates", []) if isinstance(evidence, dict) else []
-    top_text = candidates[0]["text"] if candidates else ""
+    top_text = ""
+    if candidates:
+        top_candidate = candidates[0]
+        if isinstance(top_candidate, dict):
+            top_text = top_candidate.get("snippet") or top_candidate.get("text") or ""
 
     if best_score < 0.25 or not top_text:
         return VerdictStatus.NOT_FOUND, 0.2
@@ -405,6 +498,10 @@ def _top_evidence_snippet(evidence: Dict[str, object]) -> dict | None:
     first = candidates[0]
     if not isinstance(first, dict):
         return None
+    if "snippet" not in first and isinstance(first.get("text"), str):
+        snippet, _ = best_sentence_snippet("", first.get("text", ""))
+        if snippet:
+            first["snippet"] = snippet
     return first
 
 

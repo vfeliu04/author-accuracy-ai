@@ -1,4 +1,4 @@
-<div id="claim-{{ claim.claim_id }}" class="col-12 claim-card" data-search-text="{{ (claim.sentence or '')|lower }} {{ (claim.evidence_snippet or '')|lower }} {{ (claim.source_title or '')|lower }}">
+<div id="claim-{{ claim.claim_id }}" class="col-12 claim-card" data-search-text="{{ (claim.sentence or '')|lower }} {{ (claim.evidence_snippet or '')|lower }} {{ (claim.source_title or '')|lower }} {{ (claim.source_author or '')|lower }}">
   <div class="card shadow-sm h-100 position-relative">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-start mb-2">
@@ -20,6 +20,14 @@
           n/a
         {% endif %}
       </p>
+      {% if claim.rerank_score is not none %}
+        <p class="small text-muted mt-n2">
+          Relevance: {{ (claim.rerank_score * 100) | round(1) }}%
+          {% if claim.rerank_label %}
+            <span class="text-lowercase">({{ claim.rerank_label }})</span>
+          {% endif %}
+        </p>
+      {% endif %}
       {% if claim.evidence_snippet %}
         {% set snippet = claim.evidence_snippet %}
         <p class="card-text">
@@ -31,6 +39,9 @@
       {% endif %}
       {% if claim.source_title %}
         <p class="card-text"><span class="fw-semibold">Source:</span> {{ claim.source_title }}</p>
+      {% endif %}
+      {% if claim.source_author %}
+        <p class="card-text text-muted small mb-1">Author: {{ claim.source_author }}</p>
       {% endif %}
       {% if claim.value is not none or claim.units or claim.year %}
         <div class="claim-meta small text-muted">

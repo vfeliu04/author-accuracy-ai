@@ -21,7 +21,8 @@ from src.hallcheck.webbridge import (
     fetch_results,
     get_or_make_explanation,
     get_report_details,
-    list_existing_pdfs,
+    list_report_pdfs,
+    list_source_pdfs,
     run_index,
     run_verify,
 )
@@ -37,6 +38,10 @@ uploads_dir = (settings.project_root or Path(__file__).resolve().parent) / "data
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = str(uploads_dir)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB upload cap
+sources_uploads_dir = uploads_dir / "sources"
+reports_uploads_dir = uploads_dir / "reports"
+sources_uploads_dir.mkdir(parents=True, exist_ok=True)
+reports_uploads_dir.mkdir(parents=True, exist_ok=True)
 
 STATUS_BADGES = {
     "SUPPORTED": "bg-success",
@@ -94,20 +99,21 @@ def _dedupe(items: Iterable[str]) -> List[str]:
     return result
 
 
-def save_uploaded_files(files: Iterable[FileStorage]) -> List[str]:
+def save_uploaded_files(files: Iterable[FileStorage], target_dir: Optional[Path] = None) -> List[str]:
     saved_paths: List[str] = []
+    destination_root = target_dir or Path(app.config["UPLOAD_FOLDER"])
     for storage in files:
         if not storage or not storage.filename:
             continue
         filename = secure_filename(storage.filename)
         if not filename or not allowed_file(filename):
             raise ValueError(f"Unsupported file type for '{storage.filename}'.")
-        destination = Path(app.config["UPLOAD_FOLDER"]) / filename
+        destination = destination_root / filename
         counter = 1
         stem = destination.stem
         suffix = destination.suffix
         while destination.exists():
-            destination = Path(app.config["UPLOAD_FOLDER"]) / f"{stem}_{counter}{suffix}"
+            destination = destination_root / f"{stem}_{counter}{suffix}"
             counter += 1
         storage.save(destination)
         saved_paths.append(str(destination.resolve()))
@@ -115,13 +121,13 @@ def save_uploaded_files(files: Iterable[FileStorage]) -> List[str]:
 
 
 def _prepare_index_form(form: IndexSourcesForm) -> None:
-    choices = [(item["path"], item["label"]) for item in list_existing_pdfs()]
+    choices = [(item["path"], item["label"]) for item in list_source_pdfs()]
     form.existing.choices = choices
 
 
 def _prepare_verify_form(form: VerifyReportForm) -> None:
     choices = [("", "-- Select existing report --")]
-    choices.extend((item["path"], item["label"]) for item in list_existing_pdfs())
+    choices.extend((item["path"], item["label"]) for item in list_report_pdfs())
     form.existing.choices = choices
 
 
@@ -153,7 +159,7 @@ def index_sources_route():
 
     upload_paths: List[str] = []
     try:
-        upload_paths = save_uploaded_files(form.uploads.data or [])
+        upload_paths = save_uploaded_files(form.uploads.data or [], target_dir=sources_uploads_dir)
     except ValueError as exc:
         flash(str(exc), "danger")
         return redirect(url_for("home"))
@@ -188,7 +194,7 @@ def verify_report_route():
 
     report_path: Optional[str] = None
     try:
-        uploaded_paths = save_uploaded_files([form.upload.data] if form.upload.data else [])
+        uploaded_paths = save_uploaded_files([form.upload.data] if form.upload.data else [], target_dir=reports_uploads_dir)
         if uploaded_paths:
             report_path = uploaded_paths[0]
         elif form.existing.data:

@@ -22,6 +22,12 @@
             {% if report.filename %}
               <span class="ms-1 text-lowercase">({{ report.filename }})</span>
             {% endif %}
+            {% if report.author %}
+              <span class="ms-3">Author: {{ report.author }}</span>
+            {% endif %}
+            {% if report.year %}
+              <span class="ms-3">Year: {{ report.year }}</span>
+            {% endif %}
           </div>
         {% endif %}
         <div class="small text-muted mt-3">
@@ -35,16 +41,10 @@
             <span class="ms-3">Year: {{ detail.year }}</span>
           {% endif %}
           {% if detail.source_title %}
-            <span class="ms-3">
-              Source:
-              {% if detail.report_doc_id %}
-                <a href="{{ url_for('results', report_doc_id=detail.report_doc_id) }}#claim-{{ detail.claim_id }}" class="link-secondary text-decoration-none">
-                  {{ detail.source_title }}
-                </a>
-              {% else %}
-                {{ detail.source_title }}
-              {% endif %}
-            </span>
+            <span class="ms-3">Source: {{ detail.source_title }}</span>
+          {% endif %}
+          {% if detail.source_author %}
+            <span class="ms-3">Author: {{ detail.source_author }}</span>
           {% endif %}
         </div>
       </div>
@@ -53,6 +53,14 @@
         <span class="badge {{ badge_class }} fs-6">{{ detail.status }}</span>
         {% if detail.confidence is not none %}
           <div class="small text-muted mt-2">Confidence: {{ (detail.confidence * 100) | round(1) }}%</div>
+        {% endif %}
+        {% if detail.rerank_score is not none %}
+          <div class="small text-muted">
+            Relevance: {{ (detail.rerank_score * 100) | round(1) }}%
+            {% if detail.rerank_label %}
+              <span class="text-lowercase">({{ detail.rerank_label }})</span>
+            {% endif %}
+          </div>
         {% endif %}
         <form action="{{ url_for('claim_regen', claim_id=detail.claim_id) }}" method="post" class="mt-3">
           {{ regen_form.hidden_tag() }}
@@ -67,9 +75,15 @@
     </section>
 
     <section class="mb-4">
-      <h2 class="h6 text-uppercase text-muted">Evidence</h2>
+      <h2 class="h6 text-uppercase text-muted">Evidence (top sentences)</h2>
       {% if detail.evidence_text %}
         <div class="text-block bg-light border rounded p-3">{{ detail.evidence_text }}</div>
+        {% if detail.evidence_full_text and detail.evidence_full_text != detail.evidence_text %}
+          <details class="mt-3">
+            <summary class="small text-muted">View full chunk context</summary>
+            <div class="text-block bg-light border rounded p-3 mt-2">{{ detail.evidence_full_text }}</div>
+          </details>
+        {% endif %}
       {% else %}
         <p class="text-muted fst-italic mb-0">No evidence snippet recorded for this claim.</p>
       {% endif %}

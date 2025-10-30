@@ -21,6 +21,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_verdict_explanation_column()
+    _ensure_document_author_column()
 
 
 def reset_db() -> None:
@@ -30,6 +31,7 @@ def reset_db() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     _ensure_verdict_explanation_column()
+    _ensure_document_author_column()
 
 
 @contextmanager
@@ -59,4 +61,19 @@ def _ensure_verdict_explanation_column() -> None:
             connection.execute(text("ALTER TABLE verdicts ADD COLUMN explanation TEXT"))
     except Exception:
         # Failing here should not block the app; legacy databases may require manual migration.
+        pass
+
+
+def _ensure_document_author_column() -> None:
+    """Add the document.author column if missing."""
+    try:
+        with engine.begin() as connection:
+            inspector = inspect(connection)
+            if "documents" not in inspector.get_table_names():
+                return
+            column_names = {col["name"] for col in inspector.get_columns("documents")}
+            if "author" in column_names:
+                return
+            connection.execute(text("ALTER TABLE documents ADD COLUMN author VARCHAR(256)"))
+    except Exception:
         pass

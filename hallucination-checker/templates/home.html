@@ -11,7 +11,7 @@
     <div class="card shadow-sm h-100">
       <div class="card-body">
         <h2 class="h5 mb-3">1. Index sources</h2>
-        <p class="small text-muted">Upload one or more source PDFs, or select files you already placed under <code>data/inputs/</code>. Indexing resets the current source index.</p>
+        <p class="small text-muted">Upload one or more source PDFs, or select files you already placed under <code>data/inputs/sources/</code>. Indexing resets the current source index.</p>
         <form action="{{ url_for('index_sources_route') }}" method="post" enctype="multipart/form-data">
           {{ index_form.hidden_tag() }}
           <div class="mb-3">
@@ -22,11 +22,13 @@
           <div class="mb-3">
             {{ index_form.existing.label(class="form-label") }}
             {{ index_form.existing(class="form-select", multiple=true) }}
-            {% if index_form.existing.choices %}
-              <div class="form-text">Hold Cmd/Ctrl to select more than one file.</div>
-            {% else %}
-              <div class="form-text">No PDFs found yet in <code>data/inputs/</code>.</div>
-            {% endif %}
+            <div class="form-text">
+              {% if index_form.existing.choices %}
+                Hold Cmd/Ctrl to select more than one file.
+              {% else %}
+                No PDFs found yet in <code>data/inputs/sources/</code>.
+              {% endif %}
+            </div>
           </div>
           {{ index_form.submit(class="btn btn-primary") }}
         </form>
@@ -38,7 +40,7 @@
     <div class="card shadow-sm h-100">
       <div class="card-body">
         <h2 class="h5 mb-3">2. Verify report</h2>
-        <p class="small text-muted">Upload a report PDF with numeric claims to verify, or choose one from <code>data/inputs/</code>. The report will be compared against the current source index.</p>
+        <p class="small text-muted">Upload a report PDF with numeric claims to verify, or choose one from <code>data/inputs/reports/</code>. The report will be compared against the current source index.</p>
         <form action="{{ url_for('verify_report_route') }}" method="post" enctype="multipart/form-data">
           {{ verify_form.hidden_tag() }}
           <div class="mb-3">

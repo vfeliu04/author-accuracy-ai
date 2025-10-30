@@ -8,6 +8,7 @@ __all__ = [
     "chunking",
     "embeddings",
     "extract_claims",
+    "gpt",
     "retrieval",
     "verify",
     "cli",
