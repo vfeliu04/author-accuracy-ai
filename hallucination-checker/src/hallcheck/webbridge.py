@@ -11,6 +11,7 @@ from .config import settings
 from .db import get_session, init_db
 from .gpt import OpenAIUnavailable, generate_explanation
 from .models import Chunk, Claim, Document, Verdict
+from .tables import extract_tables_from_text
 from .verify import get_verdicts, index_sources, verify_report
 
 
@@ -101,12 +102,22 @@ def fetch_claim_detail(claim_id: int) -> dict:
         )
 
         candidate = _top_candidate(verdict)
-        snippet, full_text, source_title, source_doc_id, source_author, rerank_score, rerank_label = _resolve_candidate_details(session, candidate)
+        (
+            snippet,
+            full_text,
+            source_title,
+            source_doc_id,
+            source_author,
+            structured_tables,
+            rerank_score,
+            rerank_label,
+        ) = _resolve_candidate_details(session, candidate)
 
         status = verdict.status.value if verdict and verdict.status else "UNKNOWN"
         confidence = float(verdict.confidence) if verdict and verdict.confidence is not None else None
 
-        return {
+        is_table = bool(candidate.get("is_table")) if isinstance(candidate, dict) else False
+        detail = {
             "claim_id": claim.id,
             "sentence": claim.sentence,
             "value": claim.value,
@@ -116,14 +127,42 @@ def fetch_claim_detail(claim_id: int) -> dict:
             "status": status,
             "confidence": confidence,
             "evidence_text": snippet,
-            "evidence_full_text": full_text,
+            "evidence_full_text": None if is_table else full_text,
             "source_title": source_title,
             "source_doc_id": source_doc_id,
             "source_author": source_author,
             "rerank_score": rerank_score,
             "rerank_label": rerank_label,
             "explanation": verdict.explanation if verdict else None,
+            "is_table": is_table,
+            "evidence_is_table": is_table,
         }
+
+        table_html: List[str] = []
+        seen_html: set[str] = set()
+        if structured_tables:
+            for table_meta in structured_tables:
+                if not isinstance(table_meta, dict):
+                    continue
+                html_repr = table_meta.get("html")
+                text_repr = table_meta.get("text")
+                if html_repr and html_repr not in seen_html:
+                    table_html.append(html_repr)
+                    seen_html.add(html_repr)
+                elif text_repr:
+                    for html_candidate in extract_tables_from_text(text_repr):
+                        if html_candidate not in seen_html:
+                            table_html.append(html_candidate)
+                            seen_html.add(html_candidate)
+
+        source_text = full_text or snippet or ""
+        for html_candidate in extract_tables_from_text(source_text):
+            if html_candidate not in seen_html:
+                table_html.append(html_candidate)
+                seen_html.add(html_candidate)
+
+        detail["evidence_tables"] = table_html
+        return detail
 
 
 def get_or_make_explanation(claim_id: int) -> str:
@@ -147,7 +186,7 @@ def get_or_make_explanation(claim_id: int) -> str:
             return verdict.explanation
 
         candidate = _top_candidate(verdict)
-        snippet, full_text, _, _, _, _, _ = _resolve_candidate_details(session, candidate)
+        snippet, full_text, _, _, _, _, _, _ = _resolve_candidate_details(session, candidate)
         evidence_for_prompt = (full_text or snippet or "")[:2000]
 
         payload = {
@@ -220,15 +259,25 @@ def _top_candidate(verdict: Optional[Verdict]) -> Optional[dict]:
 
 def _resolve_candidate_details(
     session, candidate: Optional[dict]
-) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int], Optional[str], Optional[float], Optional[str]]:
+) -> Tuple[
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[int],
+    Optional[str],
+    Optional[List[dict]],
+    Optional[float],
+    Optional[str],
+]:
     if not candidate:
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
     snippet: Optional[str] = candidate.get("snippet")
     evidence_text: Optional[str] = candidate.get("text")
     source_title: Optional[str] = None
     source_doc_id: Optional[int] = None
     source_author: Optional[str] = candidate.get("doc_author")
+    structured_tables: Optional[List[dict]] = candidate.get("tables")
 
     source_doc_id_raw = candidate.get("doc_id")
     if isinstance(source_doc_id_raw, int):
@@ -251,10 +300,13 @@ def _resolve_candidate_details(
         except (TypeError, ValueError):
             chunk_id = None
 
-    if chunk_id is not None and not evidence_text:
+    if chunk_id is not None:
         chunk = session.get(Chunk, chunk_id)
         if chunk:
-            evidence_text = chunk.text
+            if not evidence_text:
+                evidence_text = chunk.text
+            if structured_tables is None:
+                structured_tables = chunk.tables
 
     if evidence_text is None:
         text_value = candidate.get("text")
@@ -276,6 +328,7 @@ def _resolve_candidate_details(
         source_title,
         source_doc_id,
         source_author,
+        structured_tables,
         candidate.get("rerank_score"),
         candidate.get("rerank_label"),
     )

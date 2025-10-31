@@ -76,16 +76,23 @@
 
     <section class="mb-4">
       <h2 class="h6 text-uppercase text-muted">Evidence (top sentences)</h2>
-      {% if detail.evidence_text %}
+      {% if detail.evidence_text and not detail.is_table %}
         <div class="text-block bg-light border rounded p-3">{{ detail.evidence_text }}</div>
-        {% if detail.evidence_full_text and detail.evidence_full_text != detail.evidence_text %}
-          <details class="mt-3">
-            <summary class="small text-muted">View full chunk context</summary>
-            <div class="text-block bg-light border rounded p-3 mt-2">{{ detail.evidence_full_text }}</div>
-          </details>
-        {% endif %}
-      {% else %}
+      {% elif not detail.evidence_tables %}
         <p class="text-muted fst-italic mb-0">No evidence snippet recorded for this claim.</p>
+      {% endif %}
+      {% if detail.evidence_tables %}
+        <div class="table-stack mt-3">
+          {% for table_html in detail.evidence_tables %}
+            <div class="table-responsive mb-3">{{ table_html|safe }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if detail.evidence_full_text and detail.evidence_full_text != detail.evidence_text %}
+        <details class="mt-3">
+          <summary class="small text-muted">View full chunk context</summary>
+          <div class="text-block bg-light border rounded p-3 mt-2">{{ detail.evidence_full_text }}</div>
+        </details>
       {% endif %}
     </section>
 

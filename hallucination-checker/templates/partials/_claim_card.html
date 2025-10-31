@@ -28,7 +28,9 @@
           {% endif %}
         </p>
       {% endif %}
-      {% if claim.evidence_snippet %}
+      {% if claim.evidence_is_table %}
+        <p class="card-text"><span class="fw-semibold">Evidence:</span> The Evidence Is A Table</p>
+      {% elif claim.evidence_snippet %}
         {% set snippet = claim.evidence_snippet %}
         <p class="card-text">
           <span class="fw-semibold">Evidence:</span>

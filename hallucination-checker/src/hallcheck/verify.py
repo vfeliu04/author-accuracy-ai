@@ -39,6 +39,26 @@ from .gpt import OpenAIUnavailable, score_relevance
 NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
 
 
+def _looks_like_table_text(text: str) -> bool:
+    lowered = text.lower()
+    if "rank" in lowered and "country" in lowered:
+        return True
+    tokens = text.split()
+    if not tokens:
+        return False
+    numeric_tokens = sum(1 for token in tokens if re.search(r"\d", token))
+    return numeric_tokens >= 12 and numeric_tokens / len(tokens) > 0.6
+
+
+def _looks_like_table_text(text: str) -> bool:
+    lowered = text.lower()
+    if "rank" in lowered and "country" in lowered:
+        return True
+    numeric_tokens = sum(1 for token in text.split() if re.search(r"\d", token))
+    total_tokens = max(len(text.split()), 1)
+    return numeric_tokens / total_tokens > 0.6 and numeric_tokens >= 12
+
+
 def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict:
     """Index a collection of source PDFs and return a summary."""
     summary = {"number_of_docs": 0, "number_of_chunks": 0, "index_name": index_name}
@@ -92,19 +112,27 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict
 
             offset = 0
             for segment in segments:
+                segment_tables: List[dict] = []
+                clean_segment = segment
+                for marker, table_meta in (content.tables or {}).items():
+                    if marker in clean_segment:
+                        segment_tables.append(dict(table_meta))
+                        clean_segment = clean_segment.replace(marker, " ")
+                clean_segment = " ".join(clean_segment.split())
                 start = offset
-                end = start + len(segment)
+                end = start + len(clean_segment)
                 offset = end
                 chunk = Chunk(
                     doc_id=document.id,
                     start=start,
                     end=end,
-                    text=segment,
+                    text=clean_segment,
                     embedding_dim=None,
+                    tables=segment_tables or None,
                 )
                 session.add(chunk)
                 session.flush()
-                chunk_records.append((chunk, segment))
+                chunk_records.append((chunk, clean_segment))
 
         if not chunk_records:
             print("[index] No chunks persisted; aborting index build.")
@@ -124,7 +152,12 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict
         build_faiss(embeddings, dim, index_name)
         doc_ids = [chunk.doc_id for chunk, _ in chunk_records]
         chunk_payloads = [
-            {"chunk_id": chunk.id, "doc_id": chunk.doc_id, "text": text}
+            {
+                "chunk_id": chunk.id,
+                "doc_id": chunk.doc_id,
+                "text": text,
+                "tables": chunk.tables,
+            }
             for chunk, text in chunk_records
         ]
         save_metadata(index_name, doc_ids, chunk_payloads)
@@ -249,6 +282,7 @@ def get_verdicts(report_doc_id: int) -> List[dict]:
             source_author = None
             rerank_score = None
             rerank_label = None
+            is_table = False
 
             if verdict and isinstance(verdict.evidence, dict):
                 candidates = verdict.evidence.get("candidates")
@@ -256,7 +290,8 @@ def get_verdicts(report_doc_id: int) -> List[dict]:
                     top_candidate = candidates[0]
                     if isinstance(top_candidate, dict):
                         evidence_snippet = top_candidate.get("snippet") or top_candidate.get("text")
-                        evidence_full = top_candidate.get("text")
+                        is_table = bool(top_candidate.get("is_table"))
+                        evidence_full = None if is_table else top_candidate.get("text")
                         source_title = top_candidate.get("doc_title") or top_candidate.get("doc_path")
                         source_doc_id = top_candidate.get("doc_id")
                         source_author = top_candidate.get("doc_author")
@@ -279,6 +314,8 @@ def get_verdicts(report_doc_id: int) -> List[dict]:
                     "source_author": source_author,
                     "rerank_score": rerank_score,
                     "rerank_label": rerank_label,
+                    "is_table": is_table,
+                    "evidence_is_table": is_table,
                 }
             )
 
@@ -302,6 +339,11 @@ def _collect_evidence(
         if doc_id not in doc_cache:
             doc_cache[doc_id] = session.get(Document, doc_id)
         doc = doc_cache[doc_id]
+        tables = payload.get("tables")
+        if payload.get("chunk_id") is not None and tables is None:
+            chunk = session.get(Chunk, payload.get("chunk_id"))
+            if chunk:
+                tables = chunk.tables
         evidence_list.append(
             {
                 "rank": rank,
@@ -312,6 +354,7 @@ def _collect_evidence(
                 "doc_author": doc.author if doc else None,
                 "chunk_id": payload.get("chunk_id"),
                 "text": payload.get("text"),
+                "tables": tables,
             }
         )
     return {"candidates": evidence_list}
@@ -326,10 +369,23 @@ def _refine_evidence(claim: Claim, evidence: Dict[str, object]) -> Dict[str, obj
 
     for candidate in candidates:
         full_text = candidate.get("text") or ""
-        snippet, snippet_score = best_sentence_snippet(claim.sentence, full_text)
-        if snippet:
-            candidate["snippet"] = snippet
-            candidate["snippet_score"] = snippet_score
+        tables = candidate.get("tables")
+
+        if isinstance(tables, list) and tables:
+            candidate["snippet"] = full_text.strip()
+            candidate["snippet_score"] = 1.0
+            candidate["is_table"] = True
+            continue
+
+        if _looks_like_table_text(full_text):
+            candidate["snippet"] = full_text.strip()
+            candidate["snippet_score"] = 1.0
+            candidate["is_table"] = True
+        else:
+            snippet, snippet_score = best_sentence_snippet(claim.sentence, full_text)
+            if snippet:
+                candidate["snippet"] = snippet
+                candidate["snippet_score"] = snippet_score
 
     candidates = _apply_rerank(claim, candidates)
     evidence["candidates"] = candidates

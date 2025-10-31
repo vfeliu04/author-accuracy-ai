@@ -85,6 +85,7 @@ The original CLI (`python -m src.hallcheck.cli ...`) continues to work unchanged
 - After FAISS retrieval, candidate chunks are trimmed to the most relevant sentences and (optionally) reranked with `gpt-4o-mini` for a refined relevance score.
 - The top reranked snippet feeds the verdict heuristics, cached explanations, and UI, yielding shorter yet accurate evidence.
 - During ingestion we rely on the `unstructured` library to pull narrative text and metadata (title, authors, publication year); only the cleaned body text is chunked and indexed, cutting out headers, footers, and reference noise.
+- When verification surfaces a chunk that contains tabular data, the UI renders the table (using stored HTML when available and a text-to-table heuristic otherwise) so evidence like the Global Hunger Index appears as an actual grid instead of flattened text.
 
 ### Tunable settings
 Configure the pipeline via environment variables:

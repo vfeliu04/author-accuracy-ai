@@ -32,3 +32,35 @@ details summary {
 details[open] summary {
   font-weight: 600;
 }
+
+.table-responsive {
+  overflow-x: auto;
+}
+
+.evidence-table-text {
+  white-space: pre-wrap;
+}
+.table-stack .table-responsive {
+  border: 1px solid #dee2e6;
+  border-radius: 0.5rem;
+  background-color: #fff;
+}
+
+.evidence-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.evidence-table th,
+.evidence-table td {
+  border: 1px solid #dee2e6;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.evidence-table thead th {
+  background-color: #f1f3f5;
+  font-weight: 600;
+}

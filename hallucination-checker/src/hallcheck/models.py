@@ -51,6 +51,7 @@ class Chunk(Base):
     end: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding_dim: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    tables: Mapped[Optional[List[dict]]] = mapped_column(JSON, nullable=True)
 
     document: Mapped[Document] = relationship("Document", back_populates="chunks")
 
