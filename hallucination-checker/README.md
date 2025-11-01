@@ -1,3 +1,11 @@
+# To Do:
+
+- Fix the PDF reader. If the PDFs vary (financial reports, research papers, product docs, scans, etc.), the trick is to route each file to the right extractor and keep a generic fallback when there’s no perfect specialist. You don’t need to build heavy ML to get good results.
+- Fix the table output, at the moment the start of the evidence is for some reason showing as text and the rest as table. 
+
+- Still a major problem when reading the data from the PDF, this is something which is maybe disrupting the algorithm, solving this would help overall. 
+
+
 # Hallucination Checker
 
 A lightweight verification pipeline that compares factual claims made in a PDF report against supporting source PDFs. The project ships both a command-line interface (CLI) for scripted workflows and a Flask web interface for interactive exploration of results.

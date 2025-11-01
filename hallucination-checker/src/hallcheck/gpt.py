@@ -69,6 +69,32 @@ def score_relevance(claim_sentence: str, evidence_snippet: str, retrieval_score:
     return _parse_score_response(text)
 
 
+def confirm_entity_alignment(claim_sentence: str, evidence_snippet: str) -> Tuple[Optional[bool], Optional[float], Optional[str]]:
+    """Use GPT to judge whether claim and evidence describe the same entities."""
+    client = ensure_openai_client()
+    system_prompt = (
+        "Determine whether the claim text and the evidence refer to the same primary entities. "
+        "Return JSON like {\"match\": true, \"confidence\": 0.82, \"reason\": \"entities align\"}. "
+        "Use confidence between 0 and 1 to reflect how certain you are. "
+        "Answer true only when the subjects and objects truly match; if the evidence talks about different items, respond with false."
+    )
+    payload = {
+        "claim": claim_sentence,
+        "evidence": evidence_snippet,
+    }
+    text = _run_model(
+        client,
+        model=settings.rerank_model,
+        system_prompt=system_prompt,
+        user_payload=payload,
+        max_tokens=180,
+    )
+    if not text:
+        return None, None, None
+    match, confidence, reason = _parse_alignment_response(text)
+    return match, confidence, reason
+
+
 def _run_model(
     client: OpenAI,
     *,
@@ -187,6 +213,43 @@ def _parse_score_response(text: str) -> Tuple[float, Optional[str]]:
     return _clamp_score(score), _normalize_label(label)
 
 
+def _parse_alignment_response(text: str) -> Tuple[Optional[bool], Optional[float], Optional[str]]:
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            match_value = data.get("match")
+            confidence_value = data.get("confidence") or data.get("certainty") or data.get("score")
+            reason = data.get("reason") or data.get("explanation")
+            confidence = _safe_float(confidence_value)
+            if isinstance(match_value, bool):
+                return match_value, confidence, reason
+            if isinstance(match_value, str):
+                lowered = match_value.strip().lower()
+                if lowered in {"true", "yes", "match", "matched", "aligned", "same"}:
+                    return True, confidence, reason
+                if lowered in {"false", "no", "different", "mismatch", "not"}:
+                    return False, confidence, reason
+        if isinstance(data, bool):
+            return data, None, None
+    except Exception:
+        pass
+
+    lowered_text = text.lower()
+    if "\"match\"" in lowered_text:
+        bool_match = re.search(r"\"match\"\s*:\s*(true|false)", lowered_text)
+        if bool_match:
+            inferred_conf = None
+            confidence_match = re.search(r"\"confidence\"\s*:\s*(0?\.\d+|1(?:\.0+)?)", lowered_text)
+            if confidence_match:
+                inferred_conf = _safe_float(confidence_match.group(1))
+            return bool_match.group(1) == "true", inferred_conf, None
+    if "true" in lowered_text and "false" not in lowered_text:
+        return True, None, None
+    if "false" in lowered_text and "true" not in lowered_text:
+        return False, None, None
+    return None, None, None
+
+
 def _clamp_score(value: float) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -205,3 +268,10 @@ def _normalize_label(label: Optional[str]) -> Optional[str]:
     if lowered in {"irrelevant", "not_found", "not found"}:
         return "irrelevant"
     return lowered
+
+
+def _safe_float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None

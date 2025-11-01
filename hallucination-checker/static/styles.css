@@ -64,3 +64,75 @@ details[open] summary {
   background-color: #f1f3f5;
   font-weight: 600;
 }
+
+.candidate-option-stack {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.verify-progress {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  justify-content: center;
+  min-height: 4rem;
+}
+
+.candidate-option {
+  align-items: flex-start;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 14rem;
+  text-align: left;
+}
+
+.candidate-option.active {
+  color: #fff;
+}
+
+.candidate-option .candidate-option-title {
+  font-weight: 600;
+}
+
+.candidate-option .candidate-option-meta {
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+
+.summary-panel {
+  min-width: 18rem;
+}
+
+.evidence-summary {
+  background-color: #f8f9fb;
+  border: 1px solid #dee2e6;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+.summary-row + .summary-row {
+  margin-top: 0.75rem;
+}
+
+.summary-label {
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.summary-value {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.summary-desc {
+  margin-top: 0.25rem;
+}
+
+.summary-rationale {
+  border-left: 3px solid #ced4da;
+  padding-left: 0.75rem;
+}

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+from itertools import combinations
 from pathlib import Path
 from textwrap import shorten
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple, Set, Optional
 
 import numpy as np
+from rapidfuzz import fuzz
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -33,10 +35,125 @@ from .retrieval import (
     save_metadata,
     search_faiss,
 )
-from .gpt import OpenAIUnavailable, score_relevance
+from .gpt import OpenAIUnavailable, score_relevance, confirm_entity_alignment
 
 
 NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
+
+_STOPWORDS: Set[str] = {
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "of",
+    "to",
+    "in",
+    "on",
+    "for",
+    "with",
+    "by",
+    "from",
+    "that",
+    "this",
+    "these",
+    "those",
+    "as",
+    "at",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "it",
+    "its",
+    "their",
+    "there",
+    "which",
+    "who",
+    "whom",
+    "into",
+    "over",
+    "under",
+    "more",
+    "less",
+    "than",
+    "since",
+    "per",
+    "each",
+    "any",
+    "most",
+    "many",
+    "much",
+    "also",
+    "because",
+    "while",
+    "where",
+    "when",
+    "if",
+    "so",
+    "but",
+    "about",
+    "across",
+    "such",
+}
+
+_GENERIC_ENTITY_TERMS: Set[str] = {
+    "country",
+    "countries",
+    "people",
+    "person",
+    "population",
+    "populations",
+    "level",
+    "levels",
+    "rate",
+    "rates",
+    "number",
+    "numbers",
+    "percent",
+    "percentage",
+    "share",
+    "shares",
+    "score",
+    "scores",
+    "index",
+    "indexes",
+    "indices",
+    "value",
+    "values",
+    "figure",
+    "figures",
+    "total",
+    "overall",
+    "global",
+    "world",
+    "report",
+    "table",
+    "tables",
+    "year",
+    "years",
+    "region",
+    "regions",
+    "area",
+    "areas",
+    "state",
+    "states",
+    "province",
+    "provinces",
+    "city",
+    "cities",
+    "group",
+    "groups",
+    "category",
+    "categories",
+}
+
+
+ALIGNMENT_DEFAULT_CONFIDENCE = 0.55
+ALIGNMENT_OVERRIDE_MARGIN = 0.15
+ALIGNMENT_PENALTY = 0.12
 
 
 def _looks_like_table_text(text: str) -> bool:
@@ -57,6 +174,71 @@ def _looks_like_table_text(text: str) -> bool:
     numeric_tokens = sum(1 for token in text.split() if re.search(r"\d", token))
     total_tokens = max(len(text.split()), 1)
     return numeric_tokens / total_tokens > 0.6 and numeric_tokens >= 12
+
+
+def _normalize_entity_term(term: str) -> str | None:
+    cleaned = term.strip("-'\"")
+    if len(cleaned) < 3:
+        return None
+    if cleaned.endswith("ed") or cleaned.endswith("ing"):
+        return None
+    if cleaned in _STOPWORDS or cleaned in _GENERIC_ENTITY_TERMS:
+        return None
+    if cleaned.isdigit():
+        return None
+    if cleaned.endswith("ies") and len(cleaned) > 4:
+        cleaned = cleaned[:-3] + "y"
+    elif cleaned.endswith("ses") and len(cleaned) > 4:
+        cleaned = cleaned[:-2]
+    elif cleaned.endswith("s") and not cleaned.endswith("ss") and len(cleaned) > 3:
+        cleaned = cleaned[:-1]
+    return cleaned
+
+
+def _extract_entity_terms(text: str) -> Set[str]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z\-']+", text.lower())
+    normalized_terms: Set[str] = set()
+    filtered_tokens: List[str] = []
+    for token in tokens:
+        normalized = _normalize_entity_term(token)
+        if normalized:
+            normalized_terms.add(normalized)
+            filtered_tokens.append(normalized)
+    # add simple bigrams of filtered tokens for additional context
+    for idx in range(len(filtered_tokens) - 1):
+        first, second = filtered_tokens[idx], filtered_tokens[idx + 1]
+        if first == second:
+            continue
+        bigram = f"{first} {second}"
+        if first not in _GENERIC_ENTITY_TERMS or second not in _GENERIC_ENTITY_TERMS:
+            normalized_terms.add(bigram)
+    return normalized_terms
+
+
+def _entity_guard_allows_support(claim_text: str, evidence_text: str) -> bool:
+    claim_terms = _extract_entity_terms(claim_text)
+    evidence_terms = _extract_entity_terms(evidence_text)
+    if not claim_terms or not evidence_terms:
+        return True
+    if claim_terms & evidence_terms:
+        return True
+    for claim_term in claim_terms:
+        for evidence_term in evidence_terms:
+            if fuzz.token_sort_ratio(claim_term, evidence_term) >= 85:
+                return True
+    return False
+
+
+def _confirm_entity_alignment(claim_text: str, evidence_text: str) -> Tuple[Optional[bool], Optional[float], Optional[str]]:
+    if not claim_text or not evidence_text or not settings.openai_api_key:
+        return None, None, None
+    try:
+        return confirm_entity_alignment(claim_text, evidence_text)
+    except OpenAIUnavailable:
+        return None, None, None
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[verify] Entity alignment check failed: {exc}")
+        return None, None, None
 
 
 def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict:
@@ -355,6 +537,7 @@ def _collect_evidence(
                 "chunk_id": payload.get("chunk_id"),
                 "text": payload.get("text"),
                 "tables": tables,
+                "method": payload.get("method") or "faiss",
             }
         )
     return {"candidates": evidence_list}
@@ -417,6 +600,7 @@ def _apply_rerank(claim: Claim, candidates: List[dict]) -> List[dict]:
             candidate["rerank_score"] = score
             if label:
                 candidate["rerank_label"] = label
+            candidate["method"] = "gpt_rerank"
 
     sorted_candidates = sorted(
         candidates,
@@ -440,52 +624,176 @@ def _decide_verdict(
 ) -> Tuple[VerdictStatus, float]:
     best_score = float(sims[0]) if sims.size else 0.0
     candidates = evidence.get("candidates", []) if isinstance(evidence, dict) else []
+    top_candidate: Optional[dict] = None
     top_text = ""
+    top_rerank_score = 0.0
+    top_rerank_label: Optional[str] = None
+    evaluation_text = ""
     if candidates:
-        top_candidate = candidates[0]
-        if isinstance(top_candidate, dict):
+        possible_candidate = candidates[0]
+        if isinstance(possible_candidate, dict):
+            top_candidate = possible_candidate
             top_text = top_candidate.get("snippet") or top_candidate.get("text") or ""
+            evaluation_text = top_candidate.get("text") or top_text
+            try:
+                if top_candidate.get("rerank_score") is not None:
+                    top_rerank_score = float(top_candidate.get("rerank_score"))
+            except (TypeError, ValueError):
+                top_rerank_score = 0.0
+            label = top_candidate.get("rerank_label")
+            if isinstance(label, str):
+                top_rerank_label = label.lower().strip()
+
+    def _set_candidate_meta(key: str, value) -> None:
+        if top_candidate is not None and isinstance(top_candidate, dict):
+            top_candidate[key] = value
 
     if best_score < 0.25 or not top_text:
         return VerdictStatus.NOT_FOUND, 0.2
 
+    evaluation_text = evaluation_text or top_text
+
     year_match = True
     if claim.year:
-        year_match = str(claim.year) in top_text
+        year_match = str(claim.year) in evaluation_text
 
-    numeric_status = _evaluate_numeric_alignment(claim, top_text)
+    numbers_in_evidence: List[float] = []
+    if claim.value is not None and evaluation_text:
+        numbers_in_evidence = _extract_numbers(evaluation_text)
+
+    numeric_status = _evaluate_numeric_alignment(claim, evaluation_text, numbers_in_evidence or None)
     if numeric_status == "match":
-        confidence = _clamp(0.6 + 0.4 * best_score, 0.0, 0.95)
-        if not year_match:
-            confidence = _clamp(confidence - 0.2, 0.1, 0.9)
-        return VerdictStatus.SUPPORTED, confidence
-    if numeric_status == "conflict":
-        confidence = _clamp(0.5 + 0.3 * (1 - abs(best_score - 0.5)), 0.2, 0.9)
-        if not year_match:
-            confidence = _clamp(confidence - 0.1, 0.1, 0.8)
-        return VerdictStatus.CONTRADICTED, confidence
+        _set_candidate_meta("numeric_match", "exact")
+    elif numeric_status == "match_sum":
+        _set_candidate_meta("numeric_match", "sum")
+    elif numeric_status == "conflict":
+        _set_candidate_meta("numeric_match", "conflict")
+    else:
+        _set_candidate_meta("numeric_match", None)
 
-    if best_score >= 0.45:
-        confidence = _clamp(0.4 + 0.5 * best_score, 0.2, 0.8)
-        if not year_match:
-            confidence = _clamp(confidence - 0.2, 0.1, 0.7)
-        return VerdictStatus.SUPPORTED, confidence
+    candidate_status: Optional[VerdictStatus] = None
+    candidate_confidence: float = 0.0
 
-    confidence = _clamp(0.2 + 0.4 * best_score, 0.1, 0.6)
+    if numeric_status in {"match", "match_sum"}:
+        candidate_status = VerdictStatus.SUPPORTED
+        candidate_confidence = _clamp(0.6 + 0.4 * best_score, 0.0, 0.95)
+        if numeric_status == "match_sum":
+            candidate_confidence = _clamp(candidate_confidence - 0.15, 0.1, 0.85)
+    elif numeric_status == "conflict":
+        candidate_status = VerdictStatus.CONTRADICTED
+        candidate_confidence = _clamp(0.5 + 0.3 * (1 - abs(best_score - 0.5)), 0.2, 0.9)
+    else:
+        if claim.value is not None:
+            if not numbers_in_evidence:
+                gpt_supports = bool(top_rerank_label == "supported" and top_rerank_score >= 0.7)
+                gpt_contradicts = bool(top_rerank_label == "contradicted" and top_rerank_score >= 0.6)
+                if gpt_supports:
+                    candidate_status = VerdictStatus.SUPPORTED
+                    candidate_confidence = _clamp(0.35 + 0.35 * best_score, 0.15, 0.65)
+                    _set_candidate_meta("verdict_source", "gpt_support")
+                elif gpt_contradicts:
+                    candidate_status = VerdictStatus.CONTRADICTED
+                    candidate_confidence = _clamp(0.3 + 0.3 * best_score, 0.15, 0.6)
+                    _set_candidate_meta("verdict_source", "gpt_contradict")
+                else:
+                    confidence = _clamp(0.2 + 0.3 * best_score, 0.1, 0.5)
+                    if not year_match:
+                        confidence = _clamp(confidence - 0.1, 0.1, 0.5)
+                    return VerdictStatus.NOT_FOUND, confidence
+            else:
+                gpt_supports = bool(top_rerank_label == "supported" and top_rerank_score >= 0.7)
+                gpt_contradicts = bool(top_rerank_label == "contradicted" and top_rerank_score >= 0.6)
+                if gpt_supports:
+                    candidate_status = VerdictStatus.SUPPORTED
+                    candidate_confidence = _clamp(0.35 + 0.35 * best_score, 0.15, 0.7)
+                    _set_candidate_meta("verdict_source", "gpt_support")
+                elif gpt_contradicts:
+                    candidate_status = VerdictStatus.CONTRADICTED
+                    candidate_confidence = _clamp(0.3 + 0.3 * best_score, 0.15, 0.65)
+                    _set_candidate_meta("verdict_source", "gpt_contradict")
+                else:
+                    confidence = _clamp(0.25 + 0.3 * best_score, 0.1, 0.55)
+                    if not year_match:
+                        confidence = _clamp(confidence - 0.1, 0.1, 0.5)
+                    return VerdictStatus.NOT_FOUND, confidence
+
+        if candidate_status is None:
+            if best_score >= 0.45:
+                candidate_status = VerdictStatus.SUPPORTED
+                candidate_confidence = _clamp(0.4 + 0.5 * best_score, 0.2, 0.8)
+            else:
+                confidence = _clamp(0.2 + 0.4 * best_score, 0.1, 0.6)
+                if not year_match:
+                    confidence = _clamp(confidence - 0.1, 0.1, 0.5)
+                return VerdictStatus.NOT_FOUND, confidence
+
+    if candidate_status is None:
+        confidence = _clamp(0.2 + 0.4 * best_score, 0.1, 0.6)
+        if not year_match:
+            confidence = _clamp(confidence - 0.1, 0.1, 0.5)
+        return VerdictStatus.NOT_FOUND, confidence
+
     if not year_match:
-        confidence = _clamp(confidence - 0.1, 0.1, 0.5)
-    return VerdictStatus.NOT_FOUND, confidence
+        if candidate_status == VerdictStatus.SUPPORTED:
+            candidate_confidence = _clamp(candidate_confidence - 0.2, 0.1, 0.9)
+        elif candidate_status == VerdictStatus.CONTRADICTED:
+            candidate_confidence = _clamp(candidate_confidence - 0.1, 0.1, 0.8)
+
+    if not _entity_guard_allows_support(claim.sentence, evaluation_text):
+        fallback_confidence = _clamp(0.2 + 0.3 * best_score, 0.1, 0.55)
+        return VerdictStatus.NOT_FOUND, fallback_confidence
+
+    alignment_match, alignment_confidence, alignment_reason = _confirm_entity_alignment(claim.sentence, evaluation_text)
+    effective_alignment_conf = alignment_confidence if alignment_confidence is not None else ALIGNMENT_DEFAULT_CONFIDENCE
+    _set_candidate_meta("alignment_reason", alignment_reason)
+
+    if alignment_match is False:
+        override_threshold = max(candidate_confidence - ALIGNMENT_OVERRIDE_MARGIN, 0.3)
+        if effective_alignment_conf >= override_threshold:
+            _set_candidate_meta("alignment_match", False)
+            _set_candidate_meta("alignment_confidence", effective_alignment_conf)
+            _set_candidate_meta("alignment_vetoed", True)
+            _set_candidate_meta("verdict_source", "alignment_override")
+            fallback_confidence = _clamp(min(candidate_confidence, effective_alignment_conf), 0.1, 0.6)
+            return VerdictStatus.NOT_FOUND, fallback_confidence
+        candidate_confidence = _clamp(candidate_confidence - ALIGNMENT_PENALTY, 0.1, 0.9)
+        _set_candidate_meta("alignment_match", False)
+        _set_candidate_meta("alignment_confidence", effective_alignment_conf)
+        _set_candidate_meta("alignment_vetoed", False)
+    elif alignment_match is True:
+        if effective_alignment_conf >= candidate_confidence + 0.05:
+            candidate_confidence = _clamp((candidate_confidence + effective_alignment_conf) / 2, candidate_confidence, 0.9)
+        elif effective_alignment_conf <= 0.35:
+            candidate_confidence = _clamp(candidate_confidence - ALIGNMENT_PENALTY / 2, 0.1, 0.9)
+        _set_candidate_meta("alignment_match", True)
+        _set_candidate_meta("alignment_confidence", effective_alignment_conf)
+        _set_candidate_meta("alignment_vetoed", False)
+    else:
+        _set_candidate_meta("alignment_match", None)
+        _set_candidate_meta("alignment_confidence", effective_alignment_conf)
+
+    _set_candidate_meta("final_confidence", candidate_confidence)
+    if top_candidate is not None and isinstance(top_candidate, dict) and "verdict_source" not in top_candidate:
+        top_candidate["verdict_source"] = "heuristic"
+
+    return candidate_status, candidate_confidence
 
 
-def _evaluate_numeric_alignment(claim: Claim, evidence_text: str) -> str | None:
+def _evaluate_numeric_alignment(
+    claim: Claim,
+    evidence_text: str,
+    numbers: List[float] | None = None,
+) -> str | None:
     if claim.value is None:
         return None
-    numbers = _extract_numbers(evidence_text)
+    if numbers is None:
+        numbers = _extract_numbers(evidence_text)
     if not numbers:
         return None
 
     tolerance_absolute = 0.05
     tolerance_relative = 0.1
+    conflict_relative = 0.12
 
     for number in numbers:
         if not _units_match(claim.units, evidence_text):
@@ -496,7 +804,18 @@ def _evaluate_numeric_alignment(claim: Claim, evidence_text: str) -> str | None:
             return "match"
 
     if _units_match(claim.units, evidence_text):
-        return "conflict"
+        if _numbers_sum_to_claim(
+            claim.value,
+            numbers,
+            tolerance_absolute=tolerance_absolute,
+            tolerance_relative=tolerance_relative,
+        ):
+            return "match_sum"
+        for number in numbers:
+            diff = abs(number - claim.value)
+            rel = diff / max(abs(claim.value), 1e-6)
+            if rel <= conflict_relative:
+                return "conflict"
     return None
 
 
@@ -507,6 +826,31 @@ def _extract_numbers(text: str) -> List[float]:
         if parsed is not None:
             numbers.append(parsed)
     return numbers
+
+
+def _numbers_sum_to_claim(
+    claim_value: float,
+    numbers: Sequence[float],
+    *,
+    tolerance_absolute: float,
+    tolerance_relative: float,
+) -> bool:
+    claim_abs = abs(claim_value)
+    if claim_abs == 0:
+        return False
+    upper_bound = max(claim_abs * 1.5, claim_abs + tolerance_absolute)
+    filtered = [abs(num) for num in numbers if 0 < abs(num) <= upper_bound]
+    if not filtered:
+        return False
+    max_subset = min(len(filtered), 4)
+    for subset_size in range(2, max_subset + 1):
+        for combo in combinations(filtered, subset_size):
+            total = sum(combo)
+            diff = abs(total - claim_abs)
+            rel = diff / max(claim_abs, 1e-6)
+            if diff <= tolerance_absolute or rel <= tolerance_relative:
+                return True
+    return False
 
 
 def _parse_number(token: str) -> float | None:

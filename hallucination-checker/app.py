@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from flask import Flask, flash, redirect, render_template, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 from flask_wtf import FlaskForm
 from flask_wtf.csrf import CSRFProtect
 from flask_wtf.file import FileAllowed, FileField, MultipleFileField
@@ -18,6 +18,7 @@ from src.hallcheck.config import settings
 from src.hallcheck.webbridge import (
     clear_explanation,
     fetch_claim_detail,
+    fetch_candidate_preview,
     fetch_results,
     get_or_make_explanation,
     get_report_details,
@@ -32,7 +33,7 @@ ALLOWED_EXTENSIONS = {"pdf"}
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-me")
-CSRFProtect(app)
+csrf = CSRFProtect(app)
 
 uploads_dir = (settings.project_root or Path(__file__).resolve().parent) / "data" / "inputs"
 uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -293,6 +294,28 @@ def claim_regen(claim_id: int):
         flash("Explanation regenerated.", "success")
 
     return redirect(url_for("claim_detail", claim_id=claim_id))
+
+
+@csrf.exempt
+@app.post("/claim/<int:claim_id>/candidate")
+def claim_candidate_preview(claim_id: int):
+    data = request.get_json(silent=True) or {}
+    candidate_index_raw = data.get("candidate_index")
+    try:
+        candidate_index = int(candidate_index_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "candidate_index must be an integer."}), 400
+
+    try:
+        payload = fetch_candidate_preview(claim_id, candidate_index)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except Exception:
+        return jsonify({"error": "Unable to load evidence candidate."}), 500
+
+    return jsonify(payload)
 
 
 if __name__ == "__main__":  # pragma: no cover
