@@ -23,6 +23,7 @@ def init_db() -> None:
     _ensure_verdict_explanation_column()
     _ensure_document_author_column()
     _ensure_chunk_tables_column()
+    _ensure_document_pipeline_columns()
 
 
 def reset_db() -> None:
@@ -34,6 +35,7 @@ def reset_db() -> None:
     _ensure_verdict_explanation_column()
     _ensure_document_author_column()
     _ensure_chunk_tables_column()
+    _ensure_document_pipeline_columns()
 
 
 @contextmanager
@@ -92,5 +94,27 @@ def _ensure_chunk_tables_column() -> None:
             if "tables" in column_names:
                 return
             connection.execute(text("ALTER TABLE chunks ADD COLUMN tables JSON"))
+    except Exception:
+        pass
+
+
+def _ensure_document_pipeline_columns() -> None:
+    """Add router_label/is_scanned/content_hash/extractor_chain/document_json columns if missing."""
+    try:
+        with engine.begin() as connection:
+            inspector = inspect(connection)
+            if "documents" not in inspector.get_table_names():
+                return
+            column_names = {col["name"] for col in inspector.get_columns("documents")}
+            if "router_label" not in column_names:
+                connection.execute(text("ALTER TABLE documents ADD COLUMN router_label VARCHAR(64)"))
+            if "is_scanned" not in column_names:
+                connection.execute(text("ALTER TABLE documents ADD COLUMN is_scanned BOOLEAN"))
+            if "content_hash" not in column_names:
+                connection.execute(text("ALTER TABLE documents ADD COLUMN content_hash VARCHAR(128)"))
+            if "extractor_chain" not in column_names:
+                connection.execute(text("ALTER TABLE documents ADD COLUMN extractor_chain JSON"))
+            if "document_json" not in column_names:
+                connection.execute(text("ALTER TABLE documents ADD COLUMN document_json JSON"))
     except Exception:
         pass

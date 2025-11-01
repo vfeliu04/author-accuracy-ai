@@ -29,6 +29,8 @@ class Settings(BaseModel):
     rerank_with_gpt: bool = Field(default=True, alias="RERANK_WITH_GPT")
     rerank_model: str = Field(default="gpt-4o-mini", alias="RERANK_MODEL")
     rerank_max_candidates: int = Field(default=5, alias="RERANK_MAX_CANDIDATES")
+    pdf_pipeline_legacy: bool = Field(default=False, alias="PDF_PIPELINE_LEGACY")
+    format_tables_with_gpt: bool = Field(default=True, alias="TABLES_FORMAT_WITH_GPT")
     project_root: Optional[Path] = None
 
     @classmethod
@@ -48,6 +50,8 @@ class Settings(BaseModel):
             "RERANK_WITH_GPT": os.getenv("RERANK_WITH_GPT", "true").lower() not in {"0", "false", "no"},
             "RERANK_MODEL": os.getenv("RERANK_MODEL", "gpt-4o-mini"),
             "RERANK_MAX_CANDIDATES": int(os.getenv("RERANK_MAX_CANDIDATES", 5)),
+            "PDF_PIPELINE_LEGACY": os.getenv("PDF_PIPELINE_LEGACY", "false").lower() in {"1", "true", "yes"},
+            "TABLES_FORMAT_WITH_GPT": os.getenv("TABLES_FORMAT_WITH_GPT", "true").lower() not in {"0", "false", "no"},
         }
         root_env = os.getenv("HALLCHECK_ROOT")
         root_path = Path(root_env).resolve() if root_env else Path.cwd()

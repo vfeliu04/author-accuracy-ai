@@ -1,9 +1,9 @@
 # To Do:
 
-- Fix the PDF reader. If the PDFs vary (financial reports, research papers, product docs, scans, etc.), the trick is to route each file to the right extractor and keep a generic fallback when there’s no perfect specialist. You don’t need to build heavy ML to get good results.
-- Fix the table output, at the moment the start of the evidence is for some reason showing as text and the rest as table. 
-
-- Still a major problem when reading the data from the PDF, this is something which is maybe disrupting the algorithm, solving this would help overall. 
+- Fix the PDF reader. If the PDFs vary (financial reports, research papers, product docs, scans, etc.), the trick is to route each file to the right extractor and keep a generic fallback when there’s no perfect specialist. You don’t need to build heavy ML to get good results. (feasible)
+- Make it so that it is also able to extract data from websites and not only pdf's (feasible)
+- Make it so that it is able to extract data from Chart & infographics (feasible)
+- Possibly remove the top snippet section of the sentence because it is not working at the moment
 
 
 # Hallucination Checker

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from .config import settings
 from .db import get_session, init_db
 from .gpt import OpenAIUnavailable, generate_explanation
+from .table_formatter import format_table_html, ensure_table_classes
 from .models import Chunk, Claim, Document, Verdict
 from .tables import extract_tables_from_text
 from .verify import get_verdicts, index_sources, verify_report
@@ -128,29 +129,42 @@ def _alignment_label(candidate: Optional[dict]) -> str | None:
 
 
 def _render_table_html(structured_tables: Optional[List[dict]], snippet: Optional[str], full_text: Optional[str]) -> List[str]:
-    table_html: List[str] = []
-    seen_html: Set[str] = set()
+    tables: List[str] = []
     if structured_tables:
-        for table_meta in structured_tables:
-            if not isinstance(table_meta, dict):
+        for meta in structured_tables:
+            if not isinstance(meta, dict):
                 continue
-            html_repr = table_meta.get("html")
-            text_repr = table_meta.get("text")
-            if html_repr and html_repr not in seen_html:
-                table_html.append(html_repr)
-                seen_html.add(html_repr)
-            elif text_repr:
-                for html_candidate in extract_tables_from_text(text_repr):
-                    if html_candidate not in seen_html:
-                        table_html.append(html_candidate)
-                        seen_html.add(html_candidate)
+            table_text = meta.get("text")
+            caption = meta.get("caption")
+            formatted = None
+            if settings.format_tables_with_gpt and table_text:
+                try:
+                    formatted = format_table_html(table_text, caption=caption)
+                except OpenAIUnavailable:
+                    formatted = None
+            if formatted:
+                tables.append(ensure_table_classes(formatted))
+                continue
+            if table_text:
+                tables.extend(ensure_table_classes(html) for html in extract_tables_from_text(table_text))
+            html_repr = meta.get("html")
+            if html_repr:
+                tables.append(ensure_table_classes(html_repr))
 
-    source_text = full_text or snippet or ""
-    for html_candidate in extract_tables_from_text(source_text):
-        if html_candidate not in seen_html:
-            table_html.append(html_candidate)
-            seen_html.add(html_candidate)
-    return table_html
+    if not tables:
+        fallback_text = full_text or snippet or ""
+        tables.extend(ensure_table_classes(html) for html in extract_tables_from_text(fallback_text))
+
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for item in tables:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+
+    if settings.format_tables_with_gpt and deduped:
+        return [deduped[0]]
+    return deduped
 
 
 def _format_percent(value: Optional[float], *, default: str = "n/a", decimals: int = 1) -> str:
@@ -414,10 +428,12 @@ def _build_candidate_payloads(session, verdict: Optional[Verdict]) -> List[dict]
             if isinstance(alignment_confidence, (int, float))
             else None
         )
+        display_snippet = None if is_table else snippet
         payloads.append(
             {
                 "index": idx,
-                "snippet": snippet,
+                "snippet": display_snippet,
+                "raw_snippet": snippet,
                 "full_text": full_text,
                 "display_full_text": None if is_table else full_text,
                 "context_text": (full_text or snippet or "")[:2000],
@@ -683,6 +699,10 @@ def get_report_details(report_doc_id: int) -> dict | None:
         report = session.scalar(select(Document).where(Document.id == report_doc_id))
         if not report:
             return None
+        document_json = report.document_json or {}
+        sections = document_json.get("sections", []) if isinstance(document_json, dict) else []
+        metadata = document_json.get("metadata", {}) if isinstance(document_json, dict) else {}
+        executive_summary = next((section for section in sections if section.get("type") == "executive_summary"), None)
         return {
             "id": report.id,
             "title": report.title or Path(report.path).stem,
@@ -690,6 +710,12 @@ def get_report_details(report_doc_id: int) -> dict | None:
             "filename": Path(report.path).name,
             "author": report.author,
             "year": report.year,
+            "router_label": report.router_label or metadata.get("router_label"),
+            "is_scanned": report.is_scanned if report.is_scanned is not None else metadata.get("is_scanned"),
+            "extractor_chain": report.extractor_chain or metadata.get("extractor_chain", []),
+            "document_sections": sections,
+            "executive_summary": executive_summary,
+            "document_metadata": metadata,
         }
 
 

@@ -5,10 +5,14 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import fitz  # PyMuPDF
 
+from pdf_pipeline.ingest import ingest_pdf_v2
+from pdf_pipeline.schema import Document
+
+from .config import settings
 try:
     from unstructured.partition.pdf import partition_pdf
 except ImportError:  # pragma: no cover - optional dependency guard
@@ -24,9 +28,11 @@ class PDFContent:
     authors: Sequence[str] = ()
     year: Optional[int] = None
     tables: Dict[str, dict] = field(default_factory=dict)
+    document: Optional[Document] = None
+    diagnostics: Dict[str, object] = field(default_factory=dict)
 
 
-def extract_pdf_content(pdf_path: str) -> PDFContent:
+def legacy_extract_pdf_content(pdf_path: str) -> PDFContent:
     """Extract the main body text and metadata from a PDF."""
     path = Path(pdf_path)
     if not path.exists():
@@ -123,6 +129,19 @@ def extract_pdf_content(pdf_path: str) -> PDFContent:
     return PDFContent(text=body_text, title=title, authors=tuple(authors), year=year, tables=tables)
 
 
+def extract_pdf_content(pdf_path: str) -> PDFContent:
+    """Primary entrypoint that uses the new pipeline unless legacy mode is configured."""
+    if settings.pdf_pipeline_legacy:
+        return legacy_extract_pdf_content(pdf_path)
+    document, body_text, table_map, metrics = ingest_pdf_v2(pdf_path)
+    return _document_to_pdfcontent(document, body_text, table_map, diagnostics=metrics)
+
+
+def ingest_pdf_document(pdf_path: str) -> Tuple[Document, str, Dict[str, dict], Dict[str, object]]:
+    """Expose the v2 ingestion pipeline for callers that need structured output."""
+    return ingest_pdf_v2(pdf_path)
+
+
 def extract_text(pdf_path: str) -> str:
     """Compatibility helper returning just the body text."""
     content = extract_pdf_content(pdf_path)
@@ -198,3 +217,33 @@ def strip_table_placeholders(text: str, tables: Optional[Dict[str, dict]]) -> st
     for placeholder in tables.keys():
         cleaned = cleaned.replace(placeholder, " ")
     return " ".join(cleaned.split())
+
+
+def _document_to_pdfcontent(
+    document: Document,
+    body_text: str,
+    table_map: Dict[str, dict],
+    *,
+    diagnostics: Optional[Dict[str, object]] = None,
+) -> PDFContent:
+    tables: Dict[str, dict] = {}
+    for table_id, meta in table_map.items():
+        placeholder = f"[[{table_id}]]"
+        tables[placeholder] = {
+            "id": table_id,
+            "html": meta.get("html"),
+            "text": meta.get("text"),
+            "page_number": meta.get("page_number"),
+            "caption": meta.get("caption"),
+            "bbox": meta.get("bbox"),
+        }
+    year = _extract_year(document.date) if document.date else None
+    return PDFContent(
+        text=body_text,
+        title=document.title,
+        authors=tuple(document.authors),
+        year=year,
+        tables=tables,
+        document=document,
+        diagnostics=diagnostics or {},
+    )

@@ -36,6 +36,7 @@ from .retrieval import (
     search_faiss,
 )
 from .gpt import OpenAIUnavailable, score_relevance, confirm_entity_alignment
+from pdf_pipeline.schema import asdict as document_asdict
 
 
 NUMBER_PATTERN = re.compile(r"-?\d[\d,\.]*")
@@ -267,12 +268,19 @@ def index_sources(pdf_paths: Sequence[str], index_name: str = "sources") -> dict
                 print(f"[index] No text extracted from {pdf_path}, skipping.")
                 continue
 
+            doc_struct = content.document
+            doc_metadata = doc_struct.metadata if doc_struct else {}
             document = Document(
                 kind=DocumentKind.SOURCE,
                 path=str(pdf_path.resolve()),
                 title=content.title or pdf_path.stem,
                 author=", ".join(content.authors) if content.authors else None,
                 year=content.year,
+                router_label=doc_metadata.get("router_label"),
+                is_scanned=bool(doc_metadata.get("is_scanned")) if doc_metadata else None,
+                content_hash=doc_metadata.get("content_hash"),
+                extractor_chain=doc_metadata.get("extractor_chain"),
+                document_json=document_asdict(doc_struct) if doc_struct else None,
             )
             session.add(document)
             session.flush()
@@ -372,12 +380,19 @@ def verify_report(report_pdf: str, index_name: str = "sources", topk: int = 5) -
     with get_session() as session:
         _clear_previous_reports(session)
 
+        report_doc_struct = report_content.document
+        report_doc_metadata = report_doc_struct.metadata if report_doc_struct else {}
         report_doc = Document(
             kind=DocumentKind.REPORT,
             path=str(report_path.resolve()),
             title=report_content.title or report_path.stem,
             author=", ".join(report_content.authors) if report_content.authors else None,
             year=report_content.year,
+            router_label=report_doc_metadata.get("router_label"),
+            is_scanned=bool(report_doc_metadata.get("is_scanned")) if report_doc_metadata else None,
+            content_hash=report_doc_metadata.get("content_hash"),
+            extractor_chain=report_doc_metadata.get("extractor_chain"),
+            document_json=document_asdict(report_doc_struct) if report_doc_struct else None,
         )
         session.add(report_doc)
         session.flush()
@@ -471,8 +486,8 @@ def get_verdicts(report_doc_id: int) -> List[dict]:
                 if isinstance(candidates, list) and candidates:
                     top_candidate = candidates[0]
                     if isinstance(top_candidate, dict):
-                        evidence_snippet = top_candidate.get("snippet") or top_candidate.get("text")
                         is_table = bool(top_candidate.get("is_table"))
+                        evidence_snippet = (top_candidate.get("snippet") or top_candidate.get("text")) if not is_table else None
                         evidence_full = None if is_table else top_candidate.get("text")
                         source_title = top_candidate.get("doc_title") or top_candidate.get("doc_path")
                         source_doc_id = top_candidate.get("doc_id")

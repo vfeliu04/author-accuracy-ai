@@ -26,15 +26,78 @@
   </div>
 </div>
 
-{% if claims %}
-  <div class="row g-3" id="claimsList">
-    {% for claim in claims %}
-      {% include "partials/_claim_card.html" %}
-    {% endfor %}
+<div class="row g-4">
+  <div class="col-lg-8">
+    {% if claims %}
+      <div class="row g-3" id="claimsList">
+        {% for claim in claims %}
+          {% include "partials/_claim_card.html" %}
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="alert alert-info">No claims were generated for this report.</div>
+    {% endif %}
   </div>
-{% else %}
-  <div class="alert alert-info">No claims were generated for this report.</div>
-{% endif %}
+  <div class="col-lg-4">
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h2 class="h6 text-uppercase text-muted">Executive Summary</h2>
+        {% if report.executive_summary %}
+          <h3 class="h5">{{ report.executive_summary.title or "Executive Summary" }}</h3>
+          <p class="small text-muted mb-0">{{ report.executive_summary.text }}</p>
+        {% else %}
+          <p class="small text-muted mb-0">No executive summary detected.</p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h2 class="h6 text-uppercase text-muted">Section Outline</h2>
+        {% if report.document_sections %}
+          <ul class="list-unstyled mb-0 small">
+            {% for section in report.document_sections %}
+              <li class="mb-1" style="margin-left: {{ (section.level - 1) * 12 }}px;">
+                <span class="fw-semibold">{{ section.title or "(untitled)" }}</span>
+                <span class="text-muted">p{{ section.page_range[0] }}-{{ section.page_range[1] }}</span>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="small text-muted mb-0">No section headings were detected.</p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h6 text-uppercase text-muted">Source Diagnostics</h2>
+        <dl class="row small mb-0">
+          <dt class="col-5 text-muted">Router label</dt>
+          <dd class="col-7">{{ report.router_label or "n/a" }}</dd>
+          <dt class="col-5 text-muted">OCR used</dt>
+          {% set ocr_flag = report.document_metadata.get('ocr_used') %}
+          <dd class="col-7">{{ 'yes' if ocr_flag else ('no' if ocr_flag is not none else 'n/a') }}</dd>
+          <dt class="col-5 text-muted">Scanned PDF</dt>
+          {% set scanned_flag = report.is_scanned %}
+          <dd class="col-7">{{ 'yes' if scanned_flag else ('no' if scanned_flag is not none else 'n/a') }}</dd>
+          <dt class="col-5 text-muted">Extractor chain</dt>
+          <dd class="col-7">
+            {% if report.extractor_chain %}
+              <ul class="list-unstyled mb-0">
+                {% for info in report.extractor_chain %}
+                  {% set name = info.name if info.name is not none else info.get('name', 'unknown') %}
+                  {% set version = info.version if info.version is not none else info.get('version', '') %}
+                  <li>{{ name }} {{ version }}</li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              <span>n/a</span>
+            {% endif %}
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}

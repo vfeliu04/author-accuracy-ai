@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 from typing import List, Optional
 
-from sqlalchemy import Enum, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -35,6 +35,11 @@ class Document(Base):
     title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     author: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    router_label: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    is_scanned: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, unique=False)
+    extractor_chain: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    document_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     chunks: Mapped[List["Chunk"]] = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")
     claims: Mapped[List["Claim"]] = relationship("Claim", back_populates="document", cascade="all, delete-orphan")

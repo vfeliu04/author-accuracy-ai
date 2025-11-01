@@ -15,3 +15,9 @@ Flask
 Flask-WTF
 WTForms
 unstructured
+pdfplumber
+layoutparser
+camelot-py
+tabula-py
+JPype1
+Pillow

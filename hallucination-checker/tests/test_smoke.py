@@ -41,6 +41,15 @@ def test_chunk_model_includes_tables_column():
     assert "tables" in column_names
 
 
+def test_document_model_includes_pipeline_columns():
+    column_names = {column.name for column in Document.__table__.columns}
+    assert "router_label" in column_names
+    assert "is_scanned" in column_names
+    assert "content_hash" in column_names
+    assert "extractor_chain" in column_names
+    assert "document_json" in column_names
+
+
 def test_extract_tables_from_text_handles_rank_table():
     raw = (
         "Rank1 Country 2000 2008 2016 2025 GHI scores less than 5 collectively ranked "
