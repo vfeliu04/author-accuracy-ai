@@ -28,7 +28,7 @@ const RatingPanel = ({ scores }: RatingPanelProps) => {
             style={{ width: `${Math.round(scores.overall * 100)}%` }}
           />
         </div>
-        <span className="rating__score">{scores.overall.toFixed(2)}</span>
+        <span className="rating__score">{(scores.overall * 100).toFixed(0)}%</span>
       </div>
       <div className="rating__metrics">
         {metricDetails.map((metric) => {
@@ -44,7 +44,7 @@ const RatingPanel = ({ scores }: RatingPanelProps) => {
               </span>
               <div className="rating__metric-info">
                 <span className="rating__metric-label">{metric.label}</span>
-                <span className="rating__metric-score">{metric.value.toFixed(2)}</span>
+                <span className="rating__metric-score">{percentage}%</span>
               </div>
             </div>
           );
