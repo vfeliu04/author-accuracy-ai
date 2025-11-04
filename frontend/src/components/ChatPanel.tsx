@@ -43,7 +43,9 @@ const ChatPanel = ({ messages: initialMessages }: ChatPanelProps) => {
           return (
             <div
               key={message.id}
-              className={`chat__message ${isSystem ? "chat__message--system" : "chat__message--user"}`}
+              className={`chat__message ${
+                isSystem ? "chat__message--system" : "chat__message--user"
+              } ${isSystem ? "chat__message--left" : "chat__message--right"}`}
             >
               <span className="chat__message-author">{message.author}</span>
               <p className="chat__message-text">{message.text}</p>
