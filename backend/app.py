@@ -20,8 +20,11 @@ def create_app() -> Flask:
             "report_id": report_id,
             "title": "World - Hunger Report",
             "summary": (
-                "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed ligula erat, molestie vel tortor, "
-                "aliquet imperdiet mi. Donec posuere interdum mi vitae fermentum."
+                "The 2025 World Hunger and Food Chain Disruptions report highlights how climate shocks, conflict-driven "
+                "displacement, and fragile logistics networks are converging to keep 735 million people in chronic food "
+                "insecurity. It contrasts regions with resilient storage and cold-chain investments against those relying on "
+                "volatile grain imports, and underscores that rapid response funds and nutrition-focused safety nets remain "
+                "under-capitalised."
             ),
             "scores": {
                 "overall": 0.78,
@@ -30,14 +33,17 @@ def create_app() -> Flask:
                 "validity": 0.69,
             },
             "internal_sources": [
-                "Source One",
-                "Source Two",
-                "Source Three",
+                "2025 World Hunger.pdf",
+                "World Hunger & Food Chain Disruptions.pdf",
+                "Disruptions in the Food Supply Chain.pdf",
             ],
             "recommended_sources": [
-                "Source One",
-                "Source Two",
-                "Source Three",
+                "Global Food Resilience Index 2025",
+                "Nutrition Equity Observatory Brief",
+                "AgriSupply Chain Stability Outlook",
+                "Climate Resilient Harvests 2024",
+                "Urban Food Access Benchmark 2025",
+                "FAO Logistics Pulse - June 2025",
             ],
             "chat_suggestions": [
                 {"author": "System", "text": "Ask about regions with the highest data uncertainty."},

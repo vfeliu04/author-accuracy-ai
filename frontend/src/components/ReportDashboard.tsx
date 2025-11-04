@@ -7,16 +7,9 @@ import RecommendedSourcesPanel from "./RecommendedSourcesPanel";
 // ReportDashboard represents the full page layout for the report quality view.
 const ReportDashboard = () => {
   const internalSources = [
-    "Source One",
-    "Source Two",
-    "Source Three",
-    "Source Four",
-    "Source Five",
-    "Source Six",
-    "Source Seven",
-    "Source Eight",
-    "Source Nine",
-    "Source Ten"
+    "2025 World Hunger.pdf",
+    "World Hunger & Food Chain Disruptions.pdf",
+    "Disruptions in the Food Supply Chain.pdf"
   ];
 
   const scores = {
@@ -32,20 +25,18 @@ const ReportDashboard = () => {
   ];
 
   const summaryText =
-    "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed ligula erat, molestie vel tortor at, aliquet imperdiet mi. " +
-    "Donec posuere interdum mi vitae fermentum.";
+    "The 2025 World Hunger and Food Chain Disruptions report highlights how climate shocks, conflict-driven displacement, " +
+    "and fragile logistics networks are converging to keep 735 million people in chronic food insecurity. It contrasts " +
+    "regions with resilient storage and cold-chain investments against those relying on volatile grain imports, and " +
+    "underscores that rapid response funds and nutrition-focused safety nets remain under-capitalised.";
 
   const recommendedSources = [
-    "Source One",
-    "Source Two",
-    "Source Three",
-    "Source Four",
-    "Source Five",
-    "Source Six",
-    "Source Seven",
-    "Source Eight",
-    "Source Nine",
-    "Source Ten"
+    "Global Food Resilience Index 2025",
+    "Nutrition Equity Observatory Brief",
+    "AgriSupply Chain Stability Outlook",
+    "Climate Resilient Harvests 2024",
+    "Urban Food Access Benchmark 2025",
+    "FAO Logistics Pulse - June 2025"
   ];
 
   return (

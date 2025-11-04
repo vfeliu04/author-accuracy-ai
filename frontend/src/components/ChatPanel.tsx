@@ -38,12 +38,18 @@ const ChatPanel = ({ messages: initialMessages }: ChatPanelProps) => {
         <h2>Chat</h2>
       </header>
       <div className="chat__history">
-        {messages.map((message) => (
-          <div key={message.id} className="chat__message">
-            <span className="chat__message-author">{message.author}</span>
-            <p className="chat__message-text">{message.text}</p>
-          </div>
-        ))}
+        {messages.map((message) => {
+          const isSystem = message.author.toLowerCase() === "system";
+          return (
+            <div
+              key={message.id}
+              className={`chat__message ${isSystem ? "chat__message--system" : "chat__message--user"}`}
+            >
+              <span className="chat__message-author">{message.author}</span>
+              <p className="chat__message-text">{message.text}</p>
+            </div>
+          );
+        })}
       </div>
       <form className="chat__composer" onSubmit={handleSubmit}>
         <input
