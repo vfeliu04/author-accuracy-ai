@@ -1,1 +1,11 @@
 /hallucination-checker/.env
+# Bytecode / caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local sqlite db
+hallcheck.db
+
+# Cached table formatting
+data/cache/
