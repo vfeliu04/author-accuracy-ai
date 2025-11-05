@@ -264,6 +264,117 @@ h2 {
   padding: 0;
 }
 
+.upload {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem;
+}
+
+.upload__form {
+  width: min(1040px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.upload__title {
+  margin: 0;
+  font-size: 2.4rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: rgba(226, 232, 240, 0.95);
+}
+
+.upload__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.75rem;
+}
+
+.upload__panel {
+  padding: 1.75rem;
+  gap: 1.25rem;
+}
+
+.upload__list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+  padding-right: 0.35rem;
+}
+
+.upload__list--single {
+  min-height: 0;
+  justify-content: flex-start;
+}
+
+.upload__item,
+.upload__placeholder {
+  padding: 0.65rem 1.1rem;
+  border-radius: 16px;
+  background: rgba(30, 41, 59, 0.65);
+  border: 1px solid rgba(79, 70, 229, 0.25);
+  color: rgba(226, 232, 240, 0.85);
+  font-size: 0.92rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.upload__placeholder {
+  text-align: center;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.upload__button {
+  border: 1px dashed rgba(148, 163, 184, 0.4);
+  border-radius: 16px;
+  padding: 0.7rem 1.25rem;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.82);
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+
+.upload__button:hover {
+  border-color: rgba(94, 234, 212, 0.35);
+  color: rgba(94, 234, 212, 0.9);
+}
+
+.upload__submit {
+  margin-top: 1.5rem;
+  align-self: flex-end;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #0ea5e9, #38bdf8);
+  color: #ffffff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  box-shadow: 0 10px 18px -12px rgba(14, 165, 233, 0.8);
+}
+
+.upload__submit:hover {
+  filter: brightness(1.1);
+}
+
+@media (max-width: 900px) {
+  .upload__columns {
+    grid-template-columns: 1fr;
+  }
+
+  .upload__submit {
+    align-self: flex-start;
+  }
+}
+
 .pill-list {
   display: flex;
   flex-direction: column;

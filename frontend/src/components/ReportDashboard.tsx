@@ -7,7 +7,6 @@ import RecommendedSourcesPanel from "./RecommendedSourcesPanel";
 import {
   chatMessages,
   recommendedSources,
-  reportDocument,
   reportScores,
   reportSummary
 } from "../data/reportData";
@@ -16,10 +15,10 @@ import { useReportData } from "../context/ReportDataContext";
 // ReportDashboard represents the full page layout for the report quality view.
 const ReportDashboard = () => {
   const navigate = useNavigate();
-  const { internalSources, addInternalSource } = useReportData();
+  const { internalSources, addInternalSource, reportDocument } = useReportData();
 
   const handleSourceSelect = (sourceId: string) => {
-    navigate(`/sources/${sourceId}`);
+    navigate(`/dashboard/sources/${sourceId}`);
   };
 
   return (
@@ -37,7 +36,7 @@ const ReportDashboard = () => {
           <SummaryPanel
             summary={reportSummary}
             reportLabel={reportDocument.name}
-            onOpenReport={() => navigate(`/report`)}
+            onOpenReport={() => navigate(`/dashboard/report`)}
           />
         </section>
         <section className="dashboard__column dashboard__column--center">

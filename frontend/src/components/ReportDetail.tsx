@@ -1,11 +1,13 @@
 import { useNavigate } from "react-router-dom";
 import RatingPanel from "./RatingPanel";
 import SummaryPanel from "./SummaryPanel";
-import { reportDocument, reportScores, reportSummary } from "../data/reportData";
+import { useReportData } from "../context/ReportDataContext";
+import { reportScores, reportSummary } from "../data/reportData";
 
 // ReportDetail renders the full report document alongside summary and full ratings.
 const ReportDetail = () => {
   const navigate = useNavigate();
+  const { reportDocument } = useReportData();
 
   return (
     <div className="source-detail">

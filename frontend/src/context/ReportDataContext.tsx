@@ -9,11 +9,16 @@ import {
   type ReactNode
 } from "react";
 import type { InternalSource } from "../data/reportData";
-import { internalSources as initialInternalSources } from "../data/reportData";
+import {
+  internalSources as initialInternalSources,
+  reportDocument as initialReportDocument
+} from "../data/reportData";
 
 type ReportDataContextValue = {
   internalSources: InternalSource[];
+  reportDocument: InternalSource;
   addInternalSource: (file: File) => void;
+  setReportDocument: (file: File) => void;
   getInternalSourceById: (id: string) => InternalSource | undefined;
 };
 
@@ -64,6 +69,7 @@ type ReportDataProviderProps = {
 
 export const ReportDataProvider = ({ children }: ReportDataProviderProps) => {
   const [sources, setSources] = useState<InternalSource[]>(initialInternalSources);
+  const [reportDoc, setReportDoc] = useState<InternalSource>(initialReportDocument);
   const localUrlsRef = useRef<string[]>([]);
 
   const addInternalSource = useCallback((file: File) => {
@@ -84,6 +90,21 @@ export const ReportDataProvider = ({ children }: ReportDataProviderProps) => {
     ]);
   }, []);
 
+  const setReportDocument = useCallback((file: File) => {
+    const displayName = formatDisplayName(file.name);
+    const sourceId = generateSourceId(file.name);
+    const objectUrl = URL.createObjectURL(file);
+
+    localUrlsRef.current.push(objectUrl);
+
+    setReportDoc({
+      id: sourceId,
+      name: displayName,
+      filePath: objectUrl,
+      isLocal: true
+    });
+  }, []);
+
   const getInternalSourceById = useCallback(
     (id: string) => sources.find((source) => source.id === id),
     [sources]
@@ -99,10 +120,12 @@ export const ReportDataProvider = ({ children }: ReportDataProviderProps) => {
   const value = useMemo(
     () => ({
       internalSources: sources,
+      reportDocument: reportDoc,
       addInternalSource,
+      setReportDocument,
       getInternalSourceById
     }),
-    [sources, addInternalSource, getInternalSourceById]
+    [sources, reportDoc, addInternalSource, setReportDocument, getInternalSourceById]
   );
 
   return <ReportDataContext.Provider value={value}>{children}</ReportDataContext.Provider>;
