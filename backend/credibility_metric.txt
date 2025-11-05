@@ -1,0 +1,103 @@
+Credibility Scoring Pipeline
+============================
+
+Overview
+--------
+This document outlines the backend flow for computing credibility scores. Each source PDF receives an individual credibility assessment (0–100). The report-level credibility metric is then derived as a weighted average of the contributing sources, where weights reflect how frequently each source supports verified claims.
+
+Data Requirements
+-----------------
+- Source PDFs (user uploads).
+- Claim verdict payload produced by the accuracy pipeline (`verdicts` table + evidence metadata).
+- Access to external metadata services (e.g., Crossref, OpenAlex) and a lightweight metadata extraction API (e.g., pdfmetadataparser).
+- Configured paths for cached metadata responses and audit logs.
+
+Source Metadata Acquisition
+---------------------------
+1. **Metadata API probe**
+   - Call the configured metadata API (`metadata.fetch_basic(source_path)`) to retrieve embedded fields: title, author(s), publication date, publisher, DOI/ISBN, keywords.
+   - If the API returns a DOI, capture it immediately for downstream use.
+2. **PDF header heuristics (fallback or augmentation)**
+   - Extract the first page text and front-matter metadata via `pdfminer` or `pypdf`.
+   - Use regex/heuristics to capture:
+     - Explicit labels: `Author(s)`, `Published`, `©`, `Journal`, `Conference`.
+     - DOI or URL patterns (`10.\d{4,9}/[-._;()/:A-Z0-9]+`).
+   - Apply fuzzy title matching against the metadata API results to detect conflicts or enrich missing fields.
+3. **Bibliographic lookup**
+   - If a DOI is available, query Crossref (`crossref.fetch(doi)`) for structured metadata.
+   - If DOI is absent but a confident title is known, perform a title search via Crossref or OpenAlex. Require a similarity >= `CRED_TITLE_MATCH_THRESHOLD` (default 0.85) to accept the result.
+   - Capture journal/conference name, publisher, publication year, document type (journal article, whitepaper, etc.).
+4. **Fallback logging**
+   - If all metadata probes fail, log `metadata_failure` with reason codes (`api_unavailable`, `header_empty`, `lookup_no_match`).
+   - Mark the source as `manual_review_required`.
+
+Metadata Confidence & User Verification
+---------------------------------------
+1. Aggregate metadata from the sources above into a consolidated record with provenance fields (`source_api`, `source_header`, `source_crossref`).
+2. Compute a `metadata_confidence` score:
+   - `HIGH` when DOI or exact title matches from Crossref/OpenAlex confirm key fields.
+   - `MEDIUM` when metadata API + header heuristics agree but no registry confirmation exists.
+   - `LOW` when only heuristics are available.
+3. Surfaces this record in the UI for optional user confirmation/editing:
+   - Expose editable fields: author(s), publication date, publisher, document type.
+   - On save, persist user overrides with `is_user_verified=true` and set `metadata_confidence=USER_CONFIRMED`.
+
+Source Credibility Scoring
+--------------------------
+1. Each source receives a base score computed as a weighted sum of sub-components:
+   - `Metadata Completeness (0–30)`: presence of title, author(s), publication date, publisher. Deduct points if fields are missing. Bonus if DOI/ISBN present.
+   - `Publication Authority (0–30)`: evaluate publisher/journal reputation. Use a maintained allowlist/score table (`credibility.publisher_scores`). If unknown, default to mid-range (15).
+   - `Recency (0–20)`: current year minus publication year. Full points if ≤2 years old, minimum if >10 years old.
+   - `Metadata Confidence (0–10)`: HIGH = 10, MEDIUM = 7, LOW = 3, USER_CONFIRMED = 10.
+   - `User Adjustments (0–10)`: manual boost or penalty captured in UI (optional).
+2. Sum the sub-scores and clamp between 0 and 100. Store alongside diagnostics in `source_credibility` table:
+   ```
+   source_id | credibility_score | metadata_confidence | components_json | last_refreshed_at
+   ```
+3. Cache raw metadata payloads in `data/cache/metadata/{source_id}.json` for auditing, including API responses and heuristic extracts.
+
+Report-Level Credibility Aggregation
+------------------------------------
+1. After the accuracy pipeline produces verdicts, collect all evidence references per claim:
+   - For each verdict, extract `source_id` entries from the associated evidence list (even if not shown to the user).
+   - Count how many claims each source supports (`SUPPORTED` or `CONTRADICTED` verdicts). Optionally weight each claim by `claim_confidence`.
+2. Compute source weights:
+   - Default weight: `usage_count` (number of claims the source supports).
+   - Alternative: `usage_count * avg_claim_confidence`. This moderates the influence of low-confidence claims.
+   - Ensure a minimum weight of 1 for any source that appears; sources unused in claims are excluded from the report calculation.
+3. Calculate the weighted average:
+   ```
+   report_credibility = Σ (source_weight_i * source_cred_score_i) / Σ (source_weight_i)
+   ```
+4. Persist the aggregation in `report_metrics`:
+   ```
+   report_id | credibility_score | total_sources | weighted_sources | details_json | last_refreshed_at
+   ```
+   `details_json` stores per-source weights and contribution percentages for transparency.
+5. Present the following on the UI (if desired):
+   - Overall credibility score (0–100).
+   - Top contributing sources with their individual scores and usage counts.
+   - Indicator for sources pending manual metadata verification.
+
+Operational Considerations
+--------------------------
+- Rate limiting: Apply polite rate headers when calling Crossref (`mailto` identification) and implement exponential backoff with caching to avoid repeated lookups.
+- Caching: TTL for metadata API responses can be 7 days; store keyed by DOI/title to reuse across uploads.
+- Configuration:
+  - `CRED_METADATA_API_URL`, `CRED_METADATA_API_KEY`.
+  - `CRED_CROSSREF_ENABLED=true|false`.
+  - `CRED_TITLE_MATCH_THRESHOLD=0.85`.
+  - `CRED_RECENCY_DECAY_YEARS=10`.
+  - `CRED_USER_ADJUSTMENT_RANGE=(-10, 10)`.
+- Logging: Capture failures and user overrides in `data/logs/credibility_events.jsonl`.
+
+Future Enhancements
+-------------------
+- Introduce automated publisher reputation scoring by integrating OpenAlex or Scimago rankings.
+- Allow bulk metadata validation workflows so analysts can confirm multiple sources at once.
+- Surface an “evidence coverage” metric showing what percentage of claims rely on high-credibility sources.
+- Add domain-specific authority signals:
+  - **Financial authorship footprint**: integrate APIs such as Yahoo Finance, Bloomberg, or FactSet to measure how often an author appears in earnings calls, market commentary, or analyst notes. Convert appearance frequency and positive sentiment into a normalized credibility boost.
+  - **News & media sentiment**: query news aggregators (GDELT, LexisNexis, Google News API) to evaluate how reputable outlets reference the source. Penalize sources with misinformation flags; reward consistent positive coverage.
+  - **Professional validation**: leverage LinkedIn, ORCID, or other professional registries (where permitted) to confirm affiliations, certifications, or peer recognition. Verified credentials can lift the credibility score or override missing metadata penalties.
+- Maintain a modular scoring schema so each domain module (academic, finance, journalism, etc.) can plug in additional factors without rewriting the core pipeline.

@@ -1,0 +1,95 @@
+LLM Assistant Functionality
+===========================
+
+Overview
+--------
+This document describes how we expose the report verification data to an interactive LLM assistant while ensuring the claim-level verdicts remain the primary source of truth. The assistant runs in the dashboard’s chat panel and answers user questions about the report, the verified claims, and supporting source material.
+
+High-Level Goals
+----------------
+1. Prioritise the verified Claim vs Evidence payload so the LLM mirrors the system’s verdicts.
+2. Retain access to the raw PDF text for broader questions the claims don’t cover.
+3. Keep data scoped to the currently selected report, respecting user-uploaded sources and locally generated verdicts.
+4. Deliver low-latency responses with clear citations, while guarding against privacy or leakage concerns.
+
+Data Preparation
+----------------
+1. **Claims payload construction**
+   - After verification, collect every claim with fields: `claim_id`, `claim_text`, `verdict`, `confidence`, `confidence_band`, `explanation`, `evidence_ids`, and `metadata` (section, page, table flags).
+   - Normalise verdict labels to {SUPPORTED, CONTRADICTED, NOT_FOUND}. Add a boolean `is_priority` that defaults to true for SUPPORTED/CONTRADICTED claims and false for NOT_FOUND, allowing us to filter low-value rows.
+   - Persist the payload to `data/cache/claims/{report_id}.json` for backend reuse.
+
+2. **Source chunk preparation**
+   - Reuse the ingestion chunks generated during indexing. Each chunk carries: `chunk_id`, `doc_id`, `doc_title`, `page`, `section`, `text`, `table_payload?`, `is_table`, and the vector embedding used by FAISS.
+   - Store a lightweight JSON manifest (`data/cache/chunks/{report_id}.json`) mapping chunk ids to their metadata so the chat layer can display human-readable labels without re-querying the database.
+
+3. **Vector stores**
+   - Claims Index: build a FAISS (or equivalent) index from claim explanations. Embedding source is `text-embedding-3-large` run over `claim_text + verdict + explanation`. Persist under `data/indexes/claims/{report_id}`.
+   - Source Index: reuse the existing FAISS index built for verification (`data/indexes/{report_id}`).
+   - Both indexes carry metadata maps so we can translate vector hits back to payload structs.
+
+Retrieval Strategy
+------------------
+1. When a chat request arrives, embed the user question using the same embedding model (`text-embedding-3-large`).
+2. Query the Claims Index for top `k_claims` (default 5) results. Apply a relevance threshold (`CLAIM_RELEVANCE_MIN`, default 0.35 cosine similarity). Filter to `is_priority` claims to avoid surfacing NOT_FOUND unless absolutely necessary.
+3. If at least one claim clears the threshold:
+   - Mark the conversation context as **claim-led**.
+   - Set `context.claims = filtered_hits`.
+   - Only if fewer than `MIN_CLAIM_CONTEXT` claims survive (e.g., 1 out of 5) run a supplemental search against the Source Index to add background snippets (see step 4).
+4. If no claims pass the threshold or we need more breadth:
+   - Query the Source Index for top `k_sources` (default 6) with the same question embedding.
+   - Deduplicate by `doc_id` and prioritise snippets with higher `page` proximity to existing claim hits (if any).
+5. On claim-led responses, any supplemental source snippet is flagged as `supporting_context` to discourage the LLM from contradicting claims. On source-led responses (no claims found), source snippets become the primary context.
+
+Prompt Construction
+-------------------
+1. Assemble the system prompt to enforce precedence:
+   ```
+   You are Author AI’s verification assistant. Treat “Claim Findings” as authoritative.
+   Use “Supporting Context” only when the findings do not address the user’s question.
+   Never contradict a claim verdict; if unsure, say you cannot confirm.
+   ```
+2. Claim Findings block:
+   - Render each claim with structured formatting (JSON-like or markdown table). Include `claim_id`, `statement`, `verdict`, `confidence_band`, and `explanation`.
+   - For SUPPORTED/CONTRADICTED claims add a brief provenance string (e.g., “Evidence: Source A, pp. 12-13”) derived from metadata; do not include raw snippet text.
+3. Supporting Context block (optional):
+   - List the selected source snippets with labels (`Source Title – Page X`) and trimmed text (max 500 characters each).
+   - If the chunk represents a table, summarise it in one sentence using precomputed table highlights.
+4. Conversation history:
+   - Append the last `H` turns (default 6) to maintain continuity. Always inject the context blocks before the latest user question when streaming to the LLM.
+
+Response Handling
+-----------------
+1. Call the configured chat/completions endpoint (default `gpt-4o-mini`).
+2. Stream partial responses to the UI for responsiveness.
+3. Post-process the final answer:
+   - Check for verdict conflicts (e.g., the reply says “supported” while claim says “contradicted”). If a mismatch is detected, prepend a disclaimer (“System note: The verified claim contradicts this; answer withheld.”) and log the incident for review.
+   - Optionally append citations referencing claim ids (`[Claim #102]`) or source labels (`[Source: Disruptions in the Food Supply Chain, p. 7]`).
+4. Persist each exchange (question + answer + context ids used) to `data/logs/chat_sessions/{session_id}.jsonl` for auditing and future model tuning.
+
+Frontend Integration
+--------------------
+1. The dashboard chat panel requests `/api/chat` with payload `{ report_id, session_id, message }`.
+2. The backend responds with streaming chunks or a final JSON containing `{ answer, claim_ids, source_ids }`.
+3. UI renders claim references as badges; hovering can display verdict + confidence. Source references remain hidden unless the user expands an “additional context” drawer.
+4. Provide a toggle for “Show supporting context” so advanced users can opt into seeing source snippets. Default remains off to align with claim-first messaging.
+
+Configuration & Environment
+---------------------------
+- `CLAIM_RELEVANCE_MIN` (float): minimum cosine similarity for claims to be considered (default 0.35).
+- `CLAIM_CONTEXT_LIMIT` (int): max number of claims returned (default 5).
+- `SOURCE_CONTEXT_LIMIT` (int): max number of source snippets appended (default 6).
+- `CLAIM_PRIORITY_WEIGHT` (float): weighting multiplier applied to claim similarities when ranking vs sources (default 1.5).
+- `CHAT_HISTORY_LENGTH` (int): number of previous turns kept in context (default 6).
+- `LLM_CHAT_MODEL`: defaults to `gpt-4o-mini`; configurable per environment.
+- `CLAIM_VECTOR_PATH` / `SOURCE_VECTOR_PATH`: directories for claim/source indexes.
+- Feature flags:
+  - `CHAT_INCLUDE_SOURCES=true|false`
+  - `CHAT_LOGGING_ENABLED=true|false`
+  - `CHAT_STRICT_VERDICT_ENFORCEMENT=true|false` (controls whether conflicting outputs are blocked vs warned).
+
+Security & Privacy Notes
+------------------------
+- User-uploaded PDFs and generated claims remain local; only derived text snippets are sent to OpenAI.
+- When `CHAT_INCLUDE_SOURCES=false`, we suppress raw source text entirely and rely solely on claim verdicts.
+- Logs redact user PII before persistence; session ids rotate every browser refresh.
