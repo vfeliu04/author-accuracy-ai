@@ -4,7 +4,13 @@ import SummaryPanel from "./SummaryPanel";
 import ChatPanel from "./ChatPanel";
 import RatingPanel from "./RatingPanel";
 import RecommendedSourcesPanel from "./RecommendedSourcesPanel";
-import { chatMessages, recommendedSources, reportScores, reportSummary } from "../data/reportData";
+import {
+  chatMessages,
+  recommendedSources,
+  reportDocument,
+  reportScores,
+  reportSummary
+} from "../data/reportData";
 import { useReportData } from "../context/ReportDataContext";
 
 // ReportDashboard represents the full page layout for the report quality view.
@@ -28,7 +34,11 @@ const ReportDashboard = () => {
             onSelectSource={handleSourceSelect}
             onAddSource={addInternalSource}
           />
-          <SummaryPanel summary={reportSummary} />
+          <SummaryPanel
+            summary={reportSummary}
+            reportLabel={reportDocument.name}
+            onOpenReport={() => navigate(`/report`)}
+          />
         </section>
         <section className="dashboard__column dashboard__column--center">
           <ChatPanel messages={chatMessages} />

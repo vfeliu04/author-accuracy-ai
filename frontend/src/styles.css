@@ -209,6 +209,61 @@ h2 {
   font-size: 0.96rem;
 }
 
+.card--summary {
+  display: flex;
+  flex-direction: column;
+}
+
+.summary__report-launch {
+  margin-bottom: 1.15rem;
+}
+
+.summary__report-button {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(30, 41, 59, 0.55);
+  color: rgba(226, 232, 240, 0.9);
+  border-radius: 16px;
+  padding: 0.65rem 1.1rem;
+  font-size: 0.9rem;
+  width: 100%;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+
+.summary__report-button:hover {
+  border-color: rgba(94, 234, 212, 0.4);
+  color: rgba(94, 234, 212, 0.9);
+}
+
+.summary__content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem 0.75rem 0.75rem;
+  text-align: center;
+  border-radius: 16px;
+}
+
+.summary__content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.summary__content::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+}
+
+.summary__text {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  padding: 0;
+}
+
 .pill-list {
   display: flex;
   flex-direction: column;

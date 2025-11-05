@@ -44,3 +44,9 @@ export const chatMessages = [
   { id: 1, author: "System", text: "Welcome back! Ask anything about improving this report." },
   { id: 2, author: "User", text: "What sections should I revise first?" }
 ];
+
+export const reportDocument = {
+  id: "world-hunger-disruptions-report",
+  name: "World Hunger & Food Chain Disruptions Report.pdf",
+  filePath: "/example_sources/World_Hunger_and_Food_Chain_Disruptions_Report.pdf"
+};

@@ -1,7 +1,7 @@
 import { useNavigate, useParams } from "react-router-dom";
 import SummaryPanel from "./SummaryPanel";
 import RatingPanel from "./RatingPanel";
-import { reportScores, reportSummary } from "../data/reportData";
+import { reportDocument, reportScores, reportSummary } from "../data/reportData";
 import { useReportData } from "../context/ReportDataContext";
 
 // SourceDetail displays a selected internal source alongside supporting context.
@@ -49,7 +49,11 @@ const SourceDetail = () => {
         </section>
         <aside className="source-detail__sidebar">
           <RatingPanel scores={reportScores} />
-          <SummaryPanel summary={reportSummary} />
+          <SummaryPanel
+            summary={reportSummary}
+            reportLabel={reportDocument.name}
+            onOpenReport={() => navigate("/report")}
+          />
         </aside>
       </div>
     </div>
