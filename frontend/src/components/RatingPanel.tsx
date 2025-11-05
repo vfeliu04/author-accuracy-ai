@@ -1,16 +1,19 @@
 type RatingPanelProps = {
   scores: {
     overall: number;
-    accuracy: number;
+    accuracy?: number;
     credibility: number;
     validity: number;
   };
+  showAccuracy?: boolean;
 };
 
 // RatingPanel showcases the overall score bar and individual metric snapshots.
-const RatingPanel = ({ scores }: RatingPanelProps) => {
+const RatingPanel = ({ scores, showAccuracy = false }: RatingPanelProps) => {
   const metricDetails = [
-    { label: "Accuracy", value: scores.accuracy },
+    ...(showAccuracy && typeof scores.accuracy === "number"
+      ? [{ label: "Accuracy", value: scores.accuracy }]
+      : []),
     { label: "Credibility", value: scores.credibility },
     { label: "Validity", value: scores.validity }
   ];
