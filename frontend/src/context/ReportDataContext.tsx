@@ -85,7 +85,9 @@ export const ReportDataProvider = ({ children }: ReportDataProviderProps) => {
         id: sourceId,
         name: displayName,
         filePath: objectUrl,
-        isLocal: true
+        isLocal: true,
+        summary: undefined,
+        scores: undefined
       }
     ]);
   }, []);

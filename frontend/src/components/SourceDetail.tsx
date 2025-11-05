@@ -1,14 +1,13 @@
 import { useNavigate, useParams } from "react-router-dom";
 import SummaryPanel from "./SummaryPanel";
 import RatingPanel from "./RatingPanel";
-import { reportScores, reportSummary } from "../data/reportData";
 import { useReportData } from "../context/ReportDataContext";
 
 // SourceDetail displays a selected internal source alongside supporting context.
 const SourceDetail = () => {
   const navigate = useNavigate();
   const { sourceId } = useParams();
-  const { getInternalSourceById, reportDocument } = useReportData();
+  const { getInternalSourceById } = useReportData();
 
   const source = sourceId ? getInternalSourceById(sourceId) : undefined;
 
@@ -48,11 +47,26 @@ const SourceDetail = () => {
           />
         </section>
         <aside className="source-detail__sidebar">
-          <RatingPanel scores={reportScores} />
+          {source.scores ? (
+            <RatingPanel
+              scores={{
+                overall:
+                  source.scores.overall ??
+                  (source.scores.credibility + source.scores.validity) / 2,
+                credibility: source.scores.credibility,
+                validity: source.scores.validity
+              }}
+            />
+          ) : (
+            <article className="card card--empty">
+              <p className="card__body-text">Ratings for this source are coming soon.</p>
+            </article>
+          )}
           <SummaryPanel
-            summary={reportSummary}
-            reportLabel={reportDocument.name}
-            onOpenReport={() => navigate("/dashboard/report")}
+            summary={
+              source.summary ??
+              "Summary for this source will appear here once available."
+            }
           />
         </aside>
       </div>

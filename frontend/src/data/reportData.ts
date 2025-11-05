@@ -1,20 +1,43 @@
+export type SourceScores = {
+  credibility: number;
+  validity: number;
+  accuracy?: number;
+  overall?: number;
+};
+
 export type InternalSource = {
   id: string;
   name: string;
   filePath: string;
   isLocal?: boolean;
+  summary?: string;
+  scores?: SourceScores;
 };
 
 export const internalSources: InternalSource[] = [
   {
     id: "2025-world-hunger",
     name: "2025 World Hunger.pdf",
-    filePath: "/example_sources/2025_world_hunger.pdf"
+    filePath: "/example_sources/2025_world_hunger.pdf",
+    summary:
+      "Global Hunger Index review outlining progress toward zero hunger, highlighting regional disparities, chronic food insecurity drivers, and resilience initiatives for 2025.",
+    scores: {
+      credibility: 0.83,
+      validity: 0.72,
+      overall: 0.78
+    }
   },
   {
     id: "supply-chain-disruptions",
     name: "Disruptions in the Food Supply Chain.pdf",
-    filePath: "/example_sources/disruptions_in_the_food_supply_chain.pdf"
+    filePath: "/example_sources/disruptions_in_the_food_supply_chain.pdf",
+    summary:
+      "Analysis of bottlenecks across production, storage, and logistics networks with recommendations on restoring food chain continuity after major shocks.",
+    scores: {
+      credibility: 0.78,
+      validity: 0.66,
+      overall: 0.72
+    }
   }
 ];
 
