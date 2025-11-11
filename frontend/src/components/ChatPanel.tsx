@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -17,6 +17,14 @@ type ChatPanelProps = {
 // ChatPanel mimics the conversational area for discussing improvements to the report.
 const ChatPanel = ({ messages, onSendMessage, isSending = false }: ChatPanelProps) => {
   const [draft, setDraft] = useState("");
+  const historyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = historyRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [messages, isSending]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -26,9 +34,9 @@ const ChatPanel = ({ messages, onSendMessage, isSending = false }: ChatPanelProp
       return;
     }
 
+    setDraft("");
     try {
       await onSendMessage(trimmed);
-      setDraft("");
     } catch (error) {
       // swallow errors since parent already handles UI feedback
     }
@@ -39,7 +47,7 @@ const ChatPanel = ({ messages, onSendMessage, isSending = false }: ChatPanelProp
       <header className="card__header card__header--chat">
         <h2>Chat</h2>
       </header>
-      <div className="chat__history">
+      <div className="chat__history" ref={historyRef}>
         {messages.map((message) => {
           const isSystem = message.author.toLowerCase() === "system";
           return (
@@ -58,6 +66,13 @@ const ChatPanel = ({ messages, onSendMessage, isSending = false }: ChatPanelProp
             </div>
           );
         })}
+        {isSending ? (
+          <div className="chat__typing-indicator">
+            <span />
+            <span />
+            <span />
+          </div>
+        ) : null}
       </div>
       <form className="chat__composer" onSubmit={handleSubmit}>
         <input
