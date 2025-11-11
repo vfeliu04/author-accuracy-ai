@@ -1,0 +1,43 @@
+Running Author AI (Dev)
+=======================
+
+Prereqs
+-------
+- Conda environment with the backend dependencies installed via `pip install -r backend/requirements.txt`
+- Node.js + npm for the frontend
+
+Backend API
+-----------
+1. Activate your Conda env:
+   ```
+   conda activate <your-env>
+   ```
+2. Start the Flask server:
+   ```
+   cd backend
+   export FLASK_APP=app.py
+   export API_KEY=dev-api-key        # update if you prefer a different key
+   flask run --port 5001
+   ```
+   Flask auto-loads `.env`/`.flaskenv` when using `flask run`, so any additional variables (e.g., `OPENAI_API_KEY`) can live there. The API is now available at `http://localhost:5001`. To verify auth, run:
+   ```
+   curl -H "X-API-Key: dev-api-key" http://localhost:5001/api/dashboard
+   ```
+
+Frontend
+--------
+1. In a separate terminal:
+   ```
+   cd frontend
+   cp .env.example .env    # first time only
+   npm install             # first time only
+   npm run dev
+   ```
+2. Edit `.env` if needed (set `VITE_API_KEY` to the same value as `API_KEY`, update `VITE_API_BASE_URL` if the backend isn’t on localhost:5001).
+3. Open the Vite URL (default `http://localhost:5173`) in your browser. The dashboard now fetches live summary/ratings/chat data from the Flask backend.
+
+Testing & Utilities
+-------------------
+- Backend tests: `cd backend && conda activate <env> && python -m pytest`
+- Frontend production build: `cd frontend && npm run build`
+- Chat/claims endpoints require the `X-API-Key` header; re-use the environment value from above in any API clients or Postman collections.

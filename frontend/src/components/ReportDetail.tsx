@@ -3,11 +3,30 @@ import RatingPanel from "./RatingPanel";
 import SummaryPanel from "./SummaryPanel";
 import { useReportData } from "../context/ReportDataContext";
 import { reportScores, reportSummary } from "../data/reportData";
+import { API_BASE_URL } from "../api/client";
 
 // ReportDetail renders the full report document alongside summary and full ratings.
 const ReportDetail = () => {
   const navigate = useNavigate();
-  const { reportDocument } = useReportData();
+  const { reportDocument, summaryData } = useReportData();
+
+  if (!reportDocument) {
+    return (
+      <div className="source-detail source-detail--missing">
+        <div className="source-detail__missing-card">
+          <p>No report has been uploaded yet.</p>
+          <button type="button" className="pill pill--filled" onClick={() => navigate("/")}>
+            Return to upload
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const fileSrc =
+    reportDocument.filePath && reportDocument.filePath.startsWith("http")
+      ? reportDocument.filePath
+      : `${API_BASE_URL}${reportDocument.filePath ?? ""}`;
 
   return (
     <div className="source-detail">
@@ -25,15 +44,22 @@ const ReportDetail = () => {
       <div className="source-detail__body">
         <section className="source-detail__viewer card card--viewer">
           <iframe
-            src={reportDocument.filePath}
+            src={fileSrc}
             title={reportDocument.name}
             className="source-detail__iframe"
             loading="lazy"
           />
         </section>
         <aside className="source-detail__sidebar">
-          <RatingPanel scores={reportScores} showAccuracy />
-          <SummaryPanel summary={reportSummary} />
+          <RatingPanel scores={summaryData?.scores ?? reportScores} showAccuracy />
+          <SummaryPanel
+            summary={summaryData?.report.summary ?? reportSummary}
+            stats={summaryData?.stats}
+            topSources={summaryData?.top_sources?.map((source) => ({
+              name: source.name,
+              usage_count: source.usage_count
+            }))}
+          />
         </aside>
       </div>
     </div>

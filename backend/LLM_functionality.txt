@@ -55,7 +55,19 @@ Prompt Construction
 3. Supporting Context block (optional):
    - List the selected source snippets with labels (`Source Title – Page X`) and trimmed text (max 500 characters each).
    - If the chunk represents a table, summarise it in one sentence using precomputed table highlights.
-4. Conversation history:
+4. Metric diagnostics block (new):
+   - Summarise accuracy, credibility, and validity data pulled from the verification pipelines:
+     * Accuracy = `supported/total` plus contradicted counts.
+     * Credibility = overall score plus per-source components (metadata, authority, recency, confidence, adjustments) and enriched metadata (authors, publication date).
+     * Validity = composite scores plus diagnostics (missing topics, methodology gaps, etc.).
+   - This block gives the LLM enough structured context to answer “Why is credibility low?” or “Who authored source X?” without re-running the pipelines.
+5. Conversation history + intent routing:
+   - Retrieve the last `CHAT_HISTORY_LENGTH` turns from SQLite and prepend them to every prompt so follow-ups inherit context.
+   - Run a lightweight intent detector (keyword/embedding) to decide between the **report** prompt (claims + metrics) and a **small-talk** prompt.
+   - For general/small-talk queries, use a friendly guardrailed prompt (“light small talk, steer back to report quality, avoid unrelated world knowledge”). The same history window keeps casual conversation coherent while still logging every turn.
+6. Core context vs RAG:
+   - Always include a short “core” block (report summary plus the stored accuracy/credibility/validity narratives) in every report-mode prompt so the assistant retains general awareness without another retrieval call.
+   - Use RAG to pull detailed claims/evidence/metric snippets only when they are relevant to the question, keeping the prompt within token limits while still grounding answers.
    - Append the last `H` turns (default 6) to maintain continuity. Always inject the context blocks before the latest user question when streaming to the LLM.
 
 Response Handling
@@ -64,8 +76,9 @@ Response Handling
 2. Stream partial responses to the UI for responsiveness.
 3. Post-process the final answer:
    - Check for verdict conflicts (e.g., the reply says “supported” while claim says “contradicted”). If a mismatch is detected, prepend a disclaimer (“System note: The verified claim contradicts this; answer withheld.”) and log the incident for review.
-   - Optionally append citations referencing claim ids (`[Claim #102]`) or source labels (`[Source: Disruptions in the Food Supply Chain, p. 7]`).
-4. Persist each exchange (question + answer + context ids used) to `data/logs/chat_sessions/{session_id}.jsonl` for auditing and future model tuning.
+   - Responses may include Markdown (bold, bullet lists). The frontend renders Markdown safely via `react-markdown` + `remark-gfm`.
+4. If the OpenAI request fails, fall back to a deterministic summary that still references the metric diagnostics so the user receives a meaningful answer.
+5. Persist each exchange (question + answer + context ids used) to `data/logs/chat_sessions/{session_id}.jsonl` for auditing and future model tuning.
 
 Frontend Integration
 --------------------

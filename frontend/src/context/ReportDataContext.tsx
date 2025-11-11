@@ -10,16 +10,37 @@ import {
 } from "react";
 import type { InternalSource } from "../data/reportData";
 import {
-  internalSources as initialInternalSources,
-  reportDocument as initialReportDocument
-} from "../data/reportData";
+  uploadSources,
+  uploadReport,
+  fetchUploads,
+  deleteUpload,
+  type UploadRecord,
+  type ReportSummaryResponse,
+  type ChatHistoryEntry,
+  fetchJob
+} from "../api/client";
 
 type ReportDataContextValue = {
   internalSources: InternalSource[];
-  reportDocument: InternalSource;
-  addInternalSource: (file: File) => void;
-  setReportDocument: (file: File) => void;
+  reportDocument: InternalSource | null;
+  addInternalSource: (file: File) => Promise<void>;
+  removeInternalSource: (id: string) => Promise<void>;
+  setReportDocument: (file: File) => Promise<void>;
   getInternalSourceById: (id: string) => InternalSource | undefined;
+  refreshUploads: () => Promise<void>;
+  summaryData: ReportSummaryResponse | null;
+  setSummaryData: (summary: ReportSummaryResponse | null) => void;
+  getChatMessages: (jobId: string) => ChatHistoryEntry[];
+  setChatMessages: (jobId: string, messages: ChatHistoryEntry[]) => void;
+  jobStatus: JobStatus | null;
+  setJobStatus: (status: JobStatus | null) => void;
+  refreshJobStatus: (jobId: string) => Promise<void>;
+};
+
+type JobStatus = {
+  job_id: string;
+  status: string;
+  updated_at?: string;
 };
 
 const ReportDataContext = createContext<ReportDataContextValue | undefined>(undefined);
@@ -53,68 +74,114 @@ const formatDisplayName = (fileName: string) => {
   return `${truncated}...${extension}`;
 };
 
-const generateSourceId = (fileName: string) => {
-  const baseRaw = fileName.replace(/\.[^/.]+$/, "");
-  const slug =
-    baseRaw
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "source";
-  return `${slug}-${Date.now()}`;
-};
-
 type ReportDataProviderProps = {
   children: ReactNode;
 };
 
 export const ReportDataProvider = ({ children }: ReportDataProviderProps) => {
-  const [sources, setSources] = useState<InternalSource[]>(initialInternalSources);
-  const [reportDoc, setReportDoc] = useState<InternalSource>(initialReportDocument);
-  const localUrlsRef = useRef<string[]>([]);
+  const [sources, setSources] = useState<InternalSource[]>([]);
+  const [reportDoc, setReportDoc] = useState<InternalSource | null>(null);
+  const loadingRef = useRef(false);
+  const [summaryData, setSummaryDataState] = useState<ReportSummaryResponse | null>(null);
+  const [chatHistoryMap, setChatHistoryMap] = useState<Record<string, ChatHistoryEntry[]>>({});
+  const [jobStatus, setJobStatusState] = useState<JobStatus | null>(null);
 
-  const addInternalSource = useCallback((file: File) => {
-    const displayName = formatDisplayName(file.name);
-    const sourceId = generateSourceId(file.name);
-    const objectUrl = URL.createObjectURL(file);
-
-    localUrlsRef.current.push(objectUrl);
-
-    setSources((prev) => [
-      ...prev,
-      {
-        id: sourceId,
-        name: displayName,
-        filePath: objectUrl,
-        isLocal: true,
-        summary: undefined,
-        scores: undefined
-      }
-    ]);
-  }, []);
-
-  const setReportDocument = useCallback((file: File) => {
-    const displayName = formatDisplayName(file.name);
-    const sourceId = generateSourceId(file.name);
-    const objectUrl = URL.createObjectURL(file);
-
-    localUrlsRef.current.push(objectUrl);
-
-    setReportDoc({
-      id: sourceId,
+  const fromUploadRecord = useCallback((record: UploadRecord): InternalSource => {
+    const displayName = formatDisplayName(record.file_name);
+    return {
+      id: record.upload_id,
       name: displayName,
-      filePath: objectUrl,
-      isLocal: true
-    });
+      filePath: record.file_url,
+      isLocal: false,
+      summary: undefined,
+      scores: undefined
+    };
   }, []);
+
+  const refreshUploads = useCallback(async () => {
+    if (loadingRef.current) {
+      return;
+    }
+    loadingRef.current = true;
+    try {
+      const [sourceUploads, reportUploads] = await Promise.all([
+        fetchUploads("SOURCE"),
+        fetchUploads("REPORT")
+      ]);
+      setSources(sourceUploads.map(fromUploadRecord));
+      setReportDoc(reportUploads[0] ? fromUploadRecord(reportUploads[0]) : null);
+    } finally {
+      loadingRef.current = false;
+    }
+  }, [fromUploadRecord]);
+
+  useEffect(() => {
+    refreshUploads().catch(() => undefined);
+  }, [refreshUploads]);
+
+  const addInternalSource = useCallback(async (file: File) => {
+    const uploads = await uploadSources([file]);
+    setSources((prev) => [...prev, ...uploads.map(fromUploadRecord)]);
+  }, [fromUploadRecord]);
+
+  const removeInternalSource = useCallback(
+    async (id: string) => {
+      await deleteUpload(id);
+      setSources((prev) => prev.filter((source) => source.id !== id));
+    },
+    []
+  );
+
+  const setReportDocument = useCallback(async (file: File) => {
+    const upload = await uploadReport(file);
+    setReportDoc(fromUploadRecord(upload));
+  }, [fromUploadRecord]);
 
   const getInternalSourceById = useCallback(
     (id: string) => sources.find((source) => source.id === id),
     [sources]
   );
 
-  useEffect(
-    () => () => {
-      localUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+  const setSummaryData = useCallback(
+    (summary: ReportSummaryResponse | null) => {
+      setSummaryDataState(summary);
+      if (summary) {
+        setReportDoc({
+          id: summary.report.id,
+          name: summary.report.name,
+          filePath: summary.report.pdf_url ?? "",
+          isLocal: false,
+          summary: summary.report.summary
+        });
+      }
+    },
+    []
+  );
+
+  const getChatMessages = useCallback(
+    (jobId: string) => chatHistoryMap[jobId] ?? [],
+    [chatHistoryMap]
+  );
+
+  const setChatMessages = useCallback((jobId: string, messages: ChatHistoryEntry[]) => {
+    setChatHistoryMap((prev) => ({ ...prev, [jobId]: messages }));
+  }, []);
+
+  const setJobStatus = useCallback((status: JobStatus | null) => {
+    setJobStatusState(status);
+  }, []);
+
+  const refreshJobStatus = useCallback(
+    async (jobId: string) => {
+      try {
+        const job = await fetchJob(jobId);
+        setJobStatusState({ job_id: job.job_id, status: job.status, updated_at: job.updated_at });
+        if (job.status === "DONE") {
+          localStorage.setItem("active_job_id", job.job_id);
+        }
+      } catch (error) {
+        console.error(error);
+      }
     },
     []
   );
@@ -124,10 +191,35 @@ export const ReportDataProvider = ({ children }: ReportDataProviderProps) => {
       internalSources: sources,
       reportDocument: reportDoc,
       addInternalSource,
+      removeInternalSource,
       setReportDocument,
-      getInternalSourceById
+      getInternalSourceById,
+      refreshUploads,
+      summaryData,
+      setSummaryData,
+      getChatMessages,
+      setChatMessages,
+      jobStatus,
+      setJobStatus,
+      refreshJobStatus
     }),
-    [sources, reportDoc, addInternalSource, setReportDocument, getInternalSourceById]
+    [
+      sources,
+      reportDoc,
+      addInternalSource,
+      removeInternalSource,
+      setReportDocument,
+      getInternalSourceById,
+      refreshUploads,
+      summaryData,
+      setSummaryData,
+      chatHistoryMap,
+      getChatMessages,
+      setChatMessages,
+      jobStatus,
+      setJobStatus,
+      refreshJobStatus
+    ]
   );
 
   return <ReportDataContext.Provider value={value}>{children}</ReportDataContext.Provider>;

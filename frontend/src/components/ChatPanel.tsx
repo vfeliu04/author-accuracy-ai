@@ -1,6 +1,8 @@
 import { FormEvent, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
-type ChatMessage = {
+export type ChatMessage = {
   id: number;
   author: string;
   text: string;
@@ -8,14 +10,15 @@ type ChatMessage = {
 
 type ChatPanelProps = {
   messages: ChatMessage[];
+  onSendMessage: (text: string) => Promise<void>;
+  isSending?: boolean;
 };
 
 // ChatPanel mimics the conversational area for discussing improvements to the report.
-const ChatPanel = ({ messages: initialMessages }: ChatPanelProps) => {
-  const [messages, setMessages] = useState(initialMessages);
+const ChatPanel = ({ messages, onSendMessage, isSending = false }: ChatPanelProps) => {
   const [draft, setDraft] = useState("");
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     const trimmed = draft.trim();
@@ -23,13 +26,12 @@ const ChatPanel = ({ messages: initialMessages }: ChatPanelProps) => {
       return;
     }
 
-    const timestamp = Date.now();
-    setMessages((prev) => [
-      ...prev,
-      { id: timestamp, author: "User", text: trimmed },
-      { id: timestamp + 1, author: "System", text: "Chat function not working at the moment." }
-    ]);
-    setDraft("");
+    try {
+      await onSendMessage(trimmed);
+      setDraft("");
+    } catch (error) {
+      // swallow errors since parent already handles UI feedback
+    }
   };
 
   return (
@@ -48,7 +50,11 @@ const ChatPanel = ({ messages: initialMessages }: ChatPanelProps) => {
               } ${isSystem ? "chat__message--left" : "chat__message--right"}`}
             >
               <span className="chat__message-author">{message.author}</span>
-              <p className="chat__message-text">{message.text}</p>
+              <div className="chat__message-text">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {message.text}
+                </ReactMarkdown>
+              </div>
             </div>
           );
         })}
@@ -60,8 +66,9 @@ const ChatPanel = ({ messages: initialMessages }: ChatPanelProps) => {
           placeholder="Type your question..."
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
+          disabled={isSending}
         />
-        <button className="chat__send-button" type="submit" aria-label="Send">
+        <button className="chat__send-button" type="submit" aria-label="Send" disabled={isSending}>
           ➤
         </button>
       </form>
