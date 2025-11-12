@@ -77,10 +77,22 @@ export async function deleteUpload(uploadId: string) {
   });
 }
 
-export async function sendChat(question: string, jobId: string, sessionId?: string) {
+export async function sendChat(
+  question: string,
+  jobId: string,
+  sessionId?: string,
+  mode?: ChatMode,
+  modeLocked?: boolean
+) {
   return apiFetch<ChatResponse>("/api/chat", {
     method: "POST",
-    body: JSON.stringify({ question, session_id: sessionId, job_id: jobId })
+    body: JSON.stringify({
+      question,
+      session_id: sessionId,
+      job_id: jobId,
+      mode,
+      mode_locked: modeLocked
+    })
   });
 }
 
@@ -136,7 +148,12 @@ export type ClaimsResponse = {
 export type ChatResponse = {
   answer: string;
   claims_used: Array<{ claim_id: string; text: string; verdict: string }>;
+  sources_used: Array<{ source_id: string; snippet?: string }>;
+  mode: ChatMode;
+  suggested_mode?: ChatMode;
 };
+
+export type ChatMode = "evidence" | "guidance" | "creative";
 
 export type PipelineResponse = {
   claims: ClaimSummary[];

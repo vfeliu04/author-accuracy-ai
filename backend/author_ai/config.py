@@ -63,7 +63,7 @@ class Settings:
     claim_context_limit: int = field(default_factory=lambda: _int_env("CLAIM_CONTEXT_LIMIT", 5))
     source_context_limit: int = field(default_factory=lambda: _int_env("SOURCE_CONTEXT_LIMIT", 6))
     claim_priority_weight: float = field(default_factory=lambda: _float_env("CLAIM_PRIORITY_WEIGHT", 1.5))
-    chat_history_length: int = field(default_factory=lambda: _int_env("CHAT_HISTORY_LENGTH", 6))
+    chat_history_length: int = field(default_factory=lambda: _int_env("CHAT_HISTORY_LENGTH", 20))
     llm_chat_model: str = field(default_factory=lambda: os.getenv("LLM_CHAT_MODEL", "gpt-4o-mini"))
 
     claim_vector_path: Path = field(default_factory=lambda: _path_env("CLAIM_VECTOR_PATH", "./data/indexes/claims"))

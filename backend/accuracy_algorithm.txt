@@ -49,6 +49,12 @@ Retrieval & Candidate Construction
 5. GPT rerank calls are batched with exponential backoff and partial fallbacks so a single failure does not block remaining candidates; fallback ranking reverts to FAISS similarity.
 6. Candidates are sorted primarily by rerank score (if present) and similarity history; rank is stored for later.
 
+Claim & Source Embedding Persistence
+------------------------------------
+1. Once verdicts are written to SQLite we embed each claim using the string `claim_text + verdict + explanation` and persist the vectors to a report-scoped FAISS index in `CLAIM_VECTOR_PATH/{report_id}` alongside a JSON manifest containing `claim_id`, verdict, and confidence.
+2. Every evidence snippet collected during retrieval (including alternative candidates) is likewise embedded and stored in `SOURCE_VECTOR_PATH/{report_id}` with metadata linking back to `claim_id`, `source_id`, and similarity diagnostics so the chat assistant can retrieve supporting context without re-running ingestion.
+3. These per-report indexes let the chat service drive a multi-index retrieval flow: question embeddings hit the claim index first for verdict-aligned answers and fall back to the source index when additional background is required.
+
 Verdict Determination
 ---------------------
 1. `_decide_verdict` evaluates the best candidate for each claim:

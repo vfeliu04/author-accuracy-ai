@@ -10,7 +10,8 @@ import {
   getLatestReportSummary,
   getReportSummary,
   sendChat,
-  getChatHistory
+  getChatHistory,
+  type ChatMode
 } from "../api/client";
 
 const ACTIVE_JOB_STORAGE_KEY = "active_job_id";
@@ -36,6 +37,9 @@ const ReportDashboard = () => {
   const [isSending, setIsSending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [chatMode, setChatMode] = useState<ChatMode>("evidence");
+  const [modeLocked, setModeLocked] = useState(false);
+  const [modeSuggestion, setModeSuggestion] = useState<ChatMode | null>(null);
   const sessionIdRef = useRef(`sess-${Date.now()}`);
   const isMountedRef = useRef(true);
 
@@ -104,6 +108,9 @@ const ReportDashboard = () => {
     if (!summaryData) {
       return;
     }
+    setChatMode("evidence");
+    setModeLocked(false);
+    setModeSuggestion(null);
     setReportTitle(summaryData.report.name);
     setSummary(summaryData.report.summary);
     setScores(summaryData.scores);
@@ -175,11 +182,25 @@ const ReportDashboard = () => {
     setMessages((prev) => [...prev, userMessage]);
     setIsSending(true);
     try {
-      const response = await sendChat(text, jobId, sessionIdRef.current);
+      const response = await sendChat(
+        text,
+        jobId,
+        sessionIdRef.current,
+        chatMode,
+        modeLocked
+      );
       setMessages((prev) => [
         ...prev,
         { id: timestamp + 1, author: "System", text: response.answer }
       ]);
+      if (!modeLocked) {
+        setChatMode(response.mode);
+      }
+      if (!modeLocked && response.suggested_mode) {
+        setModeSuggestion(response.suggested_mode);
+      } else if (!response.suggested_mode) {
+        setModeSuggestion(null);
+      }
       const historyEntryUser = {
         session_id: sessionIdRef.current,
         role: "user",
@@ -192,7 +213,13 @@ const ReportDashboard = () => {
         role: "assistant",
         message: response.answer,
         timestamp: new Date().toISOString(),
-        context_ids: { claims: response.claims_used.map((claim) => claim.claim_id) }
+        context_ids: {
+          mode: response.mode,
+          claims: response.claims_used.map((claim) => claim.claim_id),
+          sources: response.sources_used
+            .map((source) => source.source_id)
+            .filter((value): value is string => Boolean(value))
+        }
       };
       setChatMessages(jobId, [
         ...getChatMessages(jobId),
@@ -212,6 +239,27 @@ const ReportDashboard = () => {
     } finally {
       setIsSending(false);
     }
+  };
+
+  const handleModeChange = (nextMode: ChatMode) => {
+    setChatMode(nextMode);
+    setModeLocked(true);
+    setModeSuggestion(null);
+  };
+
+  const handleModeReset = () => {
+    setModeLocked(false);
+    setModeSuggestion(null);
+  };
+
+  const handleSuggestionAccept = (suggested: ChatMode) => {
+    setChatMode(suggested);
+    setModeLocked(true);
+    setModeSuggestion(null);
+  };
+
+  const handleSuggestionDismiss = () => {
+    setModeSuggestion(null);
   };
 
   const evaluatedSources = useMemo(() => {
@@ -337,7 +385,18 @@ const ReportDashboard = () => {
           />
         </section>
         <section className="dashboard__column dashboard__column--center">
-          <ChatPanel messages={messages} onSendMessage={handleSendMessage} isSending={isSending} />
+          <ChatPanel
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            isSending={isSending}
+            mode={chatMode}
+            modeLocked={modeLocked}
+            onModeChange={handleModeChange}
+            onModeReset={handleModeReset}
+            modeSuggestion={modeSuggestion}
+            onSuggestionAccept={handleSuggestionAccept}
+            onSuggestionDismiss={handleSuggestionDismiss}
+          />
         </section>
         <section className="dashboard__column dashboard__column--right dashboard__column--stacked-right">
           <RatingPanel scores={scores} showAccuracy />

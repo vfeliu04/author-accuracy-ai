@@ -17,11 +17,11 @@ Data Preparation
 1. **Claims payload construction**
    - After verification, collect every claim with fields: `claim_id`, `claim_text`, `verdict`, `confidence`, `confidence_band`, `explanation`, `evidence_ids`, and `metadata` (section, page, table flags).
    - Normalise verdict labels to {SUPPORTED, CONTRADICTED, NOT_FOUND}. Add a boolean `is_priority` that defaults to true for SUPPORTED/CONTRADICTED claims and false for NOT_FOUND, allowing us to filter low-value rows.
-   - Persist the payload to `data/cache/claims/{report_id}.json` for backend reuse.
+   - Persist the payload to `data/cache/claims/{report_id}.json` for backend reuse and embed `claim_text + verdict + explanation` into a per-report FAISS index stored inside `CLAIM_VECTOR_PATH/{report_id}` so later chat requests can retrieve the most relevant verdicts without re-running extraction.
 
 2. **Source chunk preparation**
    - Reuse the ingestion chunks generated during indexing. Each chunk carries: `chunk_id`, `doc_id`, `doc_title`, `page`, `section`, `text`, `table_payload?`, `is_table`, and the vector embedding used by FAISS.
-   - Store a lightweight JSON manifest (`data/cache/chunks/{report_id}.json`) mapping chunk ids to their metadata so the chat layer can display human-readable labels without re-querying the database.
+   - Store a lightweight JSON manifest (`data/cache/chunks/{report_id}.json`) mapping chunk ids to their metadata so the chat layer can display human-readable labels without re-querying the database. Additionally, capture the evidence snippets that supported each claim verdict and embed them into `SOURCE_VECTOR_PATH/{report_id}` so the chat assistant can provide supporting context tied to the original claim ids.
 
 3. **Vector stores**
    - Claims Index: build a FAISS (or equivalent) index from claim explanations. Embedding source is `text-embedding-3-large` run over `claim_text + verdict + explanation`. Persist under `data/indexes/claims/{report_id}`.
@@ -65,10 +65,25 @@ Prompt Construction
    - Retrieve the last `CHAT_HISTORY_LENGTH` turns from SQLite and prepend them to every prompt so follow-ups inherit context.
    - Run a lightweight intent detector (keyword/embedding) to decide between the **report** prompt (claims + metrics) and a **small-talk** prompt.
    - For general/small-talk queries, use a friendly guardrailed prompt (“light small talk, steer back to report quality, avoid unrelated world knowledge”). The same history window keeps casual conversation coherent while still logging every turn.
+   - The backend keeps up to 20 prior turns by default, but it estimates token cost and trims older messages when the combined prompt would exceed ~1.2k tokens. This keeps answers grounded without blowing the OpenAI context window.
+   - Questions that mention “mode(s)” or “model(s)” receive an additional “Assistant Modes” block describing Evidence, Guidance, Creative, and Auto behaviors so the LLM can explain the differences when asked.
 6. Core context vs RAG:
    - Always include a short “core” block (report summary plus the stored accuracy/credibility/validity narratives) in every report-mode prompt so the assistant retains general awareness without another retrieval call.
    - Use RAG to pull detailed claims/evidence/metric snippets only when they are relevant to the question, keeping the prompt within token limits while still grounding answers.
    - Append the last `H` turns (default 6) to maintain continuity. Always inject the context blocks before the latest user question when streaming to the LLM.
+
+Conversation Modes & Switching
+------------------------------
+1. **Modes**
+   - *Evidence* (default): strict QA style responses that only restate verified claims and metrics. Any gaps return “no evidence”.
+   - *Guidance*: still grounded in claims, but the prompt instructs the LLM to translate diagnostics into actionable recommendations (e.g., cite contradicted claims, call out missing topics, suggest which data to add).
+   - *Creative*: allows advisory language or brainstorming as long as speculative content is clearly labeled and consistent with the verified findings.
+2. **User control**
+   - The frontend exposes a mode selector above the chat composer along with an “Auto” toggle. When the user picks a mode, the client sends `mode` + `mode_locked=true` in every `/api/chat` call so the backend keeps that posture for the session.
+3. **Prompt-driven suggestions**
+   - If the user has not locked a mode, the backend runs a lightweight keyword detector (e.g., “improve”, “brainstorm”). When it finds a better match it sets `suggested_mode` in the response instead of auto-switching. The UI surfaces the suggestion so the user can accept or dismiss it.
+4. **Audit trail**
+   - Each chat log row stores the active mode as part of the context metadata so we can reconstruct how much freedom the assistant had when generating a response.
 
 Response Handling
 -----------------
@@ -77,8 +92,8 @@ Response Handling
 3. Post-process the final answer:
    - Check for verdict conflicts (e.g., the reply says “supported” while claim says “contradicted”). If a mismatch is detected, prepend a disclaimer (“System note: The verified claim contradicts this; answer withheld.”) and log the incident for review.
    - Responses may include Markdown (bold, bullet lists). The frontend renders Markdown safely via `react-markdown` + `remark-gfm`.
-4. If the OpenAI request fails, fall back to a deterministic summary that still references the metric diagnostics so the user receives a meaningful answer.
-5. Persist each exchange (question + answer + context ids used) to `data/logs/chat_sessions/{session_id}.jsonl` for auditing and future model tuning.
+4. If the OpenAI request fails, fall back to a deterministic summary that still references the metric diagnostics so the user receives a meaningful answer. The fallback message includes the current mode so users understand why it may sound more constrained.
+5. Persist each exchange (question + answer + context ids used, selected mode, suggested mode) to `data/logs/chat_sessions/{session_id}.jsonl` for auditing and future model tuning.
 
 Frontend Integration
 --------------------

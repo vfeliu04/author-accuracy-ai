@@ -64,6 +64,9 @@ class AccuracyPipeline:
         if evidence_rows:
             self.repo.insert_evidence(evidence_rows)
 
+        self._persist_claim_index(report_id, claims)
+        self._persist_source_index(report_id, evidence_rows)
+
         supported = sum(1 for claim in claims if claim.verdict == "SUPPORTED")
         contradicted = sum(1 for claim in claims if claim.verdict == "CONTRADICTED")
         not_found = len(claims) - supported - contradicted
@@ -169,3 +172,47 @@ class AccuracyPipeline:
         if value >= 0.4:
             return "MEDIUM"
         return "LOW"
+
+    def _persist_claim_index(self, report_id: str, claims: List[Claim]) -> None:
+        if not claims:
+            VectorStore(report_id, base_dir=self.settings.claim_vector_path).overwrite([], [])
+            return
+        texts = [
+            f"Claim: {claim.text}\nVerdict: {claim.verdict}\nExplanation: {claim.explanation}"
+            for claim in claims
+        ]
+        vectors = embed_texts(texts)
+        metadata = [
+            {
+                "claim_id": claim.claim_id,
+                "verdict": claim.verdict,
+                "confidence": claim.confidence,
+            }
+            for claim in claims
+        ]
+        VectorStore(report_id, base_dir=self.settings.claim_vector_path).overwrite(vectors, metadata)
+
+    def _persist_source_index(self, report_id: str, evidence_rows: List[Dict[str, Any]]) -> None:
+        snippets: List[str] = []
+        metadata: List[Dict[str, Any]] = []
+        for row in evidence_rows:
+            snippet = (row.get("metadata") or {}).get("snippet")
+            if not snippet:
+                continue
+            snippets.append(snippet)
+            metadata.append(
+                {
+                    "claim_id": row["claim_id"],
+                    "source_id": row.get("source_id"),
+                    "chunk_id": row.get("chunk_id"),
+                    "verdict_label": row.get("verdict_label"),
+                    "score": (row.get("metadata") or {}).get("score"),
+                    "snippet": snippet[:600],
+                }
+            )
+        store = VectorStore(report_id, base_dir=self.settings.source_vector_path)
+        if not snippets:
+            store.overwrite([], [])
+            return
+        vectors = embed_texts(snippets)
+        store.overwrite(vectors, metadata)

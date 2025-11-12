@@ -4,9 +4,8 @@ Claim-first chat assistant orchestrator.
 
 from __future__ import annotations
 
-from typing import Dict, Any, List, DefaultDict, Optional
+from typing import Dict, Any, List, DefaultDict, Optional, Tuple
 from collections import defaultdict
-import json
 
 try:
     from openai import OpenAI
@@ -17,6 +16,8 @@ from ..storage.database import Repository
 from ..config import get_settings
 from ..services.logger import setup_logger
 from ..models import _now_iso
+from ..services.embedding import embed_texts
+from ..services.vector_store import VectorStore
 
 GENERAL_INTENTS = {"hey", "hello", "hi", "thanks", "thank you", "who are you", "help", "good morning", "good afternoon"}
 REPORT_KEYWORDS = {
@@ -35,6 +36,16 @@ REPORT_KEYWORDS = {
     "table",
 }
 
+CHAT_MODES = ("evidence", "guidance", "creative")
+GUIDANCE_KEYWORDS = {"improve", "improvement", "fix", "revise", "revamp", "better", "enhance"}
+CREATIVE_KEYWORDS = {"brainstorm", "idea", "ideas", "scenario", "plan", "future", "summary", "recommend"}
+MODE_HELP_KEYWORDS = {"mode", "modes", "model", "models", "setting", "settings", "assistant mode"}
+MODE_EXPLANATIONS = {
+    "evidence": "Evidence — strictly summarizes verified claims and metrics with no speculation.",
+    "guidance": "Guidance — still grounded in claims but explains verdict gaps and suggests next steps to improve the report.",
+    "creative": "Creative — brainstorms advisory ideas based on the verified context, clearly labelling suggestions as advisory.",
+}
+
 
 logger = setup_logger(__name__)
 
@@ -43,27 +54,50 @@ class ChatService:
     def __init__(self):
         self.settings = get_settings()
         self.repo = Repository()
+        self.default_mode = CHAT_MODES[0]
         if OpenAI and self.settings.openai_api_key:
             self.client = OpenAI(api_key=self.settings.openai_api_key)
         else:
             self.client = None
             logger.info("ChatService running in heuristic mode (set OPENAI_API_KEY for LLM answers).")
 
-    def respond(self, question: str, report_id: str, session_id: str | None = None) -> Dict[str, Any]:
-        intent = self._detect_intent(question)
+    def respond(
+        self,
+        question: str,
+        report_id: str,
+        session_id: str | None = None,
+        mode: Optional[str] = None,
+        mode_locked: bool = False,
+    ) -> Dict[str, Any]:
+        cleaned_question = (question or "").strip()
+        requested_mode = (mode or "").lower()
+        active_mode = requested_mode if requested_mode in CHAT_MODES else self.default_mode
+        inferred_mode = self._infer_mode(cleaned_question)
+        suggested_mode = None
+        if not mode_locked and inferred_mode and inferred_mode != active_mode:
+            suggested_mode = inferred_mode
+
+        mode_help_requested = self._is_mode_help_question(cleaned_question)
+
         claims = self.repo.list_claims_by_report(report_id)
-        claim_context = claims[: self.settings.claim_context_limit] if intent == "report" else []
+        claim_map = {claim["claim_id"]: claim for claim in claims}
 
-        claim_ids = [claim["claim_id"] for claim in claim_context]
-        evidences = self.repo.list_evidence_for_claims(claim_ids)
-        evidence_map: DefaultDict[str, List[dict]] = defaultdict(list)
-        source_ids: set[str] = set()
-        for row in evidences:
-            evidence_map[row["claim_id"]].append(row)
-            if row.get("source_id"):
-                source_ids.add(row["source_id"])
+        raw_history = self.repo.get_chat_history(report_id, limit=self.settings.chat_history_length)
+        history_context = self._build_history_context(self._trim_history(raw_history, cleaned_question))
+        intent = self._detect_intent(cleaned_question)
+        if intent != "report":
+            answer = self._small_talk_answer(cleaned_question or None, history_context)
+            return self._finalize_response(
+                answer,
+                session_id,
+                report_id,
+                question,
+                [],
+                [],
+                active_mode,
+                suggested_mode,
+            )
 
-        source_docs = self.repo.list_documents(list(source_ids))
         report_doc = self.repo.get_document(report_id)
         validity_record = self.repo.get_validity(report_id)
         credibility_breakdown = self.repo.source_usage(report_id)
@@ -74,142 +108,121 @@ class ChatService:
             else None
         )
 
-        metrics_context = (
-            self._build_metric_context(
-                claims=claims,
-                validity=validity_record,
-                credibility_usage=credibility_breakdown,
-                source_docs=source_docs,
-                credibility_overall=credibility_overall,
-            )
-            if intent == "report"
-            else None
+        question_vector = self._embed_question(cleaned_question)
+        claim_context = self._select_claim_context(report_id, claim_map, question_vector, active_mode)
+        claim_ids = [entry["claim"]["claim_id"] for entry in claim_context]
+        evidence_map = self._group_evidence_by_claim(claim_ids)
+
+        source_context = self._select_source_context(
+            report_id,
+            question_vector,
+            active_mode,
+            claim_ids,
+            evidence_map,
         )
-        history = self.repo.get_chat_history(report_id, limit=self.settings.chat_history_length)
-        history_context = self._build_history_context(history)
+        source_ids = {entry.get("source_id") for entry in source_context if entry.get("source_id")}
+        source_docs = self.repo.list_documents([sid for sid in source_ids if sid]) if source_ids else {}
+
+        metrics_context = self._build_metric_context(
+            claims=claims,
+            validity=validity_record,
+            credibility_usage=credibility_breakdown,
+            source_docs=source_docs,
+            credibility_overall=credibility_overall,
+            mode=active_mode,
+        )
         core_context = self._build_core_context(report_doc)
+        mode_help_context = self._build_mode_help_context(active_mode) if mode_help_requested else None
 
         answer = (
             self._llm_answer(
-                question,
+                question=cleaned_question,
+                claim_context=claim_context,
+                evidence_map=evidence_map,
+                source_context=source_context,
+                source_docs=source_docs,
+                report_doc=report_doc,
+                metrics_context=metrics_context,
+                history_context=history_context,
+                core_context=core_context,
+                mode_help_context=mode_help_context,
+                mode=active_mode,
+            )
+            if self.client
+            else self._compose_answer(
                 claim_context,
-                evidence_map,
-                source_docs,
-                report_doc,
+                source_context,
                 metrics_context,
                 history_context,
                 core_context,
-                intent,
+                mode_help_context,
+                active_mode,
             )
-            if self.client
-            else self._compose_answer(claim_context, metrics_context, history_context, core_context, intent)
         )
 
-        timestamp = _now_iso()
-        session = session_id or "anonymous"
-        self.repo.record_chat_turn(
-            {
-                "session_id": session,
-                "report_id": report_id,
-                "role": "user",
-                "message": question,
-                "timestamp": timestamp,
-                "context_ids": {},
-            }
+        return self._finalize_response(
+            answer,
+            session_id,
+            report_id,
+            question,
+            [entry["claim"] for entry in claim_context],
+            [entry for entry in source_context if entry.get("source_id")],
+            active_mode,
+            suggested_mode,
         )
-        self.repo.record_chat_turn(
-            {
-                "session_id": session,
-                "report_id": report_id,
-                "role": "assistant",
-                "message": answer,
-                "timestamp": _now_iso(),
-                "context_ids": {"claims": claim_ids, "sources": list(source_ids)},
-            }
-        )
-
-        return {
-            "answer": answer,
-            "claims_used": claim_context,
-            "sources_used": list(source_ids),
-        }
 
     def _llm_answer(
         self,
         question: str,
-        claims: List[Dict[str, Any]],
+        claim_context: List[Dict[str, Any]],
         evidence_map: DefaultDict[str, List[dict]],
+        source_context: List[Dict[str, Any]],
         source_docs: Dict[str, Dict[str, Any]],
         report_doc: Dict[str, Any] | None,
         metrics_context: Optional[str],
         history_context: Optional[str],
         core_context: Optional[str],
-        intent: str,
+        mode_help_context: Optional[str],
+        mode: str,
     ) -> str:
-        if intent != "report":
-            return self._small_talk_answer(question, history_context)
-        if not claims:
-            return self._compose_answer(claims, metrics_context, history_context, core_context, intent)
+        claim_blocks = self._render_claim_findings(claim_context, evidence_map, source_docs)
+        support_blocks = self._render_supporting_context(source_context, source_docs)
+        if not any([claim_blocks, support_blocks, metrics_context, core_context]):
+            return self._format_response(
+                "I do not yet have enough verified evidence to answer. Please run the pipeline or provide more sources."
+            )
 
+        context_sections = []
         report_summary = (
             (report_doc or {}).get("metadata", {}).get("summary")
             if report_doc and report_doc.get("metadata")
             else None
         )
-
-        claim_blocks: List[str] = []
-        for idx, claim in enumerate(claims, start=1):
-            block_lines = [
-                f"[Claim {idx}]",
-                f"Text: {claim.get('text')}",
-                f"Verdict: {claim.get('verdict')}",
-                f"Confidence: {claim.get('confidence')}",
-                f"Explanation: {claim.get('explanation')}",
-            ]
-            for evidence in evidence_map.get(claim["claim_id"], []):
-                snippet = evidence.get("metadata", {}).get("snippet")
-                source_id = evidence.get("source_id")
-                doc_meta = source_docs.get(source_id, {})
-                source_label = evidence.get("file_name") or source_id or "source"
-                if snippet:
-                    block_lines.append(f"Evidence ({source_label}): {snippet}")
-                tables = (doc_meta.get("metadata") or {}).get("table_preview") or []
-                if tables:
-                    table_json = json.dumps(tables[0])[:500]
-                    block_lines.append(f"Table snippet ({source_label}): {table_json}")
-            claim_blocks.append("\n".join(block_lines))
-
-        context_sections = []
         if report_summary:
             context_sections.append(f"Report Summary:\n{report_summary}")
-        context_sections.append("Verified Claims and Evidence:\n" + "\n\n".join(claim_blocks))
+        if claim_blocks:
+            context_sections.append("Claim Findings:\n" + "\n\n".join(claim_blocks))
+        if support_blocks:
+            context_sections.append("Supporting Context:\n" + "\n\n".join(support_blocks))
         if core_context:
             context_sections.append(core_context)
         if metrics_context:
             context_sections.append(metrics_context)
         if history_context:
             context_sections.append(history_context)
+        if mode_help_context:
+            context_sections.append(mode_help_context)
+        context_sections.append(f"Assistant mode: {mode.upper()}")
         context_sections.append("User Question:\n" + question)
         prompt = "\n\n".join(context_sections)
 
-        prompt = (
-            "You are an assistant helping users understand a report verification run.\n"
-            "Use ONLY the provided claims, evidence snippets, tables, and metric diagnostics to answer the question. "
-            "If the claims do not cover the topic, say you do not have evidence.\n\n"
-            f"{prompt}"
-        )
+        system_prompt = self._mode_system_prompt(mode)
         try:
             response = self.client.chat.completions.create(  # type: ignore[union-attr]
                 model=self.settings.llm_chat_model,
-                temperature=0.2,
+                temperature=0.2 if mode == "evidence" else 0.35,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You ground answers strictly on verified claims supplied by the backend. "
-                            "Never fabricate evidence. Cite claim numbers or verdicts when helpful."
-                        ),
-                    },
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
             )
@@ -218,41 +231,57 @@ class ChatService:
                 return self._format_response(choice)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ChatService LLM call failed; falling back to heuristic answer: %s", exc)
-        return self._compose_answer(claims, metrics_context, history_context, core_context, intent)
+        return self._compose_answer(
+            claim_context,
+            source_context,
+            metrics_context,
+            history_context,
+            core_context,
+            mode,
+        )
 
     def _compose_answer(
         self,
-        claims: List[Dict[str, Any]],
+        claim_context: List[Dict[str, Any]],
+        source_context: List[Dict[str, Any]],
         metrics_context: Optional[str],
         history_context: Optional[str],
         core_context: Optional[str],
-        intent: str,
+        mode_help_context: Optional[str],
+        mode: str,
     ) -> str:
-        if intent != "report":
-            return self._small_talk_answer(None, history_context)
-        lines = []
-        if claims:
-            lines.append("Key verified claims relevant to your question:")
-            for claim in claims:
+        lines: List[str] = []
+        if claim_context:
+            lines.append("Claims considered:")
+            for entry in claim_context:
+                claim = entry["claim"]
                 verdict = claim.get("verdict", "UNKNOWN")
                 explanation = claim.get("explanation") or claim.get("text")
                 lines.append(f"- {verdict}: {explanation}")
+        if source_context:
+            lines.append("\nSupporting snippets:")
+            for ctx in source_context:
+                snippet = ctx.get("snippet")
+                if snippet:
+                    label = ctx.get("source_id") or "source"
+                    lines.append(f"- {label}: {snippet}")
+        if metrics_context:
+            lines.append("\nMetrics:")
+            lines.append(metrics_context)
         if core_context:
             lines.append("\nReport context:")
             lines.append(core_context)
-        if metrics_context:
-            lines.append("\nMetric diagnostics:")
-            lines.append(metrics_context)
         if history_context:
             lines.append("\nConversation context:")
             lines.append(history_context)
+        if mode_help_context:
+            lines.append("")
+            lines.append(mode_help_context)
         if not lines:
             return self._format_response(
-                "I do not yet have verified claims or diagnostics for this report. Please run the pipeline first."
+                "I do not yet have verified data to answer this. Please ensure the report has been processed."
             )
-        lines.append(
-            "\nAnswer: Based on these findings, the evidence indicates the report's statements are handled as above."
-        )
+        lines.append(f"\nMode: {mode.title()}. Response generated without the LLM fallback.")
         return self._format_response("\n".join(lines))
 
     def _small_talk_answer(self, question: Optional[str], history_context: Optional[str]) -> str:
@@ -301,6 +330,7 @@ class ChatService:
         credibility_usage: List[dict],
         source_docs: Dict[str, Dict[str, Any]],
         credibility_overall: Optional[float],
+        mode: str,
     ) -> str:
         if not claims and not validity and not credibility_usage:
             return ""
@@ -313,6 +343,8 @@ class ChatService:
             f"- Accuracy: {supported}/{total_claims or 1} claims supported; {contradicted} contradicted.",
         ]
 
+        improvement_notes: List[str] = []
+
         if validity:
             diagnostics = validity.get("diagnostics") or {}
             coverage = diagnostics.get("missing_topics")
@@ -324,13 +356,21 @@ class ChatService:
             )
             if coverage:
                 metrics_lines.append(f"  Missing topics: {', '.join(coverage)}.")
+                improvement_notes.append(
+                    f"Add evidence or sections covering: {', '.join(coverage)}."
+                )
             if methodology:
                 missed = [k for k, v in methodology.items() if not v]
                 if missed:
                     metrics_lines.append(f"  Methodology gaps: {', '.join(missed)}.")
+                    improvement_notes.append(
+                        f"Document methodology details for: {', '.join(missed)}."
+                    )
 
         if credibility_overall is not None:
             metrics_lines.append(f"- Credibility overall: {credibility_overall:.2f}")
+            if credibility_overall < 60:
+                improvement_notes.append("Introduce higher-credibility sources or refresh outdated data.")
 
         if credibility_usage:
             lines = ["- Credibility sources:"]
@@ -364,6 +404,11 @@ class ChatService:
                     )
             metrics_lines.extend(lines)
 
+        if mode in {"guidance", "creative"} and improvement_notes:
+            metrics_lines.append("- Suggested improvements:")
+            for note in improvement_notes:
+                metrics_lines.append(f"  • {note}")
+
         return "\n".join(metrics_lines)
 
     def _build_history_context(self, history: List[dict]) -> str:
@@ -374,6 +419,24 @@ class ChatService:
             prefix = "User" if turn["role"].lower() == "user" else "Assistant"
             lines.append(f"{prefix}: {turn['message']}")
         return "\n".join(lines)
+
+    def _trim_history(self, history: List[dict], question: str, max_tokens: int = 1200) -> List[dict]:
+        if not history:
+            return []
+        def estimate_tokens(text: str) -> int:
+            return max(1, len(text) // 4)
+
+        budget = max_tokens - estimate_tokens(question)
+        trimmed: List[dict] = []
+        accumulated = 0
+        for turn in reversed(history):
+            cost = estimate_tokens(turn.get("message", "")) + 20
+            if accumulated + cost > budget and trimmed:
+                break
+            trimmed.append(turn)
+            accumulated += cost
+        trimmed.reverse()
+        return trimmed
 
     def _build_core_context(self, report_doc: Optional[dict]) -> Optional[str]:
         if not report_doc:
@@ -399,3 +462,253 @@ class ChatService:
         formatted = formatted.replace("**", "")
         formatted = formatted.replace("* ", "• ")
         return formatted
+
+    def _embed_question(self, question: str) -> Optional[List[float]]:
+        if not question:
+            return None
+        vectors = embed_texts([question])
+        return vectors[0] if vectors else None
+
+    def _select_claim_context(
+        self,
+        report_id: str,
+        claim_map: Dict[str, Dict[str, Any]],
+        question_vector: Optional[List[float]],
+        mode: str,
+    ) -> List[Dict[str, Any]]:
+        if not claim_map:
+            return []
+        hits: List[Dict[str, Any]] = []
+        if question_vector is not None:
+            store = VectorStore(report_id, base_dir=self.settings.claim_vector_path)
+            hits = store.search(question_vector, top_k=self.settings.claim_context_limit * 2)
+        threshold = self._threshold_for_mode(mode, self.settings.claim_relevance_min)
+        ranked: List[Dict[str, Any]] = []
+        for hit in hits:
+            if hit.get("score", 0) < threshold:
+                continue
+            claim = claim_map.get(hit.get("claim_id"))
+            if not claim:
+                continue
+            ranked.append({"claim": claim, "score": hit.get("score")})
+            if len(ranked) >= self.settings.claim_context_limit:
+                break
+        if ranked:
+            return ranked
+        fallback_claims = sorted(
+            claim_map.values(),
+            key=self._claim_priority_sort,
+        )[: self.settings.claim_context_limit]
+        return [{"claim": claim, "score": None} for claim in fallback_claims]
+
+    def _select_source_context(
+        self,
+        report_id: str,
+        question_vector: Optional[List[float]],
+        mode: str,
+        fallback_claim_ids: List[str],
+        evidence_map: DefaultDict[str, List[dict]],
+    ) -> List[Dict[str, Any]]:
+        contexts: List[Dict[str, Any]] = []
+        if question_vector is not None:
+            store = VectorStore(report_id, base_dir=self.settings.source_vector_path)
+            hits = store.search(question_vector, top_k=self.settings.source_context_limit * 3)
+            threshold = self._threshold_for_mode(mode, self.settings.claim_relevance_min * 0.8)
+            seen_sources: set[str] = set()
+            for hit in hits:
+                score = hit.get("score", 0)
+                if score < threshold:
+                    continue
+                source_id = hit.get("source_id")
+                if source_id in seen_sources:
+                    continue
+                seen_sources.add(source_id)
+                contexts.append(hit)
+                if len(contexts) >= self.settings.source_context_limit:
+                    break
+            if contexts:
+                return contexts
+        if not fallback_claim_ids:
+            return []
+        fallback_contexts: List[Dict[str, Any]] = []
+        for claim_id in fallback_claim_ids:
+            for evidence in evidence_map.get(claim_id, [])[:1]:
+                snippet = (evidence.get("metadata") or {}).get("snippet")
+                if not snippet:
+                    continue
+                fallback_contexts.append(
+                    {
+                        "source_id": evidence.get("source_id"),
+                        "claim_id": claim_id,
+                        "snippet": snippet,
+                        "score": evidence.get("metadata", {}).get("score"),
+                    }
+                )
+                if len(fallback_contexts) >= self.settings.source_context_limit:
+                    return fallback_contexts
+        return fallback_contexts
+
+    def _group_evidence_by_claim(self, claim_ids: List[str]) -> DefaultDict[str, List[dict]]:
+        evidence_map: DefaultDict[str, List[dict]] = defaultdict(list)
+        if not claim_ids:
+            return evidence_map
+        rows = self.repo.list_evidence_for_claims(claim_ids)
+        for row in rows:
+            evidence_map[row["claim_id"]].append(row)
+        return evidence_map
+
+    @staticmethod
+    def _claim_priority_sort(claim: Dict[str, Any]) -> Tuple[int, float]:
+        verdict_rank = {"SUPPORTED": 0, "CONTRADICTED": 1, "NOT_FOUND": 2}.get(
+            (claim.get("verdict") or "").upper(),
+            3,
+        )
+        confidence = float(-(claim.get("confidence") or 0.0))
+        return (verdict_rank, confidence)
+
+    def _threshold_for_mode(self, mode: str, base: float) -> float:
+        if mode == "guidance":
+            return max(0.05, base * 0.8)
+        if mode == "creative":
+            return max(0.05, base * 0.7)
+        return base
+
+    def _infer_mode(self, question: str) -> Optional[str]:
+        lowered = (question or "").lower()
+        if any(keyword in lowered for keyword in GUIDANCE_KEYWORDS):
+            return "guidance"
+        if any(keyword in lowered for keyword in CREATIVE_KEYWORDS):
+            return "creative"
+        return None
+
+    def _is_mode_help_question(self, question: str) -> bool:
+        lowered = (question or "").lower()
+        if not lowered:
+            return False
+        if any(keyword in lowered for keyword in MODE_HELP_KEYWORDS):
+            return True
+        return "mode" in lowered and "what" in lowered
+
+    def _build_mode_help_context(self, active_mode: str) -> str:
+        descriptions = [MODE_EXPLANATIONS[mode] for mode in CHAT_MODES]
+        autoprefix = (
+            "Auto — lets the assistant pick whichever behavior best fits your question."
+        )
+        entries = descriptions + [autoprefix, f"Current preference: {active_mode.title()} mode."]
+        return "Assistant Modes:\n- " + "\n- ".join(entries)
+
+    def _mode_system_prompt(self, mode: str) -> str:
+        if mode == "guidance":
+            return (
+                "You are an Author AI report coach. Use verified Claim Findings as the source of truth, "
+                "and translate diagnostics into actionable recommendations. Highlight gaps, suggest next "
+                "steps, and ask for missing data when needed."
+            )
+        if mode == "creative":
+            return (
+                "You are an Author AI brainstorming assistant. Ground statements in the provided claims and "
+                "context, but you may offer clearly labeled advisory ideas or next steps. Never fabricate "
+                "data; mark general recommendations as 'Advisory'."
+            )
+        return (
+            "You are an Author AI verification assistant. Answer strictly from Claim Findings, supporting "
+            "context, and diagnostics. If evidence is missing, say so and do not speculate."
+        )
+
+    def _render_claim_findings(
+        self,
+        claim_context: List[Dict[str, Any]],
+        evidence_map: DefaultDict[str, List[dict]],
+        source_docs: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        blocks: List[str] = []
+        for idx, entry in enumerate(claim_context, start=1):
+            claim = entry["claim"]
+            block_lines = [
+                f"[Claim {idx}] {claim.get('text')}",
+                f"Verdict: {claim.get('verdict')} (confidence {claim.get('confidence')})",
+                f"Explanation: {claim.get('explanation')}",
+            ]
+            for evidence in evidence_map.get(claim["claim_id"], []):
+                snippet = (evidence.get("metadata") or {}).get("snippet")
+                if not snippet:
+                    continue
+                source_id = evidence.get("source_id")
+                source_meta = source_docs.get(source_id, {})
+                label = (
+                    (source_meta.get("metadata") or {}).get("title")
+                    or evidence.get("file_name")
+                    or source_id
+                    or "source"
+                )
+                block_lines.append(f"Evidence ({label}): {snippet}")
+            blocks.append("\n".join(block_lines))
+        return blocks
+
+    def _render_supporting_context(
+        self,
+        source_context: List[Dict[str, Any]],
+        source_docs: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        blocks: List[str] = []
+        for entry in source_context:
+            snippet = entry.get("snippet")
+            if not snippet:
+                continue
+            source_id = entry.get("source_id")
+            doc = source_docs.get(source_id or "") or {}
+            label = (
+                (doc.get("metadata") or {}).get("title")
+                or doc.get("doc_id")
+                or source_id
+                or "source"
+            )
+            score = entry.get("score")
+            meta = f" (score {score:.2f})" if isinstance(score, float) else ""
+            blocks.append(f"{label}{meta}: {snippet}")
+        return blocks
+
+    def _finalize_response(
+        self,
+        answer: str,
+        session_id: Optional[str],
+        report_id: str,
+        question: str,
+        claims_used: List[dict],
+        sources_used: List[dict],
+        mode: str,
+        suggested_mode: Optional[str],
+    ) -> Dict[str, Any]:
+        timestamp = _now_iso()
+        session = session_id or "anonymous"
+        self.repo.record_chat_turn(
+            {
+                "session_id": session,
+                "report_id": report_id,
+                "role": "user",
+                "message": question,
+                "timestamp": timestamp,
+                "context_ids": {"mode": mode},
+            }
+        )
+        self.repo.record_chat_turn(
+            {
+                "session_id": session,
+                "report_id": report_id,
+                "role": "assistant",
+                "message": answer,
+                "timestamp": _now_iso(),
+                "context_ids": {
+                    "mode": mode,
+                    "claims": [claim.get("claim_id") for claim in claims_used],
+                    "sources": [source.get("source_id") for source in sources_used],
+                },
+            }
+        )
+        return {
+            "answer": answer,
+            "claims_used": claims_used,
+            "sources_used": sources_used,
+            "mode": mode,
+            "suggested_mode": suggested_mode,
+        }

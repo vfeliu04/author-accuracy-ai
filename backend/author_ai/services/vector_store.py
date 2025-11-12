@@ -17,11 +17,13 @@ logger = setup_logger(__name__)
 
 
 class VectorStore:
-    def __init__(self, name: str = "sources"):
+    def __init__(self, name: str = "sources", base_dir: Path | None = None):
         self.settings = get_settings()
         self.name = name
-        self.index_path = self.settings.faiss_index_dir / f"{name}.index"
-        self.meta_path = self.settings.faiss_index_dir / f"{name}.meta.json"
+        storage_dir = Path(base_dir) if base_dir else self.settings.faiss_index_dir
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        self.index_path = storage_dir / f"{name}.index"
+        self.meta_path = storage_dir / f"{name}.meta.json"
         self.index = None
         self.metadata: List[Dict[str, Any]] = []
         self._load()
@@ -77,6 +79,25 @@ class VectorStore:
             meta = self.metadata[idx]
             results.append({"score": float(score), **meta})
         return results
+
+    def overwrite(self, vectors: Iterable[List[float]], metadatas: Iterable[Dict[str, Any]]) -> None:
+        vectors = list(vectors)
+        metas = list(metadatas)
+        self.index = None
+        self.metadata = []
+        if self.index_path.exists():
+            self.index_path.unlink()
+        if self.meta_path.exists():
+            self.meta_path.unlink()
+        if not vectors:
+            self._persist()
+            return
+        arr = np.array(vectors, dtype="float32")
+        self._ensure_index(arr.shape[1])
+        self._normalize(arr)
+        self.index.add(arr)
+        self.metadata = metas
+        self._persist()
 
 
 VECTOR_STORE = VectorStore()

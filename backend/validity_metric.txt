@@ -112,6 +112,7 @@ Aggregation & Persistence
    ```
    `diagnostics_json` includes lists of missing topics, contradictions, absent methodology elements, context mismatches, and stale claims.
 3. Expose an API endpoint (`/api/report/{id}/validity`) returning the overall score, categorical label (`HIGH`, `MEDIUM`, `LOW`), and a summary of top diagnostics suitable for the UI.
+4. These diagnostics are also surfaced to the chat assistant (especially in Guidance mode) so it can explain why a claim/report needs improvement and suggest targeted fixes (e.g., fill missing topics or methodology gaps).
 
 Configuration
 -------------

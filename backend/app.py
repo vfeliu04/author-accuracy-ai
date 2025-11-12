@@ -518,6 +518,8 @@ def create_app() -> Flask:
         question = payload.get("question", "")
         session_id = payload.get("session_id")
         job_id = payload.get("job_id")
+        mode = payload.get("mode")
+        mode_locked = bool(payload.get("mode_locked", False))
         report_id = None
         if job_id:
             job = repo.get_job(job_id)
@@ -531,7 +533,13 @@ def create_app() -> Flask:
         if not report_id:
             return jsonify({"error": "No completed report"}), 400
 
-        response = chat_service.respond(question, report_id=report_id, session_id=session_id)
+        response = chat_service.respond(
+            question,
+            report_id=report_id,
+            session_id=session_id,
+            mode=mode,
+            mode_locked=mode_locked,
+        )
         return jsonify(response)
 
     @app.get("/api/chat/history")

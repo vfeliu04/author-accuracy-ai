@@ -78,6 +78,7 @@ Report-Level Credibility Aggregation
    - Overall credibility score (0–100).
    - Top contributing sources with their individual scores and usage counts.
    - Indicator for sources pending manual metadata verification.
+6. The chat assistant consumes these aggregated details (score, per-source usage, metadata confidence) to justify guidance-mode recommendations and to highlight when low-credibility sources weaken a claim.
 
 Operational Considerations
 --------------------------
