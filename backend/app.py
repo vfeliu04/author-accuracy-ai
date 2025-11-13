@@ -229,7 +229,7 @@ def create_app() -> Flask:
             "top_sources": top_sources,
         }
 
-    def build_source_detail(source_id: str) -> Dict[str, Any]:
+    def build_source_detail(source_id: str, *, limit: int = 5, page: int = 0) -> Dict[str, Any]:
         upload = repo.get_upload(source_id)
         if not upload:
             raise ValueError("Source not found")
@@ -240,7 +240,10 @@ def create_app() -> Flask:
             summary_text = (doc["body_text"] or "").split("\n")[0][:400]
         summary_text = summary_text or source_meta["file_name"]
         credibility_record = repo.get_credibility(source_id)
-        claims = repo.get_claims_for_source(source_id)
+        offset = max(page, 0) * max(limit, 1)
+        claims = repo.get_claims_for_source(source_id, limit=limit, offset=offset)
+        total_claims = repo.count_claims_for_source(source_id)
+        has_more_claims = offset + len(claims) < total_claims
         supported_claims = sum(1 for claim in claims if claim.get("verdict") == "SUPPORTED")
         validity_info = (
             {
@@ -257,7 +260,9 @@ def create_app() -> Flask:
             "upload": source_meta,
             "credibility": credibility_record,
             "claims": claims,
-            "usage_count": len(claims),
+            "claim_total": total_claims,
+            "claim_has_more": has_more_claims,
+            "usage_count": total_claims,
             "tables": tables_preview,
             "summary": summary_text,
             "validity": validity_info,
@@ -484,9 +489,17 @@ def create_app() -> Flask:
             return jsonify({"error": "Report not ready"}), 404
         report_id = job.get("report_id")
         if not report_id:
-            return jsonify({"claims": []})
-        claims = repo.list_claims_by_report(report_id)
-        return jsonify({"claims": claims})
+            return jsonify({"claims": [], "total": 0, "has_more": False})
+        try:
+            limit = int(request.args.get("limit", 5))
+            page = int(request.args.get("page", 0))
+        except ValueError:
+            return jsonify({"error": "Invalid pagination parameters"}), 400
+        offset = max(page, 0) * max(limit, 1)
+        claims = repo.list_claims_by_report(report_id, limit=limit, offset=offset)
+        total = repo.count_claims_by_report(report_id)
+        has_more = offset + len(claims) < total
+        return jsonify({"claims": claims, "total": total, "has_more": has_more})
 
     @app.get("/api/sources/<source_id>")
     @require_api_key
@@ -494,7 +507,12 @@ def create_app() -> Flask:
         upload = repo.get_upload(source_id)
         if not upload:
             return jsonify({"error": "Source not found"}), 404
-        detail = build_source_detail(source_id)
+        try:
+            limit = int(request.args.get("claim_limit", 5))
+            page = int(request.args.get("claim_page", 0))
+        except ValueError:
+            return jsonify({"error": "Invalid pagination parameters"}), 400
+        detail = build_source_detail(source_id, limit=limit, page=page)
         return jsonify(detail)
 
     @app.post("/api/credibility")

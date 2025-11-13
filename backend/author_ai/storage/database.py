@@ -294,13 +294,19 @@ class Repository:
         return [dict(row) | {"metadata": json.loads(row["metadata"] or "{}")}
                 for row in rows]
 
-    def list_claims_by_report(self, report_id: str) -> list[dict]:
-        rows = self.fetchall(
-            "SELECT * FROM claims WHERE report_id = ? ORDER BY rowid",
-            (report_id,),
-        )
+    def list_claims_by_report(self, report_id: str, limit: int | None = None, offset: int = 0) -> list[dict]:
+        query = "SELECT * FROM claims WHERE report_id = ? ORDER BY rowid"
+        params: list[Any] = [report_id]
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        rows = self.fetchall(query, tuple(params))
         return [dict(row) | {"metadata": json.loads(row["metadata"] or "{}")}
                 for row in rows]
+
+    def count_claims_by_report(self, report_id: str) -> int:
+        row = self.fetchone("SELECT COUNT(*) as total FROM claims WHERE report_id = ?", (report_id,))
+        return int(row["total"]) if row else 0
 
     def list_chunks(self, doc_id: Optional[str] = None) -> list[dict]:
         rows = self.fetchall(
@@ -413,18 +419,26 @@ class Repository:
         )
         return [dict(row) for row in rows]
 
-    def get_claims_for_source(self, source_id: str) -> list[dict]:
-        rows = self.fetchall(
-            """
-            SELECT c.* FROM claim_evidence e
-            JOIN claims c ON c.claim_id = e.claim_id
-            WHERE e.source_id = ?
-            ORDER BY c.rowid
-            """,
-            (source_id,),
+    def get_claims_for_source(self, source_id: str, limit: int | None = None, offset: int = 0) -> list[dict]:
+        query = (
+            "SELECT DISTINCT c.* FROM claim_evidence e "
+            "JOIN claims c ON c.claim_id = e.claim_id "
+            "WHERE e.source_id = ? ORDER BY c.rowid"
         )
+        params: list[Any] = [source_id]
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        rows = self.fetchall(query, tuple(params))
         return [dict(row) | {"metadata": json.loads(row["metadata"] or "{}")}
                 for row in rows]
+
+    def count_claims_for_source(self, source_id: str) -> int:
+        row = self.fetchone(
+            "SELECT COUNT(DISTINCT claim_id) as total FROM claim_evidence WHERE source_id = ?",
+            (source_id,),
+        )
+        return int(row["total"]) if row else 0
 
     # Upload helpers -----------------------------------------------------
 

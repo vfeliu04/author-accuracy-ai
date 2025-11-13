@@ -23,6 +23,8 @@ const SourceDetail = () => {
   const [detail, setDetail] = useState<SourceDetailWithValidity | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [claimPage, setClaimPage] = useState(0);
+  const pageSize = 5;
 
   useEffect(() => {
     let isMounted = true;
@@ -33,9 +35,16 @@ const SourceDetail = () => {
       setLoading(true);
       setError(null);
       try {
-        const response = await getSourceDetail(sourceId);
+        const response = await getSourceDetail(sourceId, claimPage, pageSize);
         if (isMounted) {
-          setDetail(response);
+          setDetail((prev) => {
+            const mergedClaims =
+              claimPage === 0 ? response.claims : [...(prev?.claims ?? []), ...response.claims];
+            return {
+              ...response,
+              claims: mergedClaims
+            };
+          });
         }
       } catch (err) {
         if (isMounted) {
@@ -51,13 +60,17 @@ const SourceDetail = () => {
     return () => {
       isMounted = false;
     };
-  }, [sourceId]);
+  }, [sourceId, claimPage, pageSize]);
 
   const evaluatedSource = summaryData?.sources.find((source) => source.id === sourceId);
   const uploadedSource = sourceId ? getInternalSourceById(sourceId) : undefined;
   const displayName = detail?.upload.file_name ?? evaluatedSource?.name ?? uploadedSource?.name;
   const filePath =
     detail?.upload.file_url ?? evaluatedSource?.file_url ?? uploadedSource?.filePath;
+
+  useEffect(() => {
+    setClaimPage(0);
+  }, [sourceId]);
 
   if (loading) {
     return (
@@ -174,13 +187,26 @@ const SourceDetail = () => {
               <header className="card__header">
                 <h2>Claims Using This Source</h2>
               </header>
+              <p className="source-detail__claims-hint">
+                These are report claims that cite this document as evidence. Each entry shows the
+                latest verdict so you can inspect how the source was used.
+              </p>
               <ul className="table-preview">
-                {detail.claims.slice(0, 6).map((claim) => (
+                {detail.claims.map((claim) => (
                   <li key={claim.claim_id}>
                     <strong>{claim.verdict}</strong>: {claim.text}
                   </li>
                 ))}
               </ul>
+              {detail.claim_has_more ? (
+                <button
+                  type="button"
+                  className="pill pill--ghost"
+                  onClick={() => setClaimPage((prev) => prev + 1)}
+                >
+                  Show more claims
+                </button>
+              ) : null}
             </article>
           ) : null}
         </aside>

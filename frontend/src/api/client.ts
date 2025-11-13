@@ -107,16 +107,18 @@ export async function fetchJob(jobId: string) {
   return apiFetch<JobRecord>(`/api/jobs/${jobId}`);
 }
 
-export async function getReportClaims(jobId: string) {
-  return apiFetch<ClaimsResponse>(`/api/reports/${jobId}/claims`);
+export async function getReportClaims(jobId: string, page = 0, limit = 5) {
+  return apiFetch<ClaimsPageResponse>(`/api/reports/${jobId}/claims?page=${page}&limit=${limit}`);
 }
 
 export async function getChatHistory(jobId: string) {
   return apiFetch<{ history: ChatHistoryEntry[] }>(`/api/chat/history?job_id=${jobId}`);
 }
 
-export async function getSourceDetail(sourceId: string) {
-  return apiFetch<SourceDetailResponse>(`/api/sources/${sourceId}`);
+export async function getSourceDetail(sourceId: string, claimPage = 0, claimLimit = 5) {
+  return apiFetch<SourceDetailResponse>(
+    `/api/sources/${sourceId}?claim_page=${claimPage}&claim_limit=${claimLimit}`
+  );
 }
 
 export type DashboardResponse = {
@@ -143,6 +145,12 @@ export type ClaimSummary = {
 
 export type ClaimsResponse = {
   claims: ClaimSummary[];
+};
+
+export type ClaimsPageResponse = {
+  claims: ClaimSummary[];
+  total: number;
+  has_more: boolean;
 };
 
 export type ChatResponse = {
@@ -242,6 +250,8 @@ export type SourceDetailResponse = {
     components?: Record<string, number>;
   } | null;
   claims: ClaimSummary[];
+  claim_total?: number;
+  claim_has_more?: boolean;
   usage_count: number;
   tables: any[];
   summary: string;

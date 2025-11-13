@@ -53,7 +53,7 @@ Claim & Source Embedding Persistence
 ------------------------------------
 1. Once verdicts are written to SQLite we embed each claim using the string `claim_text + verdict + explanation` and persist the vectors to a report-scoped FAISS index in `CLAIM_VECTOR_PATH/{report_id}` alongside a JSON manifest containing `claim_id`, verdict, and confidence.
 2. Every evidence snippet collected during retrieval (including alternative candidates) is likewise embedded and stored in `SOURCE_VECTOR_PATH/{report_id}` with metadata linking back to `claim_id`, `source_id`, and similarity diagnostics so the chat assistant can retrieve supporting context without re-running ingestion.
-3. These per-report indexes let the chat service drive a multi-index retrieval flow: question embeddings hit the claim index first for verdict-aligned answers and fall back to the source index when additional background is required.
+3. These per-report indexes let the chat service drive a multi-index retrieval flow: question embeddings hit the claim index first for verdict-aligned answers and fall back to the source index when additional background is required. The chat API paginates claims (default 5 at a time) so prompts stay compact while letting users request more on demand.
 
 Verdict Determination
 ---------------------

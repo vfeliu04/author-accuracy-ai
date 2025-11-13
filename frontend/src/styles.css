@@ -215,6 +215,12 @@ h2 {
   overflow: hidden;
 }
 
+.source-detail__claims-hint {
+  font-size: 0.85rem;
+  color: rgba(71, 85, 105, 0.8);
+  margin: 0 0 0.75rem;
+}
+
 .source-detail--missing {
   min-height: 100vh;
   display: grid;
