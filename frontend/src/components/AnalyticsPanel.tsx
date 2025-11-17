@@ -1,37 +1,40 @@
+import { useNavigate } from "react-router-dom";
+import type { RecommendedSource } from "../api/client";
+
 type AnalyticsPanelProps = {
-  stats: {
-    claims_total: number;
-    claims_supported: number;
-    claims_contradicted: number;
-    claims_not_found: number;
-  };
-  topSources: Array<{ id: string; name: string; usage_count: number; credibility: number }>;
+  recommendedSources: RecommendedSource[];
 };
 
-const HARDCODED_RECOMMENDATIONS = [
-  "Global Food Resilience Index 2025",
-  "Nutrition Equity Observatory Brief",
-  "FAO Logistics Pulse",
-  "World Bank Commodity Outlook",
-  "WFP Supply Chain Preparedness Guide"
-];
+const AnalyticsPanel = ({ recommendedSources }: AnalyticsPanelProps) => {
+  const navigate = useNavigate();
+  const hasRecommendations = recommendedSources.length > 0;
 
-const AnalyticsPanel = (_props: AnalyticsPanelProps) => {
   return (
     <article className="card">
       <header className="card__header">
         <h2>Recommended Sources</h2>
       </header>
-      <div className="analytics__sources analytics__sources--stacked">
-        <ul>
-          {HARDCODED_RECOMMENDATIONS.map((source) => (
-            <li key={source}>
-              <div className="analytics__source">
-                <span>{source}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
+      <div className="analytics__sources analytics__sources--stacked recommended-list">
+        {hasRecommendations ? (
+          <ul>
+            {recommendedSources.map((source, index) => (
+              <li key={source.id ?? source.title}>
+                <button
+                  type="button"
+                  className="analytics__source-button"
+                  onClick={() => navigate(`/dashboard/recommendations/${index}`)}
+                >
+                  {source.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="card__body-text analytics__source-empty">
+            Run the verification pipeline to receive tailored reading recommendations that strengthen
+            your report.
+          </p>
+        )}
       </div>
     </article>
   );

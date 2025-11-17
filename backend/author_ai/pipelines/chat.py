@@ -107,6 +107,9 @@ class ChatService:
             if latest_job
             else None
         )
+        recommended_sources = (
+            (latest_job.get("result_json") or {}).get("recommended_sources") if latest_job else None
+        )
 
         question_vector = self._embed_question(cleaned_question)
         claim_context = self._select_claim_context(report_id, claim_map, question_vector, active_mode)
@@ -130,6 +133,7 @@ class ChatService:
             source_docs=source_docs,
             credibility_overall=credibility_overall,
             mode=active_mode,
+            recommended_sources=recommended_sources,
         )
         core_context = self._build_core_context(report_doc)
         mode_help_context = self._build_mode_help_context(active_mode) if mode_help_requested else None
@@ -331,6 +335,7 @@ class ChatService:
         source_docs: Dict[str, Dict[str, Any]],
         credibility_overall: Optional[float],
         mode: str,
+        recommended_sources: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         if not claims and not validity and not credibility_usage:
             return ""
@@ -403,6 +408,22 @@ class ChatService:
                         f"    metadata: author(s) {author_text or 'unknown'}, published {pub_date or 'unknown'}."
                     )
             metrics_lines.extend(lines)
+
+        if recommended_sources:
+            metrics_lines.append("- Recommended external sources:")
+            for entry in recommended_sources[:5]:
+                title = entry.get("title") or entry.get("name") or "Source"
+                note = entry.get("summary") or entry.get("host_venue")
+                metadata = entry.get("publication_year")
+                citation = entry.get("cited_by_count")
+                detail_parts = []
+                if metadata:
+                    detail_parts.append(str(metadata))
+                if isinstance(citation, int):
+                    detail_parts.append(f"{citation} citations")
+                detail_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
+                context_note = f" — {note}" if note else ""
+                metrics_lines.append(f"  • {title}{detail_text}{context_note}")
 
         if mode in {"guidance", "creative"} and improvement_notes:
             metrics_lines.append("- Suggested improvements:")

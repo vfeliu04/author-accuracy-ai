@@ -28,6 +28,7 @@ from author_ai.services.vector_store import VectorStore
 from author_ai.services.file_store import save_upload
 from author_ai.models import _now_iso
 from author_ai.services.logger import setup_logger
+from author_ai.services.recommendations import RecommendationService
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
@@ -56,12 +57,20 @@ MOCK_DASHBOARD = {
         "validity": 0.69,
     },
     "recommended_sources": [
-        "Global Food Resilience Index 2025",
-        "Nutrition Equity Observatory Brief",
-        "AgriSupply Chain Stability Outlook",
-        "Climate Resilient Harvests 2024",
-        "Urban Food Access Benchmark 2025",
-        "FAO Logistics Pulse - June 2025",
+        {
+            "id": "https://openalex.org/W123456789",
+            "title": "Global Food Resilience Index 2025",
+            "summary": "Key 2025 insights on food resilience and logistics readiness.",
+            "abstract": "This mock abstract outlines supply chain risks and resilience strategies.",
+            "credibility_score": 82,
+            "validity_score": 74,
+            "date_published": "2025-03-01",
+            "authors": ["FAO Research Division"],
+            "doi": "10.1234/example.2025.001",
+            "url": "https://example.org/global-food-resilience",
+            "openalex_url": "https://openalex.org/W123456789",
+            "host_venue": "FAO",
+        }
     ],
     "chat_suggestions": [
         {"id": 1, "author": "System", "text": "Welcome back! Ask anything about improving this report."},
@@ -79,6 +88,7 @@ def create_app() -> Flask:
     credibility = CredibilityPipeline()
     validity = ValidityPipeline()
     chat_service = ChatService()
+    recommendation_service = RecommendationService()
     repo = accuracy.repo
 
     def serialize_upload(upload: dict) -> Dict[str, Any]:
@@ -109,6 +119,70 @@ def create_app() -> Flask:
         if not uploads:
             raise ValueError("No files were provided.")
         return uploads
+
+    def build_sources_payload(source_uploads: list[dict], usage_map: Optional[Dict[str, int]] = None):
+        usage_map = usage_map or {}
+        payload = []
+        for upload in source_uploads:
+            credibility_record = repo.get_credibility(upload["upload_id"])
+            cred_fraction = _score_fraction(credibility_record["score"]) if credibility_record else 0.0
+            usage_count = usage_map.get(upload["upload_id"], 0)
+            source_meta = serialize_upload(upload)
+            payload.append(
+                {
+                    "id": upload["upload_id"],
+                    "name": source_meta["file_name"],
+                    "file_url": source_meta["file_url"],
+                    "summary": f"{usage_count} supporting claims identified." if usage_count else "No direct claims yet.",
+                    "scores": {"credibility": cred_fraction},
+                    "usage_count": usage_count,
+                }
+            )
+        return payload
+
+    def normalize_recommendation(record: dict) -> dict:
+        title = record.get("title") or record.get("name") or "Source"
+        summary = record.get("summary") or record.get("abstract")
+        summary = summary or "Summary unavailable."
+        return {
+            "id": record.get("id"),
+            "title": title,
+            "summary": summary,
+            "abstract": record.get("abstract"),
+            "credibility_score": record.get("credibility_score"),
+            "validity_score": record.get("validity_score"),
+            "date_published": record.get("date_published") or record.get("publication_year"),
+            "authors": record.get("authors") or [],
+            "doi": record.get("doi"),
+            "url": record.get("url"),
+            "openalex_url": record.get("openalex_url"),
+            "host_venue": record.get("host_venue"),
+        }
+
+    def fallback_recommendations(entries: list[dict]) -> list[dict]:
+        recommendations = []
+        for entry in entries:
+            credibility = entry.get("scores", {}).get("credibility")
+            credibility_pct = float(credibility * 100) if isinstance(credibility, (int, float)) else None
+            recommendations.append(
+                normalize_recommendation(
+                    {
+                        "id": entry.get("id"),
+                        "title": entry.get("name"),
+                        "summary": entry.get("summary") or entry.get("summary_text") or "Summary unavailable.",
+                        "abstract": None,
+                        "credibility_score": credibility_pct,
+                        "validity_score": None,
+                        "date_published": None,
+                        "authors": [],
+                        "doi": None,
+                        "url": entry.get("file_url"),
+                        "openalex_url": None,
+                        "host_venue": None,
+                    }
+                )
+            )
+        return recommendations
 
     def _score_fraction(value: Optional[float]) -> float:
         if value is None:
@@ -147,29 +221,12 @@ def create_app() -> Flask:
         usage_rows = repo.source_usage(job.get("report_id")) if job.get("report_id") else []
         usage_map = {row["source_id"]: row["usage_count"] for row in usage_rows}
 
-        sources_payload = []
-        for upload in source_uploads:
-            credibility_record = repo.get_credibility(upload["upload_id"])
-            cred_fraction = _score_fraction(credibility_record["score"]) if credibility_record else 0.0
-            usage_count = usage_map.get(upload["upload_id"], 0)
-            source_meta = serialize_upload(upload)
-            sources_payload.append(
-                {
-                    "id": upload["upload_id"],
-                    "name": source_meta["file_name"],
-                    "file_url": source_meta["file_url"],
-                    "summary": f"{usage_count} supporting claims identified." if usage_count else "No direct claims yet.",
-                    "scores": {"credibility": cred_fraction},
-                    "usage_count": usage_count,
-                }
-            )
-
+        sources_payload = build_sources_payload(source_uploads, usage_map)
         recommended = sorted(
             sources_payload,
             key=lambda entry: (entry["usage_count"], entry["scores"].get("credibility", 0.0)),
             reverse=True,
         )
-        recommended_sources = [entry["name"] for entry in recommended[:5]]
         top_sources = [
             {
                 "id": entry["id"],
@@ -179,6 +236,29 @@ def create_app() -> Flask:
             }
             for entry in recommended[:5]
         ]
+
+        recommended_sources = result.get("recommended_sources")
+        recommendations_persisted = True
+        if not recommended_sources:
+            recommendations_persisted = False
+            recommended_sources = recommendation_service.recommend(
+                claims=claims,
+                existing_sources=sources_payload,
+                report_title=report_info["file_name"],
+                limit=5,
+            )
+        if not recommended_sources:
+            recommended_sources = fallback_recommendations(recommended[:5])
+        else:
+            recommended_sources = [normalize_recommendation(item) for item in recommended_sources]
+        if not recommendations_persisted:
+            updated_result = dict(result)
+            updated_result["recommended_sources"] = recommended_sources
+            repo.update_job(
+                job["job_id"],
+                result_json=updated_result,
+                updated_at=_now_iso(),
+            )
 
         chat_messages = []
         for idx, claim in enumerate(claims[:3]):
@@ -421,12 +501,31 @@ def create_app() -> Flask:
             verification = accuracy.verify_report(report_upload)
             validity_scores = validity.score_report(Path(report_upload["path"]), report_upload["upload_id"])
             credibility_summary = credibility.aggregate_report(verification["report_id"])
+            usage_rows = repo.source_usage(verification["report_id"])
+            usage_map = {row["source_id"]: row["usage_count"] for row in usage_rows}
+            sources_payload = build_sources_payload(source_uploads, usage_map)
+            recommended_sources = recommendation_service.recommend(
+                claims=verification["claims"],
+                existing_sources=sources_payload,
+                report_title=report_upload["file_name"],
+                limit=5,
+            )
+            if not recommended_sources:
+                fallback_sources = sorted(
+                    sources_payload,
+                    key=lambda entry: (entry["usage_count"], entry["scores"].get("credibility", 0.0)),
+                    reverse=True,
+                )
+                recommended_sources = fallback_recommendations(fallback_sources[:5])
+            else:
+                recommended_sources = [normalize_recommendation(item) for item in recommended_sources]
 
             result_payload = {
                 "claims": verification["claims"],
                 "report_id": verification["report_id"],
                 "validity": validity_scores.__dict__,
                 "credibility": credibility_summary,
+                "recommended_sources": recommended_sources,
             }
 
             repo.update_job(

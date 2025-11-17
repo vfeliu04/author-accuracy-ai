@@ -130,7 +130,7 @@ export type DashboardResponse = {
     credibility: number;
     validity: number;
   };
-  recommended_sources: string[];
+  recommended_sources: RecommendedSource[];
   chat_suggestions: Array<{ id: number; author: string; text: string }>;
 };
 
@@ -195,6 +195,24 @@ export type JobRecord = {
   updated_at?: string;
 };
 
+export type RecommendedSource = {
+  id?: string | null;
+  title: string;
+  host_venue?: string | null;
+  publication_year?: number | null;
+  cited_by_count?: number | null;
+  authors?: string[];
+  doi?: string | null;
+  url?: string | null;
+  openalex_url?: string | null;
+  reason?: string | null;
+  abstract?: string | null;
+  summary?: string | null;
+  credibility_score?: number | null;
+  validity_score?: number | null;
+  date_published?: string | null;
+};
+
 export type ReportSummaryResponse = {
   job_id: string;
   report: {
@@ -209,7 +227,7 @@ export type ReportSummaryResponse = {
     credibility: number;
     validity: number;
   };
-  recommended_sources: string[];
+  recommended_sources: RecommendedSource[];
   chat_messages: Array<{ id: number; author: string; text: string }>;
   sources: Array<{
     id: string;

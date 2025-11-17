@@ -400,9 +400,7 @@ const ReportDashboard = () => {
         </section>
         <section className="dashboard__column dashboard__column--right dashboard__column--stacked-right">
           <RatingPanel scores={scores} showAccuracy />
-          {summaryData?.stats ? (
-            <AnalyticsPanel stats={summaryData.stats} topSources={summaryData.top_sources} />
-          ) : null}
+          <AnalyticsPanel recommendedSources={summaryData?.recommended_sources ?? []} />
         </section>
       </main>
     </div>

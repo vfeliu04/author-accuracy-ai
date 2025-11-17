@@ -79,6 +79,9 @@ class Settings:
         )
     )
 
+    openalex_base_url: str = field(default_factory=lambda: os.getenv("OPENALEX_BASE_URL", "https://api.openalex.org"))
+    openalex_mailto: Optional[str] = field(default_factory=lambda: os.getenv("OPENALEX_MAILTO"))
+
 
 @lru_cache
 def get_settings() -> Settings:

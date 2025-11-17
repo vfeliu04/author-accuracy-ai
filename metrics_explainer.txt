@@ -1,0 +1,101 @@
+Author AI scoring internals
+===========================
+
+This file explains how the backend computes **accuracy**, **credibility**, and **validity** scores, with explicit formulas and fast-reference “dumbed down” explanations.
+
+
+Detailed explanations
+---------------------
+
+Accuracy (claim verification)
+- Inputs: a report PDF (as a REPORT upload) and one or more SOURCE PDFs. Sources are embedded into a FAISS index (`backend/author_ai/pipelines/accuracy.py`).
+- Claim extraction:
+  - Split the report body into sentences.
+  - Keep sentences containing any digit.
+  - Extract metadata (primary numeric value, units if %/percent/million/billion, and an optional 19xx/20xx year).
+  - Initialize each claim with verdict = NOT_EVALUATED, confidence = 0.4 (MEDIUM band), explanation = “Awaiting retrieval alignment.”
+- Evidence retrieval per claim:
+  - Embed claim text → vector `c`.
+  - Search FAISS “sources” index (L2-normalized inner-product = cosine similarity). For each hit `h`, similarity score is `s = ⟨ĉ, v̂_h⟩` where vectors are normalized (`vector_store._normalize`).
+  - If no hits: verdict = NOT_FOUND, explanation = “No supporting evidence retrieved.”
+  - Otherwise, take top hit score `s_max`. Let threshold `T = RETRIEVAL_SUPPORT_THRESHOLD` (env, default 0.35).
+    - Verdict = SUPPORTED if `s_max >= T`, else NOT_FOUND.
+    - Confidence `conf = clamp(s_max, 0.05, 0.99)`.
+    - Confidence band: HIGH if conf ≥ 0.7, MEDIUM if ≥ 0.4, else LOW.
+    - Explanation: if SUPPORTED, “Retrieved evidence from <doc_id> with similarity s_max,” else “Similarity below support threshold.”
+  - Store evidence rows for all top-`k` hits (default 5) with snippet and score metadata.
+- Accuracy aggregation:
+  - Counts: `supported`, `contradicted` (currently only from data if present), `not_found = total - supported - contradicted`.
+  - Accuracy percentage: `accuracy_pct = (supported / total_claims) * 100` (0 if no claims).
+  - Metadata persisted on the report: summary sentence plus counts; also builds two FAISS indexes:
+    - Claim index (per-report) of claim “cards” (text + verdict + explanation) under `settings.claim_vector_path`.
+    - Evidence index (per-report) of supporting snippets under `settings.source_vector_path`.
+
+Credibility (source trust)
+- Inputs: one SOURCE upload at a time. Metadata is extracted (authors, publisher, publication_date, doi, confidence flag, user_adjustment).
+- Component scores (all floats, then summed and capped at 100):
+  - Metadata completeness: fields present among {title, authors, publication_date, publisher, doi}. Score
+    ```math
+    \text{metadata} = 30 \times \frac{\text{present_fields}}{5}
+    ```
+  - Authority (publisher heuristic):
+    - If publisher contains “fao”, “un”, “world bank”, “imf”: 30.
+    - Else if any publisher present: 20.
+    - Else: 10.
+  - Recency (publication year age):
+    - Age ≤ 2 years: 20
+    - Age ≤ 5: 12
+    - Age ≤ 10: 6
+    - Older/unknown: 3–10 (10 if unknown year, 3 if very old).
+  - Confidence (metadata confidence flag): HIGH → 10, MEDIUM → 7, LOW/unknown → 3.
+  - User adjustment: added verbatim (metadata key `user_adjustment`, default 0.0).
+- Total:
+  ```math
+  \text{credibility} = \min\left(100,\; \sum \text{components}\right)
+  ```
+- Stored per source with component breakdown and a human-readable summary inserted into document metadata.
+- Report-level aggregation (when a pipeline job exists):
+  - For each source used by the report, weight its credibility by usage count (number of claims tied to that source).
+  - Overall report credibility:
+    ```math
+    \text{overall} = \frac{\sum_i (\text{cred}_i \times \text{usage}_i)}{\sum_i \text{usage}_i}
+    ```
+  - Details list each source’s score and usage.
+
+Validity (methodological/coverage heuristics)
+- Inputs: the report PDF (ingested again with sections + body).
+- Sub-scores (defaults hard-coded; all in [0, 100]):
+  - Coverage: looks for topic keywords {climate, supply, logistics, nutrition, conflict} in the body text.
+    ```math
+    \text{coverage} = 60 + 40 \times \frac{\text{covered_topics}}{5}
+    ```
+    Missing topics are recorded.
+  - Internal consistency: scans section text for repeated (entity, number) pairs; penalizes contradictory numbers.
+    - If <2 numeric statements: 90.
+    - Else: `penalty = min(60, 10 * contradictions)`, score = `max(40, 100 - penalty)`.
+  - Methodology: checks section text for keywords {data, sample, method, limitation}.
+    ```math
+    \text{methodology} = 50 + 12.5 \times \text{keyword_hits}
+    ```
+  - Context alignment: counts occurrences of {global, africa, asia, europe, america}.
+    ```math
+    \text{context} = 60 + \min(40,\; 8 \times \text{hits})
+    ```
+  - Recency: fixed 80.0 (placeholder for future logic).
+- Weighted overall:
+  - Weights: coverage 0.25, consistency 0.25, methodology 0.20, context 0.20, recency 0.10.
+  - Formula:
+    ```math
+    \text{overall} = 0.25\,c_\text{cov} + 0.25\,c_\text{cons} + 0.20\,c_\text{meth} + 0.20\,c_\text{ctx} + 0.10\,c_\text{rec}
+    ```
+  - Diagnostics saved: section count, average section length, missing topics, methodology gaps.
+
+
+Dumbed down (but detailed) versions
+-----------------------------------
+
+Accuracy (simple): “Grab every sentence with a number, treat it as a claim. For each claim, look in your uploaded sources for the most similar snippet using embeddings (cosine similarity). If the best match is above a threshold (≈0.35), mark SUPPORTED; otherwise NOT_FOUND. Confidence is the similarity score clipped to 5–99%. Accuracy = supported claims ÷ total claims (as a percentage).”
+
+Credibility (simple): “Give points for how complete the source’s citation info is, whether the publisher looks authoritative, how recent it is, and how confident we are in that metadata. Add them up (with any manual adjustment) and cap at 100. For a report, average source credibility weighted by how often each source is used.”
+
+Validity (simple): “Check if the report mentions the key topics, see if numbers contradict each other, look for basic methodology keywords, and whether it references relevant regions/contexts. Add a fixed recency bump. Combine these with preset weights to get an overall validity score; also note missing topics and methodology gaps.”

@@ -15,7 +15,9 @@ export type InternalSource = {
 };
 
 export const internalSources: InternalSource[] = [];
-export const recommendedSources: string[] = [];
+import type { RecommendedSource } from "../api/client";
+
+export const recommendedSources: RecommendedSource[] = [];
 export const reportSummary = "";
 export const reportScores = {
   overall: 0,
