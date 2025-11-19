@@ -1,99 +1,42 @@
 Accuracy Verification Pipeline
-===========================
+==============================
 
-Overview
---------
-This document captures the current end-to-end workflow we use when a PDF report is verified against the indexed source corpus. 
+This note mirrors the current Python implementation under `backend/author_ai/pipelines`.
 
-Indexing Sources
-----------------
-1. `verify.index_sources` is the entry point invoked from both the CLI (`hallcheck index`) and the web upload.
-2. It resets the SQLite database and deletes any existing FAISS artifacts for the target index (`_reset_environment`).
-3. For each source PDF:
-   - `ingest_pdf.extract_pdf_content` delegates to the new pipeline (`pdf_pipeline.ingest_pdf_v2`) unless `PDF_PIPELINE_LEGACY` is set.
-   - The pipeline routes the document (`pdf_pipeline.router.route`). It first attempts a lightweight text extraction (e.g., pdfminer) to gauge whether the PDF already contains a usable text layer. If the text length falls below a configured threshold or the content is low-quality (non-alphanumeric ratio too high), we invoke OCRmyPDF (Tesseract-backed) to embed searchable text while preserving layout. The OCR stage yields a clean digital PDF and extracted text for downstream parsing.
-   - Structured text extraction prefers Tabula for table regions; when Tabula fails validation or a high-fidelity export is requested, we send the table region to the PDFTables API instead. Non-tabular body content continues through the layout extractor + legacy unstructured wrapper, and the table extractor reconciles whichever engine produced the table payload.
-   - The pipeline returns:
-     * A structured `Document` JSON (sections, tables, metadata).
-     * Body text with `[[TABLE-n]]` placeholders.
-     * A table map keyed by table IDs so we can retain HTML/text for each table.
-   - Verification writes a `Document` row (type SOURCE) including router label, OCR flag, extractor chain, content hash, and the JSON document payload.
-   - Body text is chunked via `chunking.chunk_text` with adaptive overlap. For any chunk containing table placeholders we strip the marker, attach the table metadata to the `Chunk.tables` JSON column, and keep offsets. Each table attachment includes page number, section heading, and bounding box coordinates so rerank/explanation steps can reference the original context even though the public UI hides it.
-4. Once all chunks are collected we embed them in batch using OpenAI embeddings (`embeddings.embed_texts` → `text-embedding-3-large`).
-5. FAISS stores the normalized vectors, and parallel metadata files (chunk text, doc IDs) are saved under `data/indexes/`.
 
-Extracting Claims From a Report
--------------------------------
-1. `verify.verify_report` clears previous report rows and loads the chosen FAISS index + metadata.
-2. The report PDF is ingested via the same pipeline (`ingest_pdf.extract_pdf_content`).
-3. A `Document` row (type REPORT) is inserted with the structured JSON stored for downstream UI.
-4. `extract_claims.find_claims` tokenizes report sentences, identifies ones containing numeric patterns, and yields a dict with:
-   - sentence text
-   - primary numeric value (float)
-   - inferred units (e.g., “percent” or “per 100,000”)
-   - detected year (if any)
-   - metadata (raw number tokens, year match)
-5. Multi-number sentences generate one claim record per numeric mention; we track a shared `sentence_id` and `number_index` so downstream aggregation can reconcile them.
-6. An optional semantic classifier (feature-flagged, implemented with GPT or a lightweight model) evaluates non-numeric sentences for categorical/verbal claims. Accepted sentences are stored in a secondary table for monitoring before inclusion in the main verdict flow.
-7. We log the top-K high-similarity sentences that were rejected (e.g., due to missing numbers) to an audit table, enabling data labeling for future model improvements.
+Source indexing
+---------------
+1. **Reset & ingest** – `/api/run_pipeline` calls `reset_environment()` and instantiates `AccuracyPipeline`. Each SOURCE upload is ingested via `IngestionPipeline.ingest`.
+2. **OCR & parsing** – `ingest` runs OCRmyPDF only when heuristics flag a scanned PDF. PyPDF2 extracts per-page text plus tables (Tabula / pdf_tables helper).
+3. **Recursive chunking** – Each page’s text is split with LangChain’s `RecursiveCharacterTextSplitter` (1 200 char chunks, 200 overlap, separators `["\n\n","\n",". "," ",""]`). Every chunk stores metadata:
+   - `parent_id = page-{n}`
+   - `parent_title = "Page n"`
+   - `parent_page = n`
+4. **Persistence** – Chunks are inserted into SQLite (`chunks` table) and the document metadata records `sections_detail` so we can recover the full parent text later. The chunk list is embedded via `embed_texts` (OpenAI `text-embedding-3-large`) and stored in FAISS with matching metadata (`chunk_id`, `doc_id`, snippet, parent info). The FAISS index is wrapped by LangChain’s `FAISS` vector store so we can call `similarity_search` later.
 
-Retrieval & Candidate Construction
-----------------------------------
-1. Claim sentences are embedded via OpenAI embeddings.
-2. FAISS retrieves `topk` nearest chunks per claim (`retrieval.search_faiss`).
-3. `_collect_evidence` builds candidate dicts containing chunk text, table metadata, source document info, and similarity score.
-4. `_refine_evidence` enriches candidates:
-   - If the chunk has associated tables, mark the candidate as `is_table`.
-   - Otherwise, use `best_sentence_snippet` to pick a snippet around the claim’s topic.
-   - Apply GPT reranking (`gpt.score_relevance`) for the top `RERANK_MAX_CANDIDATES` if enabled. Candidates receive `rerank_score/label` and retrieval method is updated to `gpt_rerank`.
-5. GPT rerank calls are batched with exponential backoff and partial fallbacks so a single failure does not block remaining candidates; fallback ranking reverts to FAISS similarity.
-6. Candidates are sorted primarily by rerank score (if present) and similarity history; rank is stored for later.
 
-Claim & Source Embedding Persistence
-------------------------------------
-1. Once verdicts are written to SQLite we embed each claim using the string `claim_text + verdict + explanation` and persist the vectors to a report-scoped FAISS index in `CLAIM_VECTOR_PATH/{report_id}` alongside a JSON manifest containing `claim_id`, verdict, and confidence.
-2. Every evidence snippet collected during retrieval (including alternative candidates) is likewise embedded and stored in `SOURCE_VECTOR_PATH/{report_id}` with metadata linking back to `claim_id`, `source_id`, and similarity diagnostics so the chat assistant can retrieve supporting context without re-running ingestion.
-3. These per-report indexes let the chat service drive a multi-index retrieval flow: question embeddings hit the claim index first for verdict-aligned answers and fall back to the source index when additional background is required. The chat API paginates claims (default 5 at a time) so prompts stay compact while letting users request more on demand.
+Report verification
+-------------------
+1. **Claim extraction** – `AccuracyPipeline.verify_report` ingests the REPORT PDF, splits sentences, and keeps any sentence containing a digit. Metadata saved for each claim: numeric value, units, year.
+2. **Evidence retrieval** – `_retrieve_evidence`:
+   - Calls `VectorStore.similarity_search(claim_text, k=5)` to fetch snippets plus metadata and reconstructs parent sections (page text) using `sections_detail` cached from SQLite.
+   - Runs `EvidenceReranker` (OpenAI Chat Completion using `RERANK_MODEL`, default `gpt-4o-mini`). The reranker receives the claim + numbered snippets and returns a `index|score` list so we can reorder hits. If the API key or model is missing, retrieval order is unchanged.
+   - The top reranked hit determines the verdict. We still use the FAISS similarity score `s_max` to test against `RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35) and to compute confidence and confidence band.
+   - Each evidence row (including non-top hits) is stored with snippet, similarity score, rerank score, and parent context (page/title/text).
+3. **Persistence** – Claims and evidence go into SQLite. Per-report FAISS indexes are built for (a) claims (`CLAIM_VECTOR_PATH/report_id`) using `Claim: … / Verdict: … / Explanation: …` strings, and (b) supporting snippets (`SOURCE_VECTOR_PATH/report_id`).
+4. **Summary** – Counts `supported`, `contradicted`, `not_found` are written into the report metadata (`accuracy_summary`, etc.). The HTTP APIs expose this via `/api/reports/*`.
 
-Verdict Determination
----------------------
-1. `_decide_verdict` evaluates the best candidate for each claim:
-   - Numeric comparison: `_evaluate_numeric_alignment` first normalizes values into canonical units (via `measurement.normalize_value`, powered by `pint` + custom rules) before checking for exact matches, tolerances, sums, or conflicts.
-   - Entity guard: `_entity_guard_allows_support` rejects evidence with mismatched entities via fuzzy token comparison.
-   - Optional GPT alignment (`gpt.confirm_entity_alignment`) can veto support if entities differ with high confidence.
-   - Confidence is adjusted based on rerank scores, normalized numeric alignment, unit conversion reliability, year match, and alignment outcome.
-   - Verdict status is one of SUPPORTED, CONTRADICTED, NOT_FOUND; confidence is clamped to configured ranges.
-2. Verdict data (status, confidence, evidence dict, explanation placeholder) is persisted in the `verdicts` table. The evidence dict contains the ordered candidate list with metadata (method, snippet or table flag, table payloads, rerank scores, alignment diagnostics, normalization details, etc.).
-3. Unit normalization caches both original and canonical values so administrators can audit how each verdict was derived; tolerance thresholds are configurable per unit type (absolute vs relative error).
 
-Explanation Generation
-----------------------
-1. `gpt.generate_explanation` is invoked:
-   - By default when `verify_report` finishes for the top candidate (cached explanation stored in the verdict row).
-   - On-demand when the user switches evidence candidates in the UI (`webbridge.fetch_candidate_preview`), provided an OpenAI API key is set.
-2. The explanation payload includes claim text, verdict status, confidence, and the truncated evidence context (snippet or full chunk). GPT is instructed to produce a single paragraph referencing the specific numbers/years and stating support/contradiction.
-3. Even though the public UI hides raw evidence, the prompt still receives page/table metadata so the narrative can reference provenance (“Table 4 indicates…”), while the response returned to the client keeps those references abstract (“supporting table confirms…”).
+Key configuration
+-----------------
+- `RETRIEVAL_SUPPORT_THRESHOLD` – similarity cutoff for SUPPORTED verdicts (fraction).
+- `RERANK_MODEL` / `OPENAI_API_KEY` – enables GPT reranking; code falls back automatically if absent.
+- `CLAIM_VECTOR_PATH`, `SOURCE_VECTOR_PATH`, `FAISS_INDEX_DIR` – directories for persisted FAISS indexes.
+- `PDF_OCR_*` env vars – control when OCR is triggered.
 
-Web Presentation
-----------------
-1. `webbridge.fetch_results` aggregates the headline metrics that power the dashboard view.
-2. When the user selects the accuracy score card, we navigate to a dedicated claims verdict page. That screen lists each extracted claim with its verdict (SUPPORTED / CONTRADICTED / NOT_FOUND) and the generated explanation. We intentionally omit raw evidence snippets, table previews, and rerank diagnostics—those stay in the verdict payload for internal auditing only.
-3. `webbridge.fetch_claim_detail` now returns a trimmed structure tailored for this page (claim text, verdict label, confidence band, explanation), even though the backend payload still includes the hidden evidence metadata for administrators.
-4. Confidence bands map numeric scores to `LOW (0.0–0.4)`, `MEDIUM (0.4–0.7)`, and `HIGH (0.7–1.0)` by default; the mapping is emitted alongside each verdict so the frontend can render consistent badges. Thresholds live in config (`VERDICT_CONFIDENCE_BANDS`) for future tuning.
-5. Table rendering helpers remain available for internal tools, but the public UI does not surface table HTML or chunk text.
 
-Caching & Config Flags
-----------------------
-- Embedding and rerank behaviour is controlled via environment variables in `config.py` (`RERANK_WITH_GPT`, `RERANK_MODEL`, etc.).
-- Table formatting toggle: `TABLES_FORMAT_WITH_GPT` (default true) can be disabled to revert to the legacy rendering path; GPT outputs are cached in `data/cache/table_format_cache.json`.
-- OCR settings in `pdf_pipeline.config` select the OCRmyPDF binary, language packs, and toggle auto-detection (`pdf.ocr.enabled`, `pdf.ocr.force_when_scanned`).
-- Table extraction strategy is controlled via `PDF_TABLES_ENGINE` (defaults to `tabula` with a `pdf_tables.api_key` fallback to invoke PDFTables).
-- Confidence band thresholds are defined in `VERDICT_CONFIDENCE_BANDS` so UX changes remain in sync with backend tuning.
-- Environment validation checks ensure OCRmyPDF binaries, Java runtime (for Tabula), and PDFTables API credentials are available before indexing begins.
-- The legacy ingestion pipeline can be reactivated with `PDF_PIPELINE_LEGACY=true` if needed.
-
-Key Failure Handling
---------------------
-- Missing embeddings or rerank failures raise runtime errors (e.g., absent OpenAI credentials) to prevent silent success.
-- Table rendering gracefully falls back to heuristic parsing when GPT is unavailable, ensuring evidence is still visible.
-- Claim alignment checks log but do not crash on OpenAI errors; we treat the lack of alignment data as neutral.
+Operational notes
+-----------------
+- Re-indexing sources resets the FAISS “sources” store (`VectorStore("sources")`).
+- Reranker prompts are deterministic (temperature 0.1) but you can disable reranking via environment by clearing `RERANK_MODEL` or API keys.
+- Parent sections cached in `_section_cache` ensure that chat explanations can reference “Page N” without a second pass over the PDF.

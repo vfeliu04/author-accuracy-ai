@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Dict, Any, List
 import uuid
 
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:  # pragma: no cover
+    RecursiveCharacterTextSplitter = None  # type: ignore
+
 from ..config import get_settings
 from ..services import ocr, table_extraction
 from ..services.logger import setup_logger
@@ -19,7 +24,19 @@ from ..services.summarizer import summarize_text
 logger = setup_logger(__name__)
 
 
+DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
+
+
 def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str]:
+    if RecursiveCharacterTextSplitter is not None:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=max_chars,
+            chunk_overlap=overlap,
+            separators=DEFAULT_SEPARATORS,
+        )
+        return [chunk for chunk in splitter.split_text(text) if chunk.strip()]
+
+    # Fallback to simple sliding window chunking when LangChain is unavailable.
     chunks: List[str] = []
     start = 0
     while start < len(text):
@@ -66,17 +83,22 @@ class IngestionPipeline:
 
         body_text = "\n".join(full_text_parts)
         summary_text = summarize_text(body_text)
-        raw_chunks = chunk_text(body_text)
-
-        chunk_payload = []
-        for chunk in raw_chunks:
-            chunk_payload.append(
-                {
-                    "chunk_id": str(uuid.uuid4()),
-                    "text": chunk,
-                    "doc_id": doc_id,
-                }
-            )
+        chunk_payload: List[Dict[str, Any]] = []
+        for section in sections:
+            section_chunks = chunk_text(section["text"])
+            for chunk in section_chunks:
+                chunk_payload.append(
+                    {
+                        "chunk_id": str(uuid.uuid4()),
+                        "text": chunk,
+                        "doc_id": doc_id,
+                        "metadata": {
+                            "parent_id": section["id"],
+                            "parent_title": section["title"],
+                            "parent_page": section["page"],
+                        },
+                    }
+                )
 
         chunk_records = []
         for chunk in chunk_payload:
@@ -87,7 +109,7 @@ class IngestionPipeline:
                     "text": chunk["text"],
                     "page_start": None,
                     "page_end": None,
-                    "metadata": {},
+                    "metadata": chunk.get("metadata") or {},
                 }
             )
 
@@ -100,6 +122,7 @@ class IngestionPipeline:
                 "tables": len(tables),
                 "table_preview": table_preview,
                 "summary": summary_text,
+                "sections_detail": sections,
             },
             body_text=body_text,
             created_at=_now_iso(),

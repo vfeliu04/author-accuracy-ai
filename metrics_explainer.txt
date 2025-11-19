@@ -8,28 +8,36 @@ Detailed explanations
 ---------------------
 
 Accuracy (claim verification)
-- Inputs: a report PDF (as a REPORT upload) and one or more SOURCE PDFs. Sources are embedded into a FAISS index (`backend/author_ai/pipelines/accuracy.py`).
+- Inputs: a report PDF (REPORT upload) plus SOURCE uploads indexed earlier. Each PDF is ingested page-by-page, chunked with LangChain’s recursive splitter (1 200 char chunks, 200 overlap), and every chunk stores parent metadata (`page`, `title`, `section id`). Vectors and metadata live in FAISS with LangChain docstores for retrieval.
 - Claim extraction:
-  - Split the report body into sentences.
-  - Keep sentences containing any digit.
-  - Extract metadata (primary numeric value, units if %/percent/million/billion, and an optional 19xx/20xx year).
-  - Initialize each claim with verdict = NOT_EVALUATED, confidence = 0.4 (MEDIUM band), explanation = “Awaiting retrieval alignment.”
-- Evidence retrieval per claim:
-  - Embed claim text → vector `c`.
-  - Search FAISS “sources” index (L2-normalized inner-product = cosine similarity). For each hit `h`, similarity score is `s = ⟨ĉ, v̂_h⟩` where vectors are normalized (`vector_store._normalize`).
-  - If no hits: verdict = NOT_FOUND, explanation = “No supporting evidence retrieved.”
-  - Otherwise, take top hit score `s_max`. Let threshold `T = RETRIEVAL_SUPPORT_THRESHOLD` (env, default 0.35).
-    - Verdict = SUPPORTED if `s_max >= T`, else NOT_FOUND.
-    - Confidence `conf = clamp(s_max, 0.05, 0.99)`.
-    - Confidence band: HIGH if conf ≥ 0.7, MEDIUM if ≥ 0.4, else LOW.
-    - Explanation: if SUPPORTED, “Retrieved evidence from <doc_id> with similarity s_max,” else “Similarity below support threshold.”
-  - Store evidence rows for all top-`k` hits (default 5) with snippet and score metadata.
+  - Split the report text into sentences (`SENTENCE_SPLIT` regex).
+  - Keep any sentence containing a digit and capture metadata: primary numeric value, units (`percent|%|million|billion`), and first matched year (19xx/20xx).
+  - Initialize each claim with verdict NOT_EVALUATED, confidence 0.4 (MEDIUM), explanation “Awaiting retrieval alignment.”
+- Retrieval + rerank per claim:
+  1. Pass the claim text to the LangChain FAISS retriever (cosine similarity). Top `k=5` hits come with snippets and parent sections.
+  2. Attach the full parent page/section content for context.
+  3. Send the hits to the LLM reranker (`RERANK_MODEL`, default `gpt-4o-mini`). The prompt asks for `index|score` outputs where `score∈[0,1]`. Absent an API key, retrieval order is unchanged.
+  4. Use the highest-ranked hit (reranked list) to set the verdict. Let `s_max` be its similarity score (not the rerank score). With threshold `T = RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35):
+     ```math
+     \text{verdict} =
+       \begin{cases}
+         \text{SUPPORTED}, & s_\max \ge T \\
+         \text{NOT\_FOUND}, & \text{otherwise}
+       \end{cases}
+     ```
+     Confidence = `clamp(s_max, 0.05, 0.99)`; band HIGH if ≥0.7, MEDIUM if ≥0.4, else LOW.
+  5. Record evidence rows for every hit with `score`, `rerank_score`, snippets, and parent info (page/title/text).
 - Accuracy aggregation:
-  - Counts: `supported`, `contradicted` (currently only from data if present), `not_found = total - supported - contradicted`.
-  - Accuracy percentage: `accuracy_pct = (supported / total_claims) * 100` (0 if no claims).
-  - Metadata persisted on the report: summary sentence plus counts; also builds two FAISS indexes:
-    - Claim index (per-report) of claim “cards” (text + verdict + explanation) under `settings.claim_vector_path`.
-    - Evidence index (per-report) of supporting snippets under `settings.source_vector_path`.
+  - Counts: `supported`, `contradicted` (if any future steps set it), and `not_found = total - supported - contradicted`.
+  - Accuracy percentage:
+    ```math
+    \text{accuracy\_pct} = 
+      \begin{cases}
+        0, & \text{total}=0 \\
+        \frac{\text{supported}}{\text{total}} \times 100,& \text{otherwise}
+      \end{cases}
+    ```
+  - Persisted metadata: summary string with counts plus FAISS indexes for claims (`CLAIM_VECTOR_PATH/{report_id}`) and evidence snippets (`SOURCE_VECTOR_PATH/{report_id}`) so chat and follow-on retrieval reuse the vectors.
 
 Credibility (source trust)
 - Inputs: one SOURCE upload at a time. Metadata is extracted (authors, publisher, publication_date, doi, confidence flag, user_adjustment).
@@ -94,7 +102,7 @@ Validity (methodological/coverage heuristics)
 Dumbed down (but detailed) versions
 -----------------------------------
 
-Accuracy (simple): “Grab every sentence with a number, treat it as a claim. For each claim, look in your uploaded sources for the most similar snippet using embeddings (cosine similarity). If the best match is above a threshold (≈0.35), mark SUPPORTED; otherwise NOT_FOUND. Confidence is the similarity score clipped to 5–99%. Accuracy = supported claims ÷ total claims (as a percentage).”
+Accuracy (simple): “Split the report into number-containing sentences. For a claim, fetch a handful of similar snippets from your sources, then let GPT re-rank those snippets so the best one really matches the claim. If the top snippet’s similarity score is over ~0.35, mark the claim SUPPORTED; otherwise NOT_FOUND. Save the snippet plus its page so explanations can say where it came from. Accuracy is still supported ÷ total claims.”
 
 Credibility (simple): “Give points for how complete the source’s citation info is, whether the publisher looks authoritative, how recent it is, and how confident we are in that metadata. Add them up (with any manual adjustment) and cap at 100. For a report, average source credibility weighted by how often each source is used.”
 

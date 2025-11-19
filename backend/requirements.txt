@@ -7,5 +7,7 @@ ocrmypdf
 tabula-py
 pandas
 faiss-cpu
+langchain-text-splitters
+langchain-community
 pytest
 python-dotenv

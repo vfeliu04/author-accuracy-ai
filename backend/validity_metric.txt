@@ -1,134 +1,60 @@
 Validity Assessment Pipeline
 ============================
 
-Overview
---------
-This document captures the planned workflow for computing the report-level Validity metric. Whereas the Accuracy pipeline validates individual claims against external sources, the Validity metric evaluates the report holistically: internal coherence, methodological completeness, contextual alignment, topical coverage, and freshness. The output is a 0–100 score with diagnostic breakdowns that the UI can surface alongside the overall rating.
+Based on `backend/author_ai/pipelines/validity.py`.
 
-Inputs & Dependencies
----------------------
-- Structured report document produced by ingestion (`Document` JSON with sections, headings, tables).
-- Claim verdict payload (`verdicts` table + evidence metadata).
-- Source chunk metadata (page, section, geography, timeframe, doc_type).
-- Domain templates describing expected methodology elements (`validity.methodology_template`).
-- Embedding client (same as retrieval) for semantic similarity computations.
-- Configurable weights for each validity dimension.
 
-Processing Stages
------------------
+Inputs
+------
+- REPORT PDF processed by `IngestionPipeline` (same flow as accuracy: OCR if needed, PyPDF2 text, section metadata, tables).
+- `sections` + `body_text` from ingestion.
+- Config options (`VALIDITY_TOPIC_THRESHOLD`, `VALIDITY_WEIGHTS`, etc.).
 
-1. Section Segmentation
-   - Use the structured `Document` JSON to identify chapter/section boundaries, headings, and paragraph blocks.
-   - Normalize headings via slugification to group similar titles (e.g., “Methodology”, “Methods & Data”).
-   - Persist a section manifest:
-     ```
-     section_id | title | level | start_page | end_page | token_count | text_embedding
-     ```
 
-2. Topic Coverage Analysis
-   - Build a topic profile for the supporting source corpus:
-     - Cluster source chunks (e.g., K=20) using embeddings and label clusters via top keywords (`coverage_clusters`).
-   - Map report sections to clusters by cosine similarity.
-   - Compute coverage metrics:
-     - `covered_topics`: clusters with similarity >= `VALIDITY_TOPIC_THRESHOLD`.
-     - `missing_topics`: high-salience clusters (based on claim volume or chunk frequency) not addressed by the report.
-     - `shallow_topics`: covered topics where report token count < `MIN_SECTION_TOKENS` or fewer than `MIN_UNIQUE_SOURCES` support claims.
-
-3. Internal Consistency Checks
-   - Extract numeric statements inside the report (reuse `extract_claims` but scoped to intra-document comparisons).
-   - Group statements by entity + measure (e.g., `{"entity": "Region A", "metric": "food insecurity rate"}`).
-   - Flag contradictions when values differ beyond tolerance (`INTERNAL_NUMERIC_TOLERANCE`) without an explicit explanation clause (phrases like “previously”, “declined from”).
-   - Detect definitional drift by tracking key terms (e.g., “food insecurity”) across sections. Use cosine similarity between definition sentences; penalise when similarity < `VALIDITY_DEFINITION_THRESHOLD`.
-
-4. Methodology Completeness
-   - Match sections against the domain template (e.g., for humanitarian reports expect: data sources, sampling, time period, limitations).
-   - For each required element:
-     - Run keyword + embedding search within candidate sections.
-     - If absent, create a diagnostic entry (`missing_element`).
-   - Bonus points when methodology references multiple independent sources or includes reproducibility info (appendix links, data release).
-
-5. Contextual Evidence Alignment
-   - For every claim verdict marked SUPPORTED/CONTRADICTED:
-     - Compare claim metadata (year, geography, demographic) to metadata from the supporting source chunk(s).
-     - Penalise mismatches (e.g., claim year 2025 supported by 2018 data) even if the numeric values align.
-     - Record over-reliance when more than `MAX_SINGLE_SOURCE_RATIO` of claims depend on the same source.
-   - Summarise per-section context health scores for UI display.
-
-6. Temporal Relevance
-   - Determine the latest publication year among supporting sources.
-   - Compare against the verification date; apply decay based on `VALIDITY_RECENCY_DECAY_YEARS`.
-   - Identify outdated statistics: claims referencing data older than `VALIDITY_DATA_STALENESS_YEARS`.
-
-Scoring Model
+Scoring steps
 -------------
-Each dimension produces a 0–100 score. Default weights (configurable):
-- Topic Coverage: 25%
-- Internal Consistency: 25%
-- Methodology Completeness: 20%
-- Contextual Alignment: 20%
-- Temporal Relevance: 10%
+1. **Coverage score (0–100):**
+   - Look for topic keywords `{climate, supply, logistics, nutrition, conflict}` in the report body.
+   - Covered topics = count of keywords present.
+   - Missing topics list is persisted for diagnostics.
+   - Score formula:
+     ```math
+     \text{coverage} = 60 + 40 \times \frac{\text{covered}}{5}
+     ```
+2. **Internal consistency (0–100):**
+   - Regex scan sections for `(phrase, number)` pairs.
+   - If <2 numeric statements → score 90.
+   - Otherwise penalise contradictory numbers referencing the same phrase: `penalty = min(60, contradictions * 10)`, then score = `max(40, 100 - penalty)`.
+3. **Methodology score (0–100):**
+   - Keywords `{data, sample, method, limitation}` searched per section.
+   - Score = `50 + 12.5 * hits`; flags indicate which elements were found for diagnostics.
+4. **Context alignment (0–100):**
+   - Count occurrences of `{global, africa, asia, europe, america}`.
+   - Score = `60 + min(40, 8 * hits)`.
+5. **Recency score:** constant 80.0 (placeholder until a richer timeliness model is added).
 
-1. Topic Coverage Score
-   ```
-   coverage_score = 100
-                    - weight_missing * (missing_topics / total_topics)
-                    - weight_shallow * (shallow_topics / covered_topics)
-   ```
-   Clamp between 0 and 100.
 
-2. Internal Consistency Score
-   - Start at 100.
-   - Subtract penalties:
-     - `contradiction_penalty` for each uncited numeric conflict.
-     - `definition_penalty` for each definitional drift instance.
-     - Cap total deduction to 80 points to avoid over-penalising repetitive issues.
+Aggregation
+-----------
+- Default weights:
+  - coverage 0.25
+  - consistency 0.25
+  - methodology 0.20
+  - context 0.20
+  - recency 0.10
+- Overall:
+  ```math
+  \text{overall} = 0.25\,c_\text{cov} + 0.25\,c_\text{cons} + 0.20\,c_\text{meth} + 0.20\,c_\text{ctx} + 0.10\,c_\text{rec}
+  ```
+- Diagnostics persisted:
+  - `sections` count,
+  - `average_section_length`,
+  - `missing_topics`,
+  - `methodology_elements` flags.
 
-3. Methodology Score
-   - Sum required element coverage (`present_element` contributes full points, `partial` contributes half, `missing` contributes zero).
-   - Add bonus up to +10 for reproducibility signals.
 
-4. Contextual Alignment Score
-   - Start from average claim confidence (scaled 0–100) for the report.
-   - Apply penalties for:
-     - `context_mismatch_ratio` (percentage of claims with geography/timeframe mismatch).
-     - `single_source_ratio` beyond threshold.
-   - Ensure the score does not exceed the mean credibility score of supporting sources (to avoid inflated validity when sources are weak).
-
-5. Temporal Relevance Score
-   - Compute decay based on the newest data point.
-   - Example: `score = max(0, 100 - decay_rate * max(0, current_year - newest_year - freshness_grace))`.
-   - Deduct additional points for each stale claim detected.
-
-Aggregation & Persistence
--------------------------
-1. Compute the weighted sum:
-   ```
-   report_validity = Σ (dimension_weight_i * dimension_score_i)
-   ```
-2. Capture diagnostics in `validity_results` table:
-   ```
-   report_id | validity_score | coverage_score | consistency_score | methodology_score
-             | context_score | recency_score | diagnostics_json | last_calculated_at
-   ```
-   `diagnostics_json` includes lists of missing topics, contradictions, absent methodology elements, context mismatches, and stale claims.
-3. Expose an API endpoint (`/api/report/{id}/validity`) returning the overall score, categorical label (`HIGH`, `MEDIUM`, `LOW`), and a summary of top diagnostics suitable for the UI.
-4. These diagnostics are also surfaced to the chat assistant (especially in Guidance mode) so it can explain why a claim/report needs improvement and suggest targeted fixes (e.g., fill missing topics or methodology gaps).
-
-Configuration
--------------
-- `VALIDITY_TOPIC_THRESHOLD` (default 0.35)
-- `VALIDITY_MIN_SECTION_TOKENS` (default 250)
-- `VALIDITY_MIN_UNIQUE_SOURCES` (default 2)
-- `INTERNAL_NUMERIC_TOLERANCE` (default relative 5%)
-- `VALIDITY_DEFINITION_THRESHOLD` (default 0.7 cosine)
-- `MAX_SINGLE_SOURCE_RATIO` (default 0.4)
-- `VALIDITY_RECENCY_DECAY_YEARS` (default 3)
-- `VALIDITY_DATA_STALENESS_YEARS` (default 5)
-- Dimension weights exposed via `VALIDITY_WEIGHTS` config.
-
-Future Enhancements
--------------------
-- Incorporate automated argumentation analysis to assess logical flow between sections (e.g., claims vs. supporting rationale).
-- Add machine-readable checklists for specific domains (health, finance, climate) so methodology expectations adapt to report type.
-- Integrate human feedback loop where analysts can confirm/override identified contradictions or missing topics, updating training data for heuristics.
-- Leverage question-answer generation to probe sections for missing details (“What is the sample size?”) and deduct validity when answers are absent.
+Usage
+-----
+- Scores + diagnostics stored via `repo.upsert_validity`.
+- Report metadata receives a textual summary (`validity_summary`, `validity_missing_topics`, `validity_methodology_gaps`).
+- `/api/run_pipeline` and `/api/verify/report` return the `ValidityScores` dataclass (converted to dict) so the frontend and chat service have consistent access to the metrics.

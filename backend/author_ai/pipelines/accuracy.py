@@ -15,6 +15,7 @@ from ..config import get_settings
 from ..services.logger import setup_logger
 from ..services.embedding import embed_texts
 from ..services.vector_store import VectorStore
+from ..services.reranker import EvidenceReranker
 from .ingestion import IngestionPipeline
 
 
@@ -30,6 +31,8 @@ class AccuracyPipeline:
         self.ingestion = IngestionPipeline()
         self.repo = Repository()
         self.vector_store = VectorStore("sources")
+        self.reranker = EvidenceReranker()
+        self._section_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def index_source(self, upload: dict) -> Dict[str, Any]:
         pdf_path = Path(upload["path"]).resolve()
@@ -118,21 +121,33 @@ class AccuracyPipeline:
         if not texts:
             return
         vectors = embed_texts(texts)
-        metadata = [
-            {
-                "chunk_id": chunk["chunk_id"],
-                "doc_id": chunk["doc_id"],
-                "snippet": chunk["text"][:400],
-            }
-            for chunk in chunks
-        ]
+        metadata = []
+        for chunk in chunks:
+            chunk_meta = chunk.get("metadata") or {}
+            metadata.append(
+                {
+                    "chunk_id": chunk["chunk_id"],
+                    "doc_id": chunk["doc_id"],
+                    "snippet": chunk["text"][:400],
+                    "parent_id": chunk_meta.get("parent_id"),
+                    "parent_title": chunk_meta.get("parent_title"),
+                    "parent_page": chunk_meta.get("parent_page"),
+                }
+            )
         self.vector_store.add(vectors, metadata)
 
     def _retrieve_evidence(self, claim: Claim) -> List[Dict[str, Any]]:
-        vectors = embed_texts([claim.text])
-        if not vectors:
-            return []
-        hits = self.vector_store.search(vectors[0], top_k=5)
+        hits = self.vector_store.similarity_search(claim.text, top_k=5)
+        for hit in hits:
+            parent_section = self._get_parent_section(hit.get("doc_id"), hit.get("parent_id"))
+            if parent_section:
+                hit["parent"] = {
+                    "id": parent_section.get("id"),
+                    "title": parent_section.get("title"),
+                    "page": parent_section.get("page"),
+                    "text": parent_section.get("text"),
+                }
+        hits = self.reranker.rerank(claim.text, hits)
         evidence_rows = []
         if not hits:
             claim.verdict = "NOT_FOUND"
@@ -140,17 +155,18 @@ class AccuracyPipeline:
             return evidence_rows
 
         best = hits[0]
-        score = best["score"]
+        score = float(best.get("score") or 0.0)
         threshold = self.settings.retrieval_support_threshold
         verdict = "SUPPORTED" if score >= threshold else "NOT_FOUND"
         claim.verdict = verdict
         claim.confidence = float(min(0.99, max(0.05, score)))
         claim.confidence_band = self._band_from_confidence(claim.confidence)
-        claim.explanation = (
-            f"Retrieved evidence from {best['doc_id']} with similarity {score:.2f}."
-            if verdict == "SUPPORTED"
-            else "Similarity below support threshold."
-        )
+        if verdict == "SUPPORTED":
+            parent = best.get("parent") or {}
+            page_hint = f" (page {parent.get('page')})" if parent.get("page") else ""
+            claim.explanation = f"Retrieved evidence from {best['doc_id']}{page_hint} with similarity {score:.2f}."
+        else:
+            claim.explanation = "Similarity below support threshold."
 
         for hit in hits:
             evidence_rows.append(
@@ -160,7 +176,12 @@ class AccuracyPipeline:
                     "source_id": hit["doc_id"],
                     "chunk_id": hit.get("chunk_id"),
                     "verdict_label": verdict if hit is best else "ALTERNATIVE",
-                    "metadata": {"snippet": hit.get("snippet"), "score": hit["score"]},
+                    "metadata": {
+                        "snippet": hit.get("snippet"),
+                        "score": hit.get("score"),
+                        "rerank_score": hit.get("rerank_score"),
+                        "parent": hit.get("parent"),
+                    },
                 }
             )
         return evidence_rows
@@ -172,6 +193,16 @@ class AccuracyPipeline:
         if value >= 0.4:
             return "MEDIUM"
         return "LOW"
+
+    def _get_parent_section(self, doc_id: str | None, parent_id: str | None) -> Dict[str, Any] | None:
+        if not doc_id or not parent_id:
+            return None
+        if doc_id not in self._section_cache:
+            document = self.repo.get_document(doc_id) or {}
+            metadata = document.get("metadata") or {}
+            sections = metadata.get("sections_detail") or []
+            self._section_cache[doc_id] = {section["id"]: section for section in sections}
+        return self._section_cache.get(doc_id, {}).get(parent_id)
 
     def _persist_claim_index(self, report_id: str, claims: List[Claim]) -> None:
         if not claims:
