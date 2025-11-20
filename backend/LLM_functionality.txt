@@ -16,8 +16,8 @@ Goals
 
 Data sources
 ------------
-- **Claims:** pulled from SQLite via `repo.list_claims_by_report(report_id)`. Includes verdict, confidence, explanation, and metadata.
-- **Evidence snippets:** grouped per claim using `repo.list_evidence_for_claims`, so we can cite which sources supported a claim.
+- **Claims:** pulled from SQLite via `repo.list_claims_by_report(report_id)`. Includes verdict, confidence, explanation, LlamaIndex-powered section summaries, and metadata.
+- **Evidence snippets:** grouped per claim using `repo.list_evidence_for_claims`. Each snippet now carries haystack and LLM rerank scores plus parent summaries, enabling richer citations.
 - **Vector stores:** per-report FAISS indexes (claims + supporting snippets) allow LangChain-style retrieval when needed.
 - **Validity / Credibility:** fetched from `repo.get_validity`, `repo.source_usage`, and job result JSON (for recommended sources + overall credibility).
 - **Chat history:** stored in `chat_logs`, trimmed to `CHAT_HISTORY_LENGTH` entries.

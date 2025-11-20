@@ -19,6 +19,7 @@ from ..services.logger import setup_logger
 from ..storage.database import Repository
 from ..models import _now_iso
 from ..services.summarizer import summarize_text
+from ..services.section_indexer import SECTION_INDEXER
 
 
 logger = setup_logger(__name__)
@@ -83,6 +84,7 @@ class IngestionPipeline:
 
         body_text = "\n".join(full_text_parts)
         summary_text = summarize_text(body_text)
+        section_summaries = SECTION_INDEXER.summarize_sections(sections)
         chunk_payload: List[Dict[str, Any]] = []
         for section in sections:
             section_chunks = chunk_text(section["text"])
@@ -113,6 +115,15 @@ class IngestionPipeline:
                 }
             )
 
+        detailed_sections = []
+        for section in sections:
+            detailed_sections.append(
+                {
+                    **section,
+                    "summary": section_summaries.get(section["id"]),
+                }
+            )
+
         self.repo.upsert_document(
             doc_id=doc_id,
             doc_type=doc_type,
@@ -122,7 +133,7 @@ class IngestionPipeline:
                 "tables": len(tables),
                 "table_preview": table_preview,
                 "summary": summary_text,
-                "sections_detail": sections,
+                "sections_detail": detailed_sections,
             },
             body_text=body_text,
             created_at=_now_iso(),

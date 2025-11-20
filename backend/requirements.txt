@@ -9,5 +9,9 @@ pandas
 faiss-cpu
 langchain-text-splitters
 langchain-community
+llama-index-core
+llama-index-llms-openai
+farm-haystack
+sentence-transformers
 pytest
 python-dotenv

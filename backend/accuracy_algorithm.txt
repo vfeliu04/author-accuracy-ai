@@ -12,17 +12,22 @@ Source indexing
    - `parent_id = page-{n}`
    - `parent_title = "Page n"`
    - `parent_page = n`
-4. **Persistence** – Chunks are inserted into SQLite (`chunks` table) and the document metadata records `sections_detail` so we can recover the full parent text later. The chunk list is embedded via `embed_texts` (OpenAI `text-embedding-3-large`) and stored in FAISS with matching metadata (`chunk_id`, `doc_id`, snippet, parent info). The FAISS index is wrapped by LangChain’s `FAISS` vector store so we can call `similarity_search` later.
+4. **Section summaries (LlamaIndex)** – For each page/section, we invoke LlamaIndex’s `SummaryIndex` (powered by the configured OpenAI model) to produce a concise synopsis. This is stored in `sections_detail`. If LlamaIndex isn’t available, we fall back to the heuristic summarizer.
+5. **Persistence** – Chunks are inserted into SQLite (`chunks` table) and the document metadata records `sections_detail` (including LlamaIndex summaries) so we can recover the full parent text later. The chunk list is embedded via `embed_texts` (OpenAI `text-embedding-3-large`) and stored in FAISS with matching metadata (`chunk_id`, `doc_id`, snippet, parent info). The FAISS index is wrapped by LangChain’s `FAISS` vector store so we can call `similarity_search` later.
 
 
 Report verification
 -------------------
 1. **Claim extraction** – `AccuracyPipeline.verify_report` ingests the REPORT PDF, splits sentences, and keeps any sentence containing a digit. Metadata saved for each claim: numeric value, units, year.
 2. **Evidence retrieval** – `_retrieve_evidence`:
-   - Calls `VectorStore.similarity_search(claim_text, k=5)` to fetch snippets plus metadata and reconstructs parent sections (page text) using `sections_detail` cached from SQLite.
-   - Runs `EvidenceReranker` (OpenAI Chat Completion using `RERANK_MODEL`, default `gpt-4o-mini`). The reranker receives the claim + numbered snippets and returns a `index|score` list so we can reorder hits. If the API key or model is missing, retrieval order is unchanged.
-   - The top reranked hit determines the verdict. We still use the FAISS similarity score `s_max` to test against `RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35) and to compute confidence and confidence band.
-   - Each evidence row (including non-top hits) is stored with snippet, similarity score, rerank score, and parent context (page/title/text).
+   - Calls `VectorStore.similarity_search(claim_text, k=5)` to fetch snippets plus metadata and reconstructs parent sections (page text + LlamaIndex summary) using `sections_detail` cached from SQLite.
+   - Haystack rerank: pass the candidate snippets through `HaystackReranker` (SentenceTransformers cross-encoder) to sort by semantic relevance.
+   - LLM rerank: pass the haystack-ordered hits to `EvidenceReranker` (OpenAI Chat Completion using `RERANK_MODEL`, default `gpt-4o-mini`), which emits `index|score` output and final ordering. If the API key or either library is unavailable, the step gracefully skips.
+   - Verdict classification:
+     * If the FAISS similarity score `s_max` exceeds `RETRIEVAL_SUPPORT_THRESHOLD`, call `VerdictClassifier` (OpenAI chat JSON response or heuristic numeric comparison) to decide whether the evidence `SUPPORTS`, `CONTRADICTS`, or is `INCONCLUSIVE`.
+     * INCONCLUSIVE downgrades to `NOT_FOUND`. SUPPORTED and CONTRADICTED update the claim verdict and explanation.
+   - If `s_max` is below the threshold we keep the claim as `NOT_FOUND`.
+   - Each evidence row (including non-top hits) is stored with snippet, similarity score, haystack score, rerank score, classification metadata, and parent context (page/title/text/summary).
 3. **Persistence** – Claims and evidence go into SQLite. Per-report FAISS indexes are built for (a) claims (`CLAIM_VECTOR_PATH/report_id`) using `Claim: … / Verdict: … / Explanation: …` strings, and (b) supporting snippets (`SOURCE_VECTOR_PATH/report_id`).
 4. **Summary** – Counts `supported`, `contradicted`, `not_found` are written into the report metadata (`accuracy_summary`, etc.). The HTTP APIs expose this via `/api/reports/*`.
 

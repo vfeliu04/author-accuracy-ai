@@ -8,16 +8,17 @@ Detailed explanations
 ---------------------
 
 Accuracy (claim verification)
-- Inputs: a report PDF (REPORT upload) plus SOURCE uploads indexed earlier. Each PDF is ingested page-by-page, chunked with LangChain’s recursive splitter (1 200 char chunks, 200 overlap), and every chunk stores parent metadata (`page`, `title`, `section id`). Vectors and metadata live in FAISS with LangChain docstores for retrieval.
+- Inputs: a report PDF (REPORT upload) plus SOURCE uploads indexed earlier. Each PDF is ingested page-by-page, chunked with LangChain’s recursive splitter (1 200 char chunks, 200 overlap), and every chunk stores parent metadata (`page`, `title`, `section id`). LlamaIndex builds concise summaries for every parent section, so downstream explanations can cite both the raw paragraph and a short synopsis. Vectors and metadata live in FAISS with LangChain docstores for retrieval.
 - Claim extraction:
   - Split the report text into sentences (`SENTENCE_SPLIT` regex).
   - Keep any sentence containing a digit and capture metadata: primary numeric value, units (`percent|%|million|billion`), and first matched year (19xx/20xx).
   - Initialize each claim with verdict NOT_EVALUATED, confidence 0.4 (MEDIUM), explanation “Awaiting retrieval alignment.”
 - Retrieval + rerank per claim:
-  1. Pass the claim text to the LangChain FAISS retriever (cosine similarity). Top `k=5` hits come with snippets and parent sections.
-  2. Attach the full parent page/section content for context.
-  3. Send the hits to the LLM reranker (`RERANK_MODEL`, default `gpt-4o-mini`). The prompt asks for `index|score` outputs where `score∈[0,1]`. Absent an API key, retrieval order is unchanged.
-  4. Use the highest-ranked hit (reranked list) to set the verdict. Let `s_max` be its similarity score (not the rerank score). With threshold `T = RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35):
+  1. Pass the claim text to the LangChain FAISS retriever (cosine similarity). Top `k=5` hits come with snippets, section summaries (via LlamaIndex), and parent metadata.
+  2. First-stage rerank: run Haystack’s `SentenceTransformersRanker` (`cross-encoder/ms-marco-MiniLM-L-6-v2`) to reorder hits using a cross-encoder classifier, yielding `haystack_score`.
+  3. Second-stage rerank: send the haystack-ordered hits to the LLM reranker (`RERANK_MODEL`, default `gpt-4o-mini`) which emits `index|score` entries in `[0,1]`. If OpenAI isn’t configured, this stage skips automatically.
+  4. Only when the FAISS score `s_max` exceeds `T = RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35) do we move forward; otherwise the claim is `NOT_FOUND`.
+  5. VerdictClassifier (OpenAI chat if available, heuristic numeric comparison otherwise) looks at the claim text, metadata, and best snippet to classify `SUPPORTED`, `CONTRADICTED`, or `INCONCLUSIVE`. INCONCLUSIVE falls back to `NOT_FOUND`.
      ```math
      \text{verdict} =
        \begin{cases}
@@ -102,7 +103,7 @@ Validity (methodological/coverage heuristics)
 Dumbed down (but detailed) versions
 -----------------------------------
 
-Accuracy (simple): “Split the report into number-containing sentences. For a claim, fetch a handful of similar snippets from your sources, then let GPT re-rank those snippets so the best one really matches the claim. If the top snippet’s similarity score is over ~0.35, mark the claim SUPPORTED; otherwise NOT_FOUND. Save the snippet plus its page so explanations can say where it came from. Accuracy is still supported ÷ total claims.”
+Accuracy (simple): “Split the report into number-containing sentences. For each claim, grab the best matching snippet (dense retrieval → Haystack cross-encoder → GPT reranker). If the match is strong enough, ask GPT whether the snippet supports or contradicts the claim; if it contradicts the numbers, mark it CONTRADICTED, otherwise SUPPORTED. If no good evidence exists, mark NOT_FOUND. Accuracy still counts supported ÷ total, but now contradicted claims are tracked too.”
 
 Credibility (simple): “Give points for how complete the source’s citation info is, whether the publisher looks authoritative, how recent it is, and how confident we are in that metadata. Add them up (with any manual adjustment) and cap at 100. For a report, average source credibility weighted by how often each source is used.”
 

@@ -16,6 +16,8 @@ from ..services.logger import setup_logger
 from ..services.embedding import embed_texts
 from ..services.vector_store import VectorStore
 from ..services.reranker import EvidenceReranker
+from ..services.haystack_reranker import HaystackReranker
+from ..services.verdict_classifier import VerdictClassifier
 from .ingestion import IngestionPipeline
 
 
@@ -31,7 +33,9 @@ class AccuracyPipeline:
         self.ingestion = IngestionPipeline()
         self.repo = Repository()
         self.vector_store = VectorStore("sources")
+        self.haystack_reranker = HaystackReranker()
         self.reranker = EvidenceReranker()
+        self.verdict_classifier = VerdictClassifier()
         self._section_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def index_source(self, upload: dict) -> Dict[str, Any]:
@@ -146,7 +150,9 @@ class AccuracyPipeline:
                     "title": parent_section.get("title"),
                     "page": parent_section.get("page"),
                     "text": parent_section.get("text"),
+                    "summary": parent_section.get("summary"),
                 }
+        hits = self.haystack_reranker.rerank(claim.text, hits)
         hits = self.reranker.rerank(claim.text, hits)
         evidence_rows = []
         if not hits:
@@ -157,16 +163,42 @@ class AccuracyPipeline:
         best = hits[0]
         score = float(best.get("score") or 0.0)
         threshold = self.settings.retrieval_support_threshold
-        verdict = "SUPPORTED" if score >= threshold else "NOT_FOUND"
+        classification = None
+        if score >= threshold:
+            classification = self.verdict_classifier.classify(claim, best)
+            label = (classification.get("label") or "SUPPORTED").upper()
+            if label == "CONTRADICTED":
+                verdict = "CONTRADICTED"
+            elif label == "SUPPORTED":
+                verdict = "SUPPORTED"
+            else:
+                verdict = "NOT_FOUND"
+        else:
+            verdict = "NOT_FOUND"
+
         claim.verdict = verdict
-        claim.confidence = float(min(0.99, max(0.05, score)))
+        confidence_candidates = [score]
+        if classification and isinstance(classification.get("confidence"), (int, float)):
+            confidence_candidates.append(float(classification["confidence"]))
+        claim.confidence = float(min(0.99, max(0.05, max(confidence_candidates, default=0.05))))
         claim.confidence_band = self._band_from_confidence(claim.confidence)
+
         if verdict == "SUPPORTED":
             parent = best.get("parent") or {}
             page_hint = f" (page {parent.get('page')})" if parent.get("page") else ""
-            claim.explanation = f"Retrieved evidence from {best['doc_id']}{page_hint} with similarity {score:.2f}."
+            reason = (classification or {}).get("reason") or f"Similarity {score:.2f}."
+            claim.explanation = f"Supported by {best['doc_id']}{page_hint}: {reason}"
+        elif verdict == "CONTRADICTED":
+            parent = best.get("parent") or {}
+            page_hint = f" (page {parent.get('page')})" if parent.get("page") else ""
+            reason = (classification or {}).get("reason") or f"Similarity {score:.2f} but contradicting values detected."
+            claim.explanation = f"Contradicted by {best['doc_id']}{page_hint}: {reason}"
         else:
-            claim.explanation = "Similarity below support threshold."
+            if score < threshold:
+                claim.explanation = "Similarity below support threshold."
+            else:
+                reason = (classification or {}).get("reason") or "Evidence inconclusive."
+                claim.explanation = f"No definitive evidence: {reason}"
 
         for hit in hits:
             evidence_rows.append(
@@ -180,7 +212,9 @@ class AccuracyPipeline:
                         "snippet": hit.get("snippet"),
                         "score": hit.get("score"),
                         "rerank_score": hit.get("rerank_score"),
+                        "haystack_score": hit.get("haystack_score"),
                         "parent": hit.get("parent"),
+                        "classification": classification if hit is best else None,
                     },
                 }
             )
