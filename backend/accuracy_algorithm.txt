@@ -41,6 +41,11 @@ Recommendations (OpenAlex)
 - On-topic check: keep only candidates whose title/abstract contains at least one derived term.
 - Re-rank: embed the report/claim context and candidate titles/abstracts, compute cosine similarity, drop low-relevance candidates, and sort by relevance with minor boosts for recency/credibility.
 
+Claim extraction filters
+-----------------------
+- Strip common list/section markers cautiously (e.g., "1.", "2)", "5.2") only when the remainder has no other digits, so true numeric claims like "5.5 out of 10…" keep their leading value.
+- Drop sentences whose only numeric token is a likely heading (no unit/year, trailing number only).
+
 
 Key configuration
 -----------------

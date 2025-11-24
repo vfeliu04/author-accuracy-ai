@@ -103,8 +103,15 @@ class AccuracyPipeline:
 
     def _extract_claims(self, text: str, report_id: str, sections: List[Dict[str, Any]]) -> List[Claim]:
         def _strip_bullet_prefix(value: str) -> str:
-            # Remove common list markers like "1.", "2)", "•" while keeping the content.
-            return re.sub(r"^\s*(?:[\-\u2022\*]|[0-9]{1,3}[.)])\s*", "", value)
+            # Remove common list/section markers like "1.", "2)", "5.2", "2 Somalia" while keeping numeric claims.
+            # Strip only if a leading number is immediately followed by punctuation/whitespace and the remainder has no digits.
+            trimmed = value.lstrip()
+            m = re.match(r"^([0-9]{1,3}(?:\.[0-9]{1,3})*)([.)]?)\s+(.*)$", trimmed)
+            if m:
+                remainder = m.group(3)
+                if not any(ch.isdigit() for ch in remainder):
+                    return remainder.strip()
+            return re.sub(r"^\s*(?:[\-\u2022\*])\s*", "", value)
 
         def _has_alpha(value: str) -> bool:
             return any(ch.isalpha() for ch in value)
