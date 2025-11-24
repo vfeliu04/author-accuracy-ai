@@ -1,5 +1,5 @@
 /backend/.env
-backend/.env.example
+/backend/logs/backend.log
 env/
 backend/env/
 .pytest_cache/

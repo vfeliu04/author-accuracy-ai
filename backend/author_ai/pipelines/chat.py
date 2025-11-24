@@ -499,27 +499,23 @@ class ChatService:
     ) -> List[Dict[str, Any]]:
         if not claim_map:
             return []
-        hits: List[Dict[str, Any]] = []
+        # Use all claims; order by semantic score when available, otherwise by priority.
         if question_vector is not None:
             store = VectorStore(report_id, base_dir=self.settings.claim_vector_path)
-            hits = store.search(question_vector, top_k=self.settings.claim_context_limit * 2)
-        threshold = self._threshold_for_mode(mode, self.settings.claim_relevance_min)
-        ranked: List[Dict[str, Any]] = []
-        for hit in hits:
-            if hit.get("score", 0) < threshold:
-                continue
-            claim = claim_map.get(hit.get("claim_id"))
-            if not claim:
-                continue
-            ranked.append({"claim": claim, "score": hit.get("score")})
-            if len(ranked) >= self.settings.claim_context_limit:
-                break
-        if ranked:
-            return ranked
+            hits = store.search(question_vector, top_k=max(len(claim_map), self.settings.claim_context_limit * 2))
+            ranked: List[Dict[str, Any]] = []
+            for hit in hits:
+                claim = claim_map.get(hit.get("claim_id"))
+                if not claim:
+                    continue
+                ranked.append({"claim": claim, "score": hit.get("score")})
+            if ranked:
+                ranked.sort(key=lambda entry: entry.get("score") or 0, reverse=True)
+                return ranked
         fallback_claims = sorted(
             claim_map.values(),
             key=self._claim_priority_sort,
-        )[: self.settings.claim_context_limit]
+        )
         return [{"claim": claim, "score": None} for claim in fallback_claims]
 
     def _select_source_context(
