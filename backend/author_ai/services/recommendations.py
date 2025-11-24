@@ -160,7 +160,7 @@ class RecommendationService:
             )
         )
         terms = _top_terms(corpus, limit=16)
-        keywords = " ".join(terms[:10])
+        keywords = " ".join(terms[:5])
         return keywords, terms
 
     def _query_openalex(self, search: str, topic_terms: List[str], limit: int) -> List[Dict[str, Any]]:
