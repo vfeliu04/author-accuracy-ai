@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Dict, Any, List, DefaultDict, Optional, Tuple
 from collections import defaultdict
+import re
 
 try:
     from openai import OpenAI
@@ -81,10 +82,49 @@ class ChatService:
 
         claims = self.repo.list_claims_by_report(report_id)
         claim_map = {claim["claim_id"]: claim for claim in claims}
+        claim_index_map = {idx + 1: claim for idx, claim in enumerate(claims)}
+        claim_number_map = {claim["claim_id"]: idx + 1 for idx, claim in enumerate(claims)}
 
         raw_history = self.repo.get_chat_history(report_id, limit=self.settings.chat_history_length)
         history_context = self._build_history_context(self._trim_history(raw_history, cleaned_question))
         intent = self._detect_intent(cleaned_question)
+
+        forced_claims: Optional[List[Dict[str, Any]]] = None
+        claim_request = self._extract_claim_request(cleaned_question)
+        if claim_request:
+            resolved: List[Dict[str, Any]] = []
+            missing: List[str] = []
+            if claim_request.get("all"):
+                resolved = claims
+            else:
+                ids = claim_request.get("ids") or []
+                nums = claim_request.get("numbers") or []
+                for cid in ids:
+                    claim = claim_map.get(cid)
+                    if claim:
+                        resolved.append(claim)
+                    else:
+                        missing.append(cid)
+                for num in nums:
+                    claim = claim_index_map.get(num)
+                    if claim:
+                        resolved.append(claim)
+                    else:
+                        missing.append(str(num))
+            if not resolved:
+                answer = "No matching claims were found for your request."
+                return self._finalize_response(
+                    answer,
+                    session_id,
+                    report_id,
+                    question,
+                    [],
+                    [],
+                    mode=self.default_mode,
+                    suggested_mode=None,
+                )
+            forced_claims = resolved
+
         if intent != "report":
             answer = self._small_talk_answer(cleaned_question or None, history_context)
             return self._finalize_response(
@@ -112,7 +152,10 @@ class ChatService:
         )
 
         question_vector = self._embed_question(cleaned_question)
-        claim_context = self._select_claim_context(report_id, claim_map, question_vector, active_mode)
+        if forced_claims is not None:
+            claim_context = [{"claim": claim, "score": None} for claim in forced_claims]
+        else:
+            claim_context = self._select_claim_context(report_id, claim_map, question_vector, active_mode)
         claim_ids = [entry["claim"]["claim_id"] for entry in claim_context]
         evidence_map = self._group_evidence_by_claim(claim_ids)
 
@@ -151,6 +194,7 @@ class ChatService:
                 core_context=core_context,
                 mode_help_context=mode_help_context,
                 mode=active_mode,
+                claim_number_map=claim_number_map,
             )
             if self.client
             else self._compose_answer(
@@ -161,6 +205,7 @@ class ChatService:
                 core_context,
                 mode_help_context,
                 active_mode,
+                claim_number_map,
             )
         )
 
@@ -188,8 +233,9 @@ class ChatService:
         core_context: Optional[str],
         mode_help_context: Optional[str],
         mode: str,
+        claim_number_map: Optional[Dict[str, int]],
     ) -> str:
-        claim_blocks = self._render_claim_findings(claim_context, evidence_map, source_docs)
+        claim_blocks = self._render_claim_findings(claim_context, evidence_map, source_docs, claim_number_map)
         support_blocks = self._render_supporting_context(source_context, source_docs)
         if not any([claim_blocks, support_blocks, metrics_context, core_context]):
             return self._format_response(
@@ -253,15 +299,20 @@ class ChatService:
         core_context: Optional[str],
         mode_help_context: Optional[str],
         mode: str,
+        claim_number_map: Optional[Dict[str, int]] = None,
     ) -> str:
         lines: List[str] = []
         if claim_context:
             lines.append("Claims considered:")
             for entry in claim_context:
                 claim = entry["claim"]
+                number = None
+                if claim_number_map:
+                    number = claim_number_map.get(claim.get("claim_id"))
+                number_text = f"(#{number}) " if number else ""
                 verdict = claim.get("verdict", "UNKNOWN")
                 explanation = claim.get("explanation") or claim.get("text")
-                lines.append(f"- {verdict}: {explanation}")
+                lines.append(f"- {number_text}{verdict}: {explanation}")
         if source_context:
             lines.append("\nSupporting snippets:")
             for ctx in source_context:
@@ -637,12 +688,16 @@ class ChatService:
         claim_context: List[Dict[str, Any]],
         evidence_map: DefaultDict[str, List[dict]],
         source_docs: Dict[str, Dict[str, Any]],
+        claim_number_map: Optional[Dict[str, int]] = None,
     ) -> List[str]:
         blocks: List[str] = []
         for idx, entry in enumerate(claim_context, start=1):
             claim = entry["claim"]
+            ordinal = claim_number_map.get(claim.get("claim_id")) if claim_number_map else None
+            label = f"[Claim {ordinal}]" if ordinal else f"[Claim {idx}]"
             block_lines = [
-                f"[Claim {idx}] {claim.get('text')}",
+                f"{label} {claim.get('text')}",
+                f"ID: {claim.get('claim_id')}",
                 f"Verdict: {claim.get('verdict')} (confidence {claim.get('confidence')})",
                 f"Explanation: {claim.get('explanation')}",
             ]
@@ -729,3 +784,99 @@ class ChatService:
             "mode": mode,
             "suggested_mode": suggested_mode,
         }
+
+    def _extract_claim_request(self, question: str) -> Dict[str, Any] | None:
+        lower = (question or "").lower()
+        if not lower:
+            return None
+        if "all claims" in lower or "list all claims" in lower:
+            return {"all": True}
+        # capture patterns like "claim 3", "claims 3,4 and 5", "claim id <uuid>"
+        ids: List[str] = []
+        numbers: List[int] = []
+
+        # claim id explicit
+        for match in re.findall(r"claim[_\s-]?id[:\s]+([0-9a-f\-]{6,})", lower):
+            ids.append(match.strip())
+
+        # numeric references
+        for block in re.findall(r"claims?\s+([0-9,\sand]+)", lower):
+            tokens = re.split(r"[,\sand]+", block)
+            for tok in tokens:
+                tok = tok.strip()
+                if tok.isdigit():
+                    numbers.append(int(tok))
+
+        for match in re.findall(r"claim\s+([0-9]+)", lower):
+            numbers.append(int(match))
+
+        if ids or numbers:
+            return {"ids": ids, "numbers": numbers}
+        return None
+
+    def _deterministic_claim_response(
+        self,
+        request: Dict[str, Any],
+        *,
+        claims: List[Dict[str, Any]],
+        claim_map: Dict[str, Dict[str, Any]],
+        claim_index_map: Dict[int, Dict[str, Any]],
+        session_id: str,
+        report_id: str,
+        question: str,
+    ) -> Dict[str, Any]:
+        resolved: List[Dict[str, Any]] = []
+        missing: List[str] = []
+
+        if request.get("all"):
+            resolved = claims
+        else:
+            ids = request.get("ids") or []
+            nums = request.get("numbers") or []
+            for cid in ids:
+                claim = claim_map.get(cid)
+                if claim:
+                    resolved.append(claim)
+                else:
+                    missing.append(cid)
+            for num in nums:
+                claim = claim_index_map.get(num)
+                if claim:
+                    resolved.append(claim)
+                else:
+                    missing.append(str(num))
+
+        if not resolved:
+            answer = "No matching claims were found for your request."
+            return self._finalize_response(
+                answer,
+                session_id,
+                report_id,
+                question,
+                [],
+                [],
+                mode="evidence",
+                suggested_mode=None,
+            )
+
+        lines: List[str] = []
+        for claim in resolved:
+            lines.append(
+                f"Claim {claim.get('claim_id')}: {claim.get('text')}\n"
+                f"Verdict: {claim.get('verdict')} (confidence {claim.get('confidence')})\n"
+                f"Explanation: {claim.get('explanation')}"
+            )
+        if missing:
+            lines.append(f"Not found: {', '.join(missing)}")
+
+        answer = "\n\n".join(lines)
+        return self._finalize_response(
+            answer,
+            session_id,
+            report_id,
+            question,
+            resolved,
+            [],
+            mode="evidence",
+            suggested_mode=None,
+        )
