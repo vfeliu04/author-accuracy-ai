@@ -14,23 +14,72 @@ import requests
 from ..config import get_settings
 from .logger import setup_logger
 from .summarizer import summarize_text
+from .embedding import embed_texts
 
 
 logger = setup_logger(__name__)
 
 
-def _flatten_tokens(text: str, limit: int = 6) -> List[str]:
+STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "that",
+    "with",
+    "this",
+    "from",
+    "into",
+    "over",
+    "under",
+    "about",
+    "their",
+    "there",
+    "these",
+    "those",
+    "which",
+    "while",
+    "where",
+    "when",
+    "what",
+    "also",
+    "have",
+    "has",
+    "had",
+    "been",
+    "being",
+    "across",
+    "through",
+    "between",
+    "within",
+    "into",
+    "among",
+    "such",
+    "more",
+    "less",
+    "many",
+    "most",
+    "very",
+}
+
+
+def _stem(token: str) -> str:
+    # Minimal stemming to group variants without extra deps.
+    for suffix in ("ing", "ed", "es", "s"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+            return token[: -len(suffix)]
+    return token
+
+
+def _top_terms(text: str, limit: int = 16) -> List[str]:
     tokens = re.findall(r"[A-Za-z]{4,}", text.lower())
-    seen = set()
-    ordered: List[str] = []
+    freq: Dict[str, int] = {}
     for token in tokens:
-        if token in seen:
+        if token in STOPWORDS:
             continue
-        seen.add(token)
-        ordered.append(token)
-        if len(ordered) >= limit:
-            break
-    return ordered
+        stemmed = _stem(token)
+        freq[stemmed] = freq.get(stemmed, 0) + 1
+    ranked = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
+    return [term for term, _ in ranked[:limit]]
 
 
 class RecommendationService:
@@ -46,39 +95,79 @@ class RecommendationService:
         claims: Iterable[Dict[str, Any]],
         existing_sources: Iterable[Dict[str, Any]],
         report_title: str | None = None,
+        report_summary: str | None = None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        keywords = self._build_keywords(claims, report_title)
-        if not keywords:
+        claims = list(claims)
+        existing_sources = list(existing_sources)
+        keywords, topic_terms = self._build_keywords_and_topics(claims, report_title, report_summary, existing_sources)
+        if not keywords and not topic_terms:
             return []
-        results = self._query_openalex(keywords, limit=max(limit * 2, 10))
+        results = self._query_openalex(keywords, topic_terms, limit=max(limit * 2, 15))
         if not results:
             return []
 
         existing_titles = {source.get("name", "").lower() for source in existing_sources}
         recommendations: List[Dict[str, Any]] = []
+        query_vector = self._embed_query_context(report_title, report_summary, claims)
+
         for result in results:
             title = (result.get("display_name") or "").strip()
             if not title or title.lower() in existing_titles:
                 continue
+            if topic_terms and not self._is_on_topic(result, topic_terms):
+                continue
             recommendation = self._map_openalex_result(result)
             if recommendation:
+                if query_vector:
+                    rec_vector = self._embed_candidate(recommendation)
+                    if rec_vector:
+                        similarity = self._cosine(query_vector, rec_vector)
+                        recommendation["relevance_score"] = similarity
                 recommendations.append(recommendation)
             if len(recommendations) >= limit:
                 break
+        if query_vector:
+            recommendations = [rec for rec in recommendations if rec.get("relevance_score", 0) >= 0.18]
+            recommendations.sort(
+                key=lambda rec: (
+                    rec.get("relevance_score", 0),
+                    _recency_boost(rec.get("publication_year")),
+                    (rec.get("credibility_score") or 0),
+                ),
+                reverse=True,
+            )
         return recommendations
 
-    def _build_keywords(self, claims: Iterable[Dict[str, Any]], report_title: str | None) -> str:
-        top_claims = list(claims)[:5]
-        text = " ".join(claim.get("text", "") for claim in top_claims if claim.get("text"))
-        if not text and report_title:
-            text = report_title
-        tokens = _flatten_tokens(text, limit=8)
-        return " ".join(tokens)
+    def _build_keywords_and_topics(
+        self,
+        claims: Iterable[Dict[str, Any]],
+        report_title: str | None,
+        report_summary: str | None,
+        existing_sources: Iterable[Dict[str, Any]],
+    ) -> tuple[str, List[str]]:
+        claim_texts = [claim.get("text", "") for claim in claims if claim.get("text")]
+        source_summaries = [source.get("summary", "") for source in existing_sources if source.get("summary")]
+        corpus = " ".join(
+            filter(
+                None,
+                [
+                    report_title or "",
+                    report_summary or "",
+                    " ".join(claim_texts),
+                    " ".join(source_summaries),
+                ],
+            )
+        )
+        terms = _top_terms(corpus, limit=16)
+        keywords = " ".join(terms[:10])
+        return keywords, terms
 
-    def _query_openalex(self, search: str, limit: int) -> List[Dict[str, Any]]:
+    def _query_openalex(self, search: str, topic_terms: List[str], limit: int) -> List[Dict[str, Any]]:
+        topic_filter = " OR ".join(topic_terms) if topic_terms else ""
+        search_param = f"{search} ({topic_filter})" if topic_filter else search
         params = {
-            "search": search,
+            "search": search_param.strip(),
             "sort": "relevance_score:desc",
             "per-page": limit,
             "filter": "from_publication_date:2018-01-01,has_doi:true",
@@ -95,6 +184,51 @@ class RecommendationService:
             logger.warning("OpenAlex request failed: %s", exc)
             return []
         return data.get("results") or []
+
+    def _is_on_topic(self, result: Dict[str, Any], topic_terms: List[str]) -> bool:
+        text = " ".join(
+            filter(
+                None,
+                [
+                    result.get("display_name") or "",
+                    _decode_abstract(result.get("abstract_inverted_index")) or "",
+                ],
+            )
+        ).lower()
+        return any(term in text for term in topic_terms)
+
+    @staticmethod
+    def _cosine(a: List[float], b: List[float]) -> float:
+        import numpy as np
+
+        va = np.array(a, dtype=float)
+        vb = np.array(b, dtype=float)
+        denom = (np.linalg.norm(va) * np.linalg.norm(vb)) or 1.0
+        return float(np.dot(va, vb) / denom)
+
+    def _embed_query_context(
+        self,
+        report_title: Optional[str],
+        report_summary: Optional[str],
+        claims: Iterable[Dict[str, Any]],
+    ) -> Optional[List[float]]:
+        texts: List[str] = []
+        if report_title:
+            texts.append(report_title)
+        if report_summary:
+            texts.append(report_summary)
+        texts.extend(claim.get("text", "") for claim in claims if claim.get("text"))
+        if not texts:
+            return None
+        vectors = embed_texts([" ".join(texts)])
+        return vectors[0] if vectors else None
+
+    def _embed_candidate(self, rec: Dict[str, Any]) -> Optional[List[float]]:
+        text = " ".join(filter(None, [rec.get("title"), rec.get("abstract"), rec.get("summary")]))
+        if not text:
+            return None
+        vectors = embed_texts([text])
+        return vectors[0] if vectors else None
 
     def _map_openalex_result(self, result: Dict[str, Any]) -> Dict[str, Any] | None:
         title = (result.get("display_name") or "").strip()
@@ -186,6 +320,13 @@ def _validity_score(abstract: Optional[str], publication_year: Optional[int]) ->
         freshness = max(0, 10 - (datetime.utcnow().year - publication_year))
         base += freshness * 2
     return max(10.0, min(base, 100.0))
+
+
+def _recency_boost(publication_year: Optional[int]) -> float:
+    if not publication_year:
+        return 0.0
+    age = max(0, datetime.utcnow().year - publication_year)
+    return max(0.0, 10 - age) / 10.0
 
 
 RECOMMENDATIONS = RecommendationService()

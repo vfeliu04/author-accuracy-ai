@@ -34,6 +34,13 @@ Report verification
 3. **Persistence** – Claims and evidence go into SQLite. Per-report FAISS indexes are built for (a) claims (`CLAIM_VECTOR_PATH/report_id`) using `Claim: … / Verdict: … / Explanation: …` strings, and (b) supporting snippets (`SOURCE_VECTOR_PATH/report_id`).
 4. **Summary** – Counts `supported`, `contradicted`, `not_found` are written into the report metadata (`accuracy_summary`, etc.). The HTTP APIs expose this via `/api/reports/*`.
 
+Recommendations (OpenAlex)
+--------------------------
+- Keyword/topic derivation: build a corpus from report title/summary, all claim texts, and available source summaries; stem and score frequent tokens; top terms become the search query and topic filter. No static domain guardrails are used.
+- Retrieval: call OpenAlex `/works` with the derived query/terms, deduplicate against existing sources.
+- On-topic check: keep only candidates whose title/abstract contains at least one derived term.
+- Re-rank: embed the report/claim context and candidate titles/abstracts, compute cosine similarity, drop low-relevance candidates, and sort by relevance with minor boosts for recency/credibility.
+
 
 Key configuration
 -----------------
