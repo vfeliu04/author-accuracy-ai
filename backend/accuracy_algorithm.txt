@@ -8,7 +8,7 @@ Source indexing
 ---------------
 1. **Reset & ingest** – `/api/run_pipeline` calls `reset_environment()` and instantiates `AccuracyPipeline`. Each SOURCE upload is ingested via `IngestionPipeline.ingest`.
 2. **OCR & parsing** – `ingest` runs OCRmyPDF only when heuristics flag a scanned PDF. PyPDF2 extracts per-page text plus tables (Tabula / pdf_tables helper).
-3. **Recursive chunking** – Each page’s text is split with LangChain’s `RecursiveCharacterTextSplitter` (1 200 char chunks, 200 overlap, separators `["\n\n","\n",". "," ",""]`). Every chunk stores metadata:
+3. **Recursive/semantic chunking** – Each page’s text is split with LangChain’s `RecursiveCharacterTextSplitter` (1 200 char chunks, 200 overlap, separators `["\n\n","\n",". "," ",""]`). Every chunk stores metadata:
    - `parent_id = page-{n}`
    - `parent_title = "Page n"`
    - `parent_page = n`
@@ -18,14 +18,17 @@ Source indexing
 
 Report verification
 -------------------
-1. **Claim extraction** – `AccuracyPipeline.verify_report` ingests the REPORT PDF, splits sentences, and keeps any sentence containing a digit. Metadata saved for each claim: numeric value, units, year.
+1. **Claim extraction (light classifier)** – `AccuracyPipeline.verify_report` ingests the REPORT PDF, splits sentences, strips list markers, and passes each numeric sentence through a lightweight, dependency-free classifier:
+   - Features: has digit, has unit/year token, verb hint, token length, alpha ratio, trailing-number heuristic, title/colon heuristic.
+   - Score: +2 (digit), +2 (unit/year), +1 (verb), +0.5 (≥4 tokens), −2 (very low alpha ratio), −1.5 (lone trailing number without unit), −1 (colon/title without unit).
+   - Threshold: keep as claim if score ≥ 1.5. This filters headers/bullet numbers while retaining real numeric statements. Claims also carry parent section/page IDs and the `sections_detail` summary for context.
 2. **Evidence retrieval** – `_retrieve_evidence`:
    - Calls `VectorStore.similarity_search(claim_text, k=5)` to fetch snippets plus metadata and reconstructs parent sections (page text + LlamaIndex summary) using `sections_detail` cached from SQLite.
-   - Haystack rerank: pass the candidate snippets through `HaystackReranker` (SentenceTransformers cross-encoder) to sort by semantic relevance.
-   - LLM rerank: pass the haystack-ordered hits to `EvidenceReranker` (OpenAI Chat Completion using `RERANK_MODEL`, default `gpt-4o-mini`), which emits `index|score` output and final ordering. If the API key or either library is unavailable, the step gracefully skips.
+   - LLM rerank: pass the similarity-ordered hits to `EvidenceReranker` (OpenAI Chat Completion using `RERANK_MODEL`, default `gpt-4o-mini`), which emits `index|score` output and final ordering. If the API key or library is unavailable, the step gracefully skips.
    - Verdict classification:
      * If the FAISS similarity score `s_max` exceeds `RETRIEVAL_SUPPORT_THRESHOLD`, call `VerdictClassifier` (OpenAI chat JSON response or heuristic numeric comparison) to decide whether the evidence `SUPPORTS`, `CONTRADICTS`, or is `INCONCLUSIVE`.
      * INCONCLUSIVE downgrades to `NOT_FOUND`. SUPPORTED and CONTRADICTED update the claim verdict and explanation.
+     * Tie-breaker rules in the LLM prompt: only prefer SUPPORTED on vague/unspecified timeframes when the evidence year matches/is unspecified or is within ~1 year; otherwise lean INCONCLUSIVE. Mark CONTRADICTED only on clear numeric or timeframe conflicts; if numbers match and timeframe is acceptable, lean SUPPORTED.
    - If `s_max` is below the threshold we keep the claim as `NOT_FOUND`.
    - Each evidence row (including non-top hits) is stored with snippet, similarity score, haystack score, rerank score, classification metadata, and parent context (page/title/text/summary).
 3. **Persistence** – Claims and evidence go into SQLite. Per-report FAISS indexes are built for (a) claims (`CLAIM_VECTOR_PATH/report_id`) using `Claim: … / Verdict: … / Explanation: …` strings, and (b) supporting snippets (`SOURCE_VECTOR_PATH/report_id`).

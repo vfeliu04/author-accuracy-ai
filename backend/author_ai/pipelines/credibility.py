@@ -41,7 +41,7 @@ class CredibilityPipeline:
             "authority": self._authority_score(metadata),
             "recency": self._recency_score(metadata),
             "confidence": self._confidence_score(metadata),
-            "user_adjustment": float(metadata.get("user_adjustment", 0.0)),
+            "user_adjustment": float(metadata.get("user_adjustment", 0.0)),  # manual tweak if present
         }
 
         total = min(100.0, sum(components.values()))

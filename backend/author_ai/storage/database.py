@@ -17,6 +17,7 @@ logger = setup_logger(__name__)
 def _connect() -> sqlite3.Connection:
     settings = get_settings()
     settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    # Use a fresh connection per call; pytest overrides the path via env.
     conn = sqlite3.connect(settings.sqlite_path)
     conn.row_factory = sqlite3.Row
     return conn

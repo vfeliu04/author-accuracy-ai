@@ -42,6 +42,8 @@ class VerdictClassifier:
 
         parent_summary = parent.get("summary") or parent.get("text")
         metadata = claim.metadata if hasattr(claim, "metadata") else {}
+        heuristic_hint = self._heuristic(metadata, claim.text, snippet)
+
         if self.client:
             try:
                 response = self.client.chat.completions.create(
@@ -53,7 +55,11 @@ class VerdictClassifier:
                             "content": (
                                 "You are an accuracy evaluator. Given a numerical claim and an evidence passage, "
                                 "respond with a single JSON line: {\"label\": \"SUPPORTED|CONTRADICTED|INCONCLUSIVE\", \"reason\": \"...\"}. "
-                                "Label CONTRADICTED only when the evidence clearly disagrees with the claim's numeric assertion."
+                                "Tie-breakers: "
+                                "1) If the claim year is unspecified, treat a single evidence year as acceptable unless it is clearly far in the past/future or contradicts the claim context; do not mark INCONCLUSIVE solely because the claim omits a year. "
+                                "2) Prefer SUPPORTED when numeric values align closely and timeframe is acceptable (see 1). "
+                                "3) Mark CONTRADICTED only when numbers or stated timeframe clearly conflict. "
+                                "4) If a heuristic suggestion is provided, follow it unless the evidence strongly conflicts with it."
                             ),
                         },
                         {
@@ -63,6 +69,7 @@ class VerdictClassifier:
                                 f"Claim metadata: {metadata}\n"
                                 f"Evidence: {snippet}\n"
                                 f"Additional context: {parent_summary}\n"
+                                f"Heuristic suggestion: {heuristic_hint}\n"
                                 "Answer with JSON only."
                             ),
                         },
@@ -75,7 +82,9 @@ class VerdictClassifier:
                         return parsed
             except Exception as exc:  # noqa: BLE001
                 logger.warning("LLM verdict classification failed, falling back to heuristics: %s", exc)
-        return self._heuristic(metadata, claim.text, snippet)
+
+        # Fall back to heuristic when LLM is unavailable or inconclusive.
+        return heuristic_hint
 
     @staticmethod
     def _parse_json_line(content: str) -> Dict[str, Any] | None:

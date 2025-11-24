@@ -53,7 +53,7 @@ def reset_environment() -> None:
     else:
         init_db()
 
-    _clean_directory(settings.faiss_index_dir)
-    _clean_directory(settings.cache_dir)
+    _clean_directory(settings.faiss_index_dir)  # drops FAISS indexes
+    _clean_directory(settings.cache_dir)  # drops cached artifacts
 
     logger.info("Environment reset complete; pipeline state cleared.")

@@ -2,16 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from author_ai.pipelines.accuracy import AccuracyPipeline
+from author_ai.services.vector_store import VectorStore
 
 
 def test_accuracy_pipeline_retrieval(settings, tmp_path):
     pipeline = AccuracyPipeline()
-
-    # isolate vector store paths
-    pipeline.vector_store.index_path = settings.faiss_index_dir / "sources_test.index"
-    pipeline.vector_store.meta_path = settings.faiss_index_dir / "sources_test.meta.json"
-    pipeline.vector_store.index = None
-    pipeline.vector_store.metadata = []
+    pipeline.vector_store = VectorStore("sources_test", base_dir=settings.faiss_index_dir)
 
     source_payload = {
         "document": {"sections": []},

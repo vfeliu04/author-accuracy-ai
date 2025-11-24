@@ -15,10 +15,10 @@ Accuracy (claim verification)
   - Initialize each claim with verdict NOT_EVALUATED, confidence 0.4 (MEDIUM), explanation “Awaiting retrieval alignment.”
 - Retrieval + rerank per claim:
   1. Pass the claim text to the LangChain FAISS retriever (cosine similarity). Top `k=5` hits come with snippets, section summaries (via LlamaIndex), and parent metadata.
-  2. First-stage rerank: run Haystack’s `SentenceTransformersRanker` (`cross-encoder/ms-marco-MiniLM-L-6-v2`) to reorder hits using a cross-encoder classifier, yielding `haystack_score`.
-  3. Second-stage rerank: send the haystack-ordered hits to the LLM reranker (`RERANK_MODEL`, default `gpt-4o-mini`) which emits `index|score` entries in `[0,1]`. If OpenAI isn’t configured, this stage skips automatically.
-  4. Only when the FAISS score `s_max` exceeds `T = RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35) do we move forward; otherwise the claim is `NOT_FOUND`.
-  5. VerdictClassifier (OpenAI chat if available, heuristic numeric comparison otherwise) looks at the claim text, metadata, and best snippet to classify `SUPPORTED`, `CONTRADICTED`, or `INCONCLUSIVE`. INCONCLUSIVE falls back to `NOT_FOUND`.
+  2. LLM rerank: send the similarity-ordered hits to the LLM reranker (`RERANK_MODEL`, default `gpt-4o-mini`) which emits `index|score` entries in `[0,1]`. If OpenAI isn’t configured, this stage skips automatically.
+  3. Only when the FAISS score `s_max` exceeds `T = RETRIEVAL_SUPPORT_THRESHOLD` (default 0.35) do we move forward; otherwise the claim is `NOT_FOUND`.
+  4. VerdictClassifier (OpenAI chat if available, heuristic numeric comparison otherwise) looks at the claim text, metadata, and best snippet to classify `SUPPORTED`, `CONTRADICTED`, or `INCONCLUSIVE`. INCONCLUSIVE falls back to `NOT_FOUND`.
+     - Tie-breakers: prefer SUPPORTED on vague/unspecified timeframes only if the evidence year is missing, matches, or is within ~1 year; otherwise lean INCONCLUSIVE. Only mark CONTRADICTED on clear numeric or timeframe conflicts; if numbers align and timeframe is acceptable, lean SUPPORTED.
      ```math
      \text{verdict} =
        \begin{cases}

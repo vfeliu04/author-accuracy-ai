@@ -34,7 +34,7 @@ class ValidityPipeline:
         consistency_score = self._internal_consistency_score(payload["document"]["sections"])
         methodology_score, methodology_flags = self._methodology_score(payload["document"]["sections"])
         context_score = self._context_alignment_score(payload["body_text"])
-        recency_score = 80.0
+        recency_score = 80.0  # placeholder until richer timeliness logic is added
 
         weights = {
             "coverage": 0.25,
