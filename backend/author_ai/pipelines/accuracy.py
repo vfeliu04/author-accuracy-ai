@@ -103,15 +103,25 @@ class AccuracyPipeline:
 
     def _extract_claims(self, text: str, report_id: str, sections: List[Dict[str, Any]]) -> List[Claim]:
         def _strip_bullet_prefix(value: str) -> str:
-            # Remove common list/section markers like "1.", "2)", "5.2", "2 Somalia" while keeping numeric claims.
-            # Strip only if a leading number is immediately followed by punctuation/whitespace and the remainder has no digits.
+            # Remove common list/section markers like "1.", "2)", "5.2" when they look like headings.
             trimmed = value.lstrip()
-            m = re.match(r"^([0-9]{1,3}(?:\.[0-9]{1,3})*)([.)]?)\s+(.*)$", trimmed)
+            m = re.match(r"^([0-9]{1,3}(?:\.[0-9]{1,3})*)([.)]?)\s+([A-Z][A-Za-z].*)$", trimmed)
             if m:
                 remainder = m.group(3)
-                if not any(ch.isdigit() for ch in remainder):
-                    return remainder.strip()
+                return remainder.strip()
             return re.sub(r"^\s*(?:[\-\u2022\*])\s*", "", value)
+
+        def _heading_prefix_without_numbers(value: str) -> bool:
+            """
+            Detect sentences that start with a section-like heading (e.g., '3.3 Supply Chain...')
+            where the remainder has no digits; these should be skipped entirely.
+            """
+            trimmed = value.lstrip()
+            match = re.match(r"^([0-9]{1,3}(?:\.[0-9]{1,3})*)([.)]?\s+)(.*)$", trimmed)
+            if not match:
+                return False
+            remainder = match.group(3)
+            return not any(ch.isdigit() for ch in remainder)
 
         def _has_alpha(value: str) -> bool:
             return any(ch.isalpha() for ch in value)
@@ -181,6 +191,8 @@ class AccuracyPipeline:
         sentences = [s.strip() for s in SENTENCE_SPLIT.split(text) if s.strip()]
         claims: List[Claim] = []
         for sentence in sentences:
+            if _heading_prefix_without_numbers(sentence):
+                continue
             cleaned = _strip_bullet_prefix(sentence)
             if not cleaned:
                 continue
@@ -188,6 +200,15 @@ class AccuracyPipeline:
                 continue
             if len(cleaned.split()) < 3:
                 continue
+            # Skip sentences where the only numeric token is a leading heading-like number (e.g., "3.2 Climate...")
+            num_matches = list(NUMBER_PATTERN.finditer(sentence))
+            if num_matches:
+                first = num_matches[0]
+                heading_like = re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3})*", first.group())
+                no_other_numbers = len(num_matches) == 1
+                remainder_has_units = bool(UNIT_OR_YEAR.search(sentence[first.end():]))
+                if heading_like and first.start() == 0 and no_other_numbers and not remainder_has_units:
+                    continue
             if any(char.isdigit() for char in cleaned):
                 if _claim_score(cleaned) < 1.5:
                     continue

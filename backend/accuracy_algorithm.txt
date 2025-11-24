@@ -43,8 +43,9 @@ Recommendations (OpenAlex)
 
 Claim extraction filters
 -----------------------
-- Strip common list/section markers cautiously (e.g., "1.", "2)", "5.2") only when the remainder has no other digits, so true numeric claims like "5.5 out of 10…" keep their leading value.
-- Drop sentences whose only numeric token is a likely heading (no unit/year, trailing number only).
+- Strip common list/section markers cautiously (e.g., "1.", "2)", "5.2" only when the remainder has no other digits, so true numeric claims like "5.5 out of 10…" keep their leading value.
+- Drop sentences that start with a section-style heading (e.g., "3.3 Supply Chain…") when the remainder has no digits.
+- Drop sentences whose only numeric token is a leading heading-like number with no unit/year in the remainder.
 
 
 Key configuration
