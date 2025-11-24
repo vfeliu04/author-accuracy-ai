@@ -135,7 +135,9 @@ class IngestionPipeline:
 
         body_text = "\n".join(full_text_parts)
         summary_text = summarize_text(body_text)
-        section_summaries = SECTION_INDEXER.summarize_sections(sections)
+        section_summaries: Dict[str, str] = {}
+        if self.settings.section_summary_mode.lower() == "eager":
+            section_summaries = SECTION_INDEXER.summarize_sections(sections)
         chunk_payload: List[Dict[str, Any]] = []
         for section in sections:
             section_chunks = chunk_text(section["text"])

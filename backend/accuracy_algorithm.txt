@@ -12,7 +12,7 @@ Source indexing
    - `parent_id = page-{n}`
    - `parent_title = "Page n"`
    - `parent_page = n`
-4. **Section summaries (LlamaIndex)** – For each page/section, we invoke LlamaIndex’s `SummaryIndex` (powered by the configured OpenAI model) to produce a concise synopsis. This is stored in `sections_detail`. If LlamaIndex isn’t available, we fall back to the heuristic summarizer.
+4. **Section summaries (LlamaIndex)** – For each page/section, we invoke LlamaIndex’s `SummaryIndex` (powered by the configured OpenAI model) to produce a concise synopsis. This is stored in `sections_detail`. If LlamaIndex isn’t available, we fall back to the heuristic summarizer. When `SECTION_SUMMARY_MODE=lazy` (default), section summaries are skipped at ingestion and generated on-demand only when a claim/evidence needs that section; the first generated summary is cached in `sections_detail`.
 5. **Persistence** – Chunks are inserted into SQLite (`chunks` table) and the document metadata records `sections_detail` (including LlamaIndex summaries) so we can recover the full parent text later. The chunk list is embedded via `embed_texts` (OpenAI `text-embedding-3-large`) and stored in FAISS with matching metadata (`chunk_id`, `doc_id`, snippet, parent info). The FAISS index is wrapped by LangChain’s `FAISS` vector store so we can call `similarity_search` later.
 
 

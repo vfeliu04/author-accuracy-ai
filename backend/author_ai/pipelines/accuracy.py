@@ -16,6 +16,7 @@ from ..services.logger import setup_logger
 from ..services.vector_store import VectorStore
 from ..services.reranker import EvidenceReranker
 from ..services.verdict_classifier import VerdictClassifier
+from ..services.section_indexer import SECTION_INDEXER
 from .ingestion import IngestionPipeline
 
 
@@ -123,9 +124,25 @@ class AccuracyPipeline:
         def _find_parent_summary(parent_id: str | None) -> str | None:
             if not parent_id:
                 return None
-            for section in doc_metadata.get("sections_detail") or []:
+            sections_detail = doc_metadata.get("sections_detail") or []
+            for section in sections_detail:
                 if section.get("id") == parent_id:
-                    return section.get("summary")
+                    summary = section.get("summary")
+                    if summary:
+                        return summary
+                    if self.settings.section_summary_mode.lower() == "lazy" and SECTION_INDEXER.enabled:
+                        try:
+                            generated = SECTION_INDEXER.summarize_sections([section]).get(parent_id)
+                        except Exception:
+                            generated = None
+                        if generated:
+                            section["summary"] = generated
+                            self.repo.update_document_metadata(
+                                report_id,
+                                {"sections_detail": sections_detail},
+                            )
+                            return generated
+                    return summary
             return None
 
         def _claim_score(sentence: str) -> float:
@@ -347,7 +364,36 @@ class AccuracyPipeline:
             metadata = document.get("metadata") or {}
             sections = metadata.get("sections_detail") or []
             self._section_cache[doc_id] = {section["id"]: section for section in sections}
-        return self._section_cache.get(doc_id, {}).get(parent_id)
+        sections_map = self._section_cache.get(doc_id, {})
+        section = sections_map.get(parent_id)
+        if not section:
+            return None
+        if (
+            self.settings.section_summary_mode.lower() == "lazy"
+            and SECTION_INDEXER.enabled
+            and not section.get("summary")
+        ):
+            try:
+                generated = SECTION_INDEXER.summarize_sections([section]).get(parent_id)
+            except Exception:
+                generated = None
+            if generated:
+                updated = dict(section)
+                updated["summary"] = generated
+                sections_map[parent_id] = updated
+                self._section_cache[doc_id] = sections_map
+                document = self.repo.get_document(doc_id) or {}
+                metadata = document.get("metadata") or {}
+                existing = metadata.get("sections_detail") or []
+                replaced = []
+                for entry in existing:
+                    if entry.get("id") == parent_id:
+                        replaced.append({**entry, "summary": generated})
+                    else:
+                        replaced.append(entry)
+                self.repo.update_document_metadata(doc_id, {"sections_detail": replaced})
+                return updated
+        return section
 
     @staticmethod
     def _numbers_in_text(text: str | None) -> set[str]:
