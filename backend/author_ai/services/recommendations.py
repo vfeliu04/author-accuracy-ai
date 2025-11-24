@@ -160,7 +160,7 @@ class RecommendationService:
             )
         )
         terms = _top_terms(corpus, limit=16)
-        keywords = " ".join(terms[:5])
+        keywords = " ".join(terms[:3])
         return keywords, terms
 
     def _query_openalex(self, search: str, topic_terms: List[str], limit: int) -> List[Dict[str, Any]]:
@@ -181,9 +181,12 @@ class RecommendationService:
             response.raise_for_status()
             data = response.json()
         except requests.RequestException as exc:
-            logger.warning("OpenAlex request failed: %s", exc)
+            logger.warning("OpenAlex request failed: %s", exc, exc_info=True)
             return []
-        return data.get("results") or []
+        results = data.get("results") or []
+        if not results:
+            logger.warning("OpenAlex returned no results for query='%s' params=%s", search_param, params)
+        return results
 
     def _is_on_topic(self, result: Dict[str, Any], topic_terms: List[str]) -> bool:
         text = " ".join(
