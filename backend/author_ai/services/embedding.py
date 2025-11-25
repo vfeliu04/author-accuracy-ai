@@ -5,6 +5,7 @@ Wrapper around the embedding provider so pipelines can stay provider agnostic.
 from __future__ import annotations
 
 from typing import Iterable, List
+import time
 
 try:
     from openai import OpenAI
@@ -36,10 +37,22 @@ class EmbeddingService:
             logger.warning("Using fallback embedding; set OPENAI_API_KEY for production use.")
             return [self._fallback_embedding(text) for text in texts]
 
-        response = self.client.embeddings.create(
-            model=self.settings.embedding_model,
-            input=texts,
-        )
+        def _try_embed(inputs: Iterable[str], retries: int = 2, delay: float = 1.0):
+            attempt = 0
+            while True:
+                try:
+                    return self.client.embeddings.create(  # type: ignore[union-attr]
+                        model=self.settings.embedding_model,
+                        input=list(inputs),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    attempt += 1
+                    if attempt > retries:
+                        raise
+                    logger.warning("Embedding request failed (attempt %d/%d): %s", attempt, retries + 1, exc)
+                    time.sleep(delay * attempt)
+
+        response = _try_embed(texts)
         vectors = [item.embedding for item in response.data]
         logger.debug("Generated %d embeddings via %s", len(vectors), self.settings.embedding_model)
         return vectors

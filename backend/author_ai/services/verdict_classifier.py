@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover
 
 from ..config import get_settings
 from ..services.logger import setup_logger
+import time
 
 
 logger = setup_logger(__name__)
@@ -38,7 +39,7 @@ class VerdictClassifier:
         snippet = (evidence.get("snippet") or evidence.get("text") or "").strip()
         parent = evidence.get("parent") or {}
         if not snippet:
-            return {"label": "NOT_FOUND", "confidence": 0.0, "reason": "No evidence text provided."}
+            return {"label": "NOT_FOUND", "confidence": 0.0, "reason": "No evidence text provided.", "mode": "heuristic"}
 
         parent_summary = parent.get("summary") or parent.get("text")
         metadata = claim.metadata if hasattr(claim, "metadata") else {}
@@ -46,45 +47,58 @@ class VerdictClassifier:
 
         if self.client:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.settings.explanation_model,
-                    temperature=0.0,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are an accuracy evaluator. Given a numerical claim and an evidence passage, "
-                                "respond with a single JSON line: {\"label\": \"SUPPORTED|CONTRADICTED|INCONCLUSIVE\", \"reason\": \"...\"}. "
-                                "Tie-breakers: "
-                                "1) If the claim year is unspecified, treat a single evidence year as acceptable unless it is clearly far in the past/future or contradicts the claim context; do not mark INCONCLUSIVE solely because the claim omits a year. "
-                                "2) Prefer SUPPORTED when numeric values align closely and timeframe is acceptable (see 1). "
-                                "3) Mark CONTRADICTED only when numbers or stated timeframe clearly conflict. "
-                                "4) If a heuristic suggestion is provided, follow it unless the evidence strongly conflicts with it."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Claim: {claim.text}\n"
-                                f"Claim metadata: {metadata}\n"
-                                f"Evidence: {snippet}\n"
-                                f"Additional context: {parent_summary}\n"
-                                f"Heuristic suggestion: {heuristic_hint}\n"
-                                "Answer with JSON only."
-                            ),
-                        },
-                    ],
-                )
+                def _try_classify(retries: int = 2, delay: float = 1.0):
+                    attempt = 0
+                    while True:
+                        try:
+                            return self.client.chat.completions.create(  # type: ignore[union-attr]
+                                model=self.settings.explanation_model,
+                                temperature=0.0,
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You are an accuracy evaluator. Given a numerical claim and an evidence passage, "
+                                            "respond with a single JSON line: {\"label\": \"SUPPORTED|CONTRADICTED|INCONCLUSIVE\", \"reason\": \"...\"}. "
+                                            "Tie-breakers: "
+                                            "1) If the claim year is unspecified, treat a single evidence year as acceptable unless it is clearly far in the past/future or contradicts the claim context; do not mark INCONCLUSIVE solely because the claim omits a year. "
+                                            "2) Prefer SUPPORTED when numeric values align closely and timeframe is acceptable (see 1). "
+                                            "3) Mark CONTRADICTED only when numbers or stated timeframe clearly conflict. "
+                                            "4) If a heuristic suggestion is provided, follow it unless the evidence strongly conflicts with it."
+                                        ),
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            f"Claim: {claim.text}\n"
+                                            f"Claim metadata: {metadata}\n"
+                                            f"Evidence: {snippet}\n"
+                                            f"Additional context: {parent_summary}\n"
+                                            f"Heuristic suggestion: {heuristic_hint}\n"
+                                            "Answer with JSON only."
+                                        ),
+                                    },
+                                ],
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            attempt += 1
+                            if attempt > retries:
+                                raise
+                            logger.warning("LLM verdict request failed (attempt %d/%d): %s", attempt, retries + 1, exc)
+                            time.sleep(delay * attempt)
+
+                response = _try_classify()
                 content = response.choices[0].message.content if response.choices else None
                 if content:
                     parsed = self._parse_json_line(content.strip())
                     if parsed:
+                        parsed["mode"] = "llm"
                         return parsed
             except Exception as exc:  # noqa: BLE001
                 logger.warning("LLM verdict classification failed, falling back to heuristics: %s", exc)
 
         # Fall back to heuristic when LLM is unavailable or inconclusive.
-        return heuristic_hint
+        return {**heuristic_hint, "mode": "heuristic"}
 
     @staticmethod
     def _parse_json_line(content: str) -> Dict[str, Any] | None:

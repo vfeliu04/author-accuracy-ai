@@ -48,6 +48,7 @@ class Claim:
     confidence: float
     confidence_band: str
     explanation: str
+    processing_mode: str = "unknown"
     metadata: Dict[str, Any] = field(default_factory=dict)
     evidence: List[ClaimEvidence] = field(default_factory=list)
 

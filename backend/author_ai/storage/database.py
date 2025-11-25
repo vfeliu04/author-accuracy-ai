@@ -55,6 +55,7 @@ def init_db() -> None:
             confidence REAL,
             confidence_band TEXT,
             explanation TEXT,
+            processing_mode TEXT,
             metadata TEXT,
             FOREIGN KEY (report_id) REFERENCES documents(doc_id)
         );
@@ -120,6 +121,14 @@ def init_db() -> None:
         );
         """
     )
+    # Add processing_mode column if missing (for existing DBs)
+    cur.execute("PRAGMA table_info(claims);")
+    cols = [row[1] for row in cur.fetchall()]
+    if "processing_mode" not in cols:
+        try:
+            cur.execute("ALTER TABLE claims ADD COLUMN processing_mode TEXT;")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
@@ -207,14 +216,15 @@ class Repository:
                 claim["confidence"],
                 claim["confidence_band"],
                 claim["explanation"],
+                claim.get("processing_mode"),
                 json.dumps(claim.get("metadata") or {}),
             )
             for claim in claims
         ]
         self.executemany(
             """
-            INSERT OR REPLACE INTO claims (claim_id, report_id, text, verdict, confidence, confidence_band, explanation, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO claims (claim_id, report_id, text, verdict, confidence, confidence_band, explanation, processing_mode, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

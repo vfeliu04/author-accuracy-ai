@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from ..config import get_settings
 from .logger import setup_logger
+import time
 
 
 logger = setup_logger(__name__)
@@ -34,21 +35,33 @@ class EvidenceReranker:
 
         prompt = self._build_prompt(claim_text, hits)
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You rank candidate evidence snippets for factual verification. "
-                            "Return rankings as newline-separated entries in the format 'index|score', "
-                            "where index is the snippet number and score is between 0 and 1."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-            )
+            def _try_rerank(retries: int = 2, delay: float = 1.0):
+                attempt = 0
+                while True:
+                    try:
+                        return self.client.chat.completions.create(  # type: ignore[union-attr]
+                            model=self.model,
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "You rank candidate evidence snippets for factual verification. "
+                                        "Return rankings as newline-separated entries in the format 'index|score', "
+                                        "where index is the snippet number and score is between 0 and 1."
+                                    ),
+                                },
+                                {"role": "user", "content": prompt},
+                            ],
+                            temperature=0.1,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        attempt += 1
+                        if attempt > retries:
+                            raise
+                        logger.warning("Rerank request failed (attempt %d/%d): %s", attempt, retries + 1, exc)
+                        time.sleep(delay * attempt)
+
+            response = _try_rerank()
             content = response.choices[0].message.content if response.choices else None
             if not content:
                 return hits

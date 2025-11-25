@@ -70,6 +70,7 @@ class AccuracyPipeline:
                 "confidence": claim.confidence,
                 "confidence_band": claim.confidence_band,
                 "explanation": claim.explanation,
+                "processing_mode": getattr(claim, "processing_mode", "unknown"),
                 "metadata": claim.metadata,
             }
             for claim in claims
@@ -232,6 +233,7 @@ class AccuracyPipeline:
                     verdict="NOT_EVALUATED",
                     confidence=0.4,
                     confidence_band="LOW",
+                    processing_mode="unknown",
                     explanation="Awaiting retrieval alignment.",
                     metadata=metadata,
                     evidence=[],
@@ -319,6 +321,7 @@ class AccuracyPipeline:
         if score >= threshold or override_threshold:
             classification = self.verdict_classifier.classify(claim, best)
             label = (classification.get("label") or "SUPPORTED").upper()
+            claim.processing_mode = classification.get("mode", "heuristic")
             if label == "CONTRADICTED":
                 verdict = "CONTRADICTED"
             elif label == "SUPPORTED":
@@ -327,6 +330,7 @@ class AccuracyPipeline:
                 verdict = "NOT_FOUND"
         else:
             verdict = "NOT_FOUND"
+            claim.processing_mode = "heuristic"
 
         claim.verdict = verdict
         confidence_candidates = [score]

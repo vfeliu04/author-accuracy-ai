@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 from typing import Optional
+import time
 
 try:
     from openai import OpenAI
@@ -37,28 +38,40 @@ class Summarizer:
         desired_words = word_limit or max_sentences * 25
         if self.client:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.settings.explanation_model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are summarising source documents for an accuracy pipeline. "
-                                "Return a concise paragraph highlighting the document's main claims."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                "Summarise the following document in a single paragraph of approximately "
-                                f"{desired_words} words (max {desired_words + 20} words). "
-                                "Highlight why it is relevant for improving a food security report.\n"
-                                f"{snippet}"
-                            ),
-                        },
-                    ],
-                    temperature=0.2,
-                )
+                def _try_summarize(retries: int = 2, delay: float = 1.0):
+                    attempt = 0
+                    while True:
+                        try:
+                            return self.client.chat.completions.create(  # type: ignore[union-attr]
+                                model=self.settings.explanation_model,
+                                messages=[
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You are summarising source documents for an accuracy pipeline. "
+                                            "Return a concise paragraph highlighting the document's main claims."
+                                        ),
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "Summarise the following document in a single paragraph of approximately "
+                                            f"{desired_words} words (max {desired_words + 20} words). "
+                                            "Highlight why it is relevant for improving a food security report.\n"
+                                            f"{snippet}"
+                                        ),
+                                    },
+                                ],
+                                temperature=0.2,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            attempt += 1
+                            if attempt > retries:
+                                raise
+                            logger.warning("LLM summary request failed (attempt %d/%d): %s", attempt, retries + 1, exc)
+                            time.sleep(delay * attempt)
+
+                response = _try_summarize()
                 choice = response.choices[0].message.content if response.choices else None
                 if choice:
                     return choice.strip()
