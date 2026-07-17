@@ -1,21 +1,35 @@
-/backend/.env
-/backend/logs/backend.log
-env/
-backend/env/
-.pytest_cache/
+# --- OS ---
+.DS_Store
+
+# --- Python ---
 __pycache__/
 *.pyc
-frontend/dist/
-frontend/node_modules/
-node_modules/
-backend/data/
-backend/logs/
-.DS_Store
-.vscode/
-.idea/
+.pytest_cache/
 .coverage
 htmlcov/
-npm-debug.log
-yarn-error.log
-frontend/.env
-frontend/.env.example
+env/
+venv/
+.venv/
+backend/env/
+
+# --- Node / frontend build artifacts ---
+node_modules/
+frontend/dist/
+.vite/
+
+# --- Environment files (templates like .env.example stay tracked) ---
+.env
+
+# --- Runtime data & logs ---
+backend/data/
+backend/logs/
+*.log
+
+# --- Editors ---
+.vscode/
+.idea/
+
+# --- Package manager logs ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

@@ -1,7 +1,0 @@
-Hybrid retrieval (sparse + dense): now that Haystack is in place, you could chain a BM25 node before the FAISS retriever and fuse the results. This helps when a claim uses rare terminology that embeddings miss. It’s a small change in the pipeline config and would likely bump accuracy further.
-
-Evaluation harness: Haystack also ships with evaluation nodes. If you keep a labeled set of claims ⇄ correct sources, you could add a CI step that runs haystack.evaluation.eval_documents to quantify how each change affects precision/recall. That would let you optimize thresholds and reranker tweaks with data rather than gut feel.
-
-Table-aware retrieval: LlamaIndex can index tables separately. You could extract table structures (via Pandas/Tabula) and embed them using a table encoder (e.g., TAPAS or simple flatten). Claims referencing numbers often come from tables, so a dedicated table retriever could give cleaner evidence, especially for validity diagnostics.
-
-LLM-guided validity checks: Use the existing GPT access to look for contradictory statements or missing methodology elements by prompting the model with specific questions (e.g., “Does the report describe sampling?”) and recording yes/no. That would augment the current heuristic-based validity score.
