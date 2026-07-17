@@ -21,10 +21,26 @@ const AnalyticsPanel = ({ recommendedSources }: AnalyticsPanelProps) => {
               <li key={source.id ?? source.title}>
                 <button
                   type="button"
-                  className="analytics__source-button"
+                  className="rec-source__card"
                   onClick={() => navigate(`/dashboard/recommendations/${index}`)}
                 >
-                  {source.title}
+                  <span className="rec-source__title">{source.title}</span>
+                  <div className="rec-source__meta">
+                    {source.publication_year && (
+                      <span className="rec-source__pill">{source.publication_year}</span>
+                    )}
+                    {source.cited_by_count != null && source.cited_by_count > 0 && (
+                      <span className="rec-source__pill rec-source__pill--cited">
+                        {source.cited_by_count.toLocaleString()} citations
+                      </span>
+                    )}
+                    {source.host_venue && (
+                      <span className="rec-source__venue">{source.host_venue}</span>
+                    )}
+                  </div>
+                  {source.reason && (
+                    <span className="rec-source__reason">{source.reason}</span>
+                  )}
                 </button>
               </li>
             ))}

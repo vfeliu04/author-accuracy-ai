@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import SummaryPanel from "./SummaryPanel";
 import RatingPanel from "./RatingPanel";
 import { useReportData } from "../context/ReportDataContext";
-import { getSourceDetail, type SourceDetailResponse, API_BASE_URL } from "../api/client";
+import { getSourceDetail, type SourceDetailResponse, API_BASE_URL, API_KEY } from "../api/client";
 
 type SourceDetailWithValidity = SourceDetailResponse & {
   validity?: {
@@ -24,7 +24,33 @@ const SourceDetail = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [claimPage, setClaimPage] = useState(0);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const pageSize = 5;
+
+  const uploadId = detail?.upload.upload_id;
+
+  useEffect(() => {
+    if (!uploadId) return;
+
+    let objectUrl = "";
+
+    fetch(`${API_BASE_URL}/api/uploads/${uploadId}/file`, {
+      headers: API_KEY ? { "X-API-Key": API_KEY } : {}
+    })
+      .then(r => {
+        if (!r.ok) throw new Error("Failed to load PDF");
+        return r.blob();
+      })
+      .then(blob => {
+        objectUrl = URL.createObjectURL(blob);
+        setBlobUrl(objectUrl);
+      })
+      .catch(() => setBlobUrl(null));
+
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [uploadId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -148,8 +174,6 @@ const SourceDetail = () => {
         }
       : fallbackScores);
 
-  const iframeSrc = filePath?.startsWith("http") ? filePath : `${API_BASE_URL}${filePath ?? ""}`;
-
   return (
     <div className="source-detail">
       <header className="source-detail__header">
@@ -166,7 +190,7 @@ const SourceDetail = () => {
       <div className="source-detail__body">
         <section className="source-detail__viewer card card--viewer">
           <iframe
-            src={iframeSrc}
+            src={blobUrl ?? ""}
             title={displayName}
             className="source-detail__iframe"
             loading="lazy"

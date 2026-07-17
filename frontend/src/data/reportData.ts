@@ -12,6 +12,7 @@ export type InternalSource = {
   isLocal?: boolean;
   summary?: string;
   scores?: SourceScores;
+  usageCount?: number;
 };
 
 export const internalSources: InternalSource[] = [];

@@ -5,16 +5,34 @@ import SummaryPanel from "./SummaryPanel";
 import ChatPanel, { type ChatMessage } from "./ChatPanel";
 import RatingPanel from "./RatingPanel";
 import AnalyticsPanel from "./AnalyticsPanel";
+import ClaimsPanel from "./ClaimsPanel";
+import ClaimsWorkspace from "./ClaimsWorkspace";
 import { useReportData } from "../context/ReportDataContext";
 import {
   getLatestReportSummary,
   getReportSummary,
+  getReportClaims,
   sendChat,
   getChatHistory,
-  type ChatMode
+  type ChatMode,
+  type ClaimSummary
 } from "../api/client";
 
 const ACTIVE_JOB_STORAGE_KEY = "active_job_id";
+
+function formatReportTitle(filename: string): string {
+  return filename
+    .replace(/\.pdf$/i, "")
+    .replace(/[_\-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const CHAT_SUGGESTIONS = [
+  "Which claims are contradicted?",
+  "What is the weakest supported claim?",
+  "How can I improve my accuracy score?",
+  "Which source backs the most claims?",
+];
 
 // ReportDashboard represents the full page layout for the report quality view.
 const ReportDashboard = () => {
@@ -40,6 +58,11 @@ const ReportDashboard = () => {
   const [chatMode, setChatMode] = useState<ChatMode>("evidence");
   const [modeLocked, setModeLocked] = useState(false);
   const [modeSuggestion, setModeSuggestion] = useState<ChatMode | null>(null);
+  const [claimsList, setClaimsList] = useState<ClaimSummary[]>([]);
+  const [claimsTotal, setClaimsTotal] = useState(0);
+  const [claimsHasMore, setClaimsHasMore] = useState(false);
+  const [claimsPage, setClaimsPage] = useState(0);
+  const [claimsWorkspaceOpen, setClaimsWorkspaceOpen] = useState(false);
   const sessionIdRef = useRef(`sess-${Date.now()}`);
   const isMountedRef = useRef(true);
 
@@ -51,6 +74,15 @@ const ReportDashboard = () => {
       localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job_id);
       setSummaryData(data);
       await refreshJobStatus(data.job_id);
+      try {
+        const claimsData = await getReportClaims(data.job_id, 0, 10);
+        setClaimsList(claimsData.claims);
+        setClaimsTotal(claimsData.total);
+        setClaimsHasMore(claimsData.has_more);
+        setClaimsPage(0);
+      } catch {
+        // claims fetch failure should not block dashboard
+      }
     },
     [refreshJobStatus, setSummaryData]
   );
@@ -111,7 +143,7 @@ const ReportDashboard = () => {
     setChatMode("evidence");
     setModeLocked(false);
     setModeSuggestion(null);
-    setReportTitle(summaryData.report.name);
+    setReportTitle(formatReportTitle(summaryData.report.name));
     setSummary(summaryData.report.summary);
     setScores(summaryData.scores);
     const cachedHistory = getChatMessages(summaryData.job_id);
@@ -262,6 +294,35 @@ const ReportDashboard = () => {
     setModeSuggestion(null);
   };
 
+  const handleLoadMoreClaims = useCallback(async () => {
+    if (!summaryData) return;
+    const nextPage = claimsPage + 1;
+    try {
+      const claimsData = await getReportClaims(summaryData.job_id, nextPage, 10);
+      setClaimsList((prev) => [...prev, ...claimsData.claims]);
+      setClaimsTotal(claimsData.total);
+      setClaimsHasMore(claimsData.has_more);
+      setClaimsPage(nextPage);
+    } catch {
+      // silently fail
+    }
+  }, [summaryData, claimsPage]);
+
+  const handleOpenWorkspace = useCallback(async () => {
+    // Fetch all claims if pagination is incomplete
+    if (claimsHasMore && summaryData) {
+      try {
+        const all = await getReportClaims(summaryData.job_id, 0, Math.max(claimsTotal, 500));
+        setClaimsList(all.claims);
+        setClaimsTotal(all.total);
+        setClaimsHasMore(all.has_more);
+      } catch {
+        // proceed with what we have
+      }
+    }
+    setClaimsWorkspaceOpen(true);
+  }, [claimsHasMore, claimsTotal, summaryData]);
+
   const evaluatedSources = useMemo(() => {
     if (!summaryData) {
       return internalSources;
@@ -271,6 +332,7 @@ const ReportDashboard = () => {
       name: source.name,
       filePath: source.file_url ?? "",
       summary: source.summary,
+      usageCount: source.usage_count,
       scores: {
         credibility: source.scores.credibility,
         validity: source.scores.credibility,
@@ -350,6 +412,13 @@ const ReportDashboard = () => {
       <header className="dashboard__header">
         <div className="dashboard__title-block">
           <h1>{reportTitle}</h1>
+          {summaryData && (
+            <p className="dashboard__subtitle">
+              {summaryData.stats.claims_supported} of {summaryData.stats.claims_total} claims supported
+              &nbsp;·&nbsp;{summaryData.sources.length} source{summaryData.sources.length !== 1 ? "s" : ""}
+              &nbsp;·&nbsp;{Math.round(summaryData.scores.accuracy * 100)}% accuracy
+            </p>
+          )}
           {error ? <p className="dashboard__status dashboard__status--error">{error}</p> : null}
           {!error && loading ? (
             <p className="dashboard__status">Loading latest metrics…</p>
@@ -383,6 +452,24 @@ const ReportDashboard = () => {
             onOpenReport={reportDocument ? () => navigate(`/dashboard/report`) : undefined}
             stats={summaryData?.stats}
           />
+          {claimsList.length > 0 && (
+            <ClaimsPanel
+              claims={claimsList}
+              totalClaims={claimsTotal}
+              hasMore={claimsHasMore}
+              onLoadMore={handleLoadMoreClaims}
+              onExpand={handleOpenWorkspace}
+            />
+          )}
+          {claimsWorkspaceOpen && summaryData && (
+            <ClaimsWorkspace
+              claims={claimsList}
+              hasMore={claimsHasMore}
+              onLoadMore={handleLoadMoreClaims}
+              reportUploadId={summaryData.report.id}
+              onClose={() => setClaimsWorkspaceOpen(false)}
+            />
+          )}
         </section>
         <section className="dashboard__column dashboard__column--center">
           <ChatPanel
@@ -396,6 +483,7 @@ const ReportDashboard = () => {
             modeSuggestion={modeSuggestion}
             onSuggestionAccept={handleSuggestionAccept}
             onSuggestionDismiss={handleSuggestionDismiss}
+            suggestions={CHAT_SUGGESTIONS}
           />
         </section>
         <section className="dashboard__column dashboard__column--right dashboard__column--stacked-right">

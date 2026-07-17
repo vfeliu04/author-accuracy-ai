@@ -2,6 +2,31 @@ import { useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useReportData } from "../context/ReportDataContext";
 
+function ScoreRing({ score, size = 120, label }: { score: number; size?: number; label?: string }) {
+  const r = (size - 16) / 2;
+  const circ = 2 * Math.PI * r;
+  const filled = Math.min(score, 100) / 100 * circ;
+  const color = score >= 70 ? "var(--color-success)" : score >= 40 ? "var(--color-warning)" : "var(--color-danger)";
+  return (
+    <div style={{ position: "relative", width: size, height: size, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+      <svg width={size} height={size} style={{ position: "absolute", top: 0, left: 0, transform: "rotate(-90deg)" }}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="var(--color-border)" strokeWidth={8} />
+        <circle
+          cx={size/2} cy={size/2} r={r} fill="none"
+          stroke={color} strokeWidth={8}
+          strokeDasharray={`${circ}`}
+          strokeDashoffset={circ - filled}
+          strokeLinecap="round"
+          style={{ transition: "stroke-dashoffset 0.6s ease" }}
+        />
+      </svg>
+      <span style={{ fontWeight: 700, fontSize: size * 0.22, color }}>
+        {Math.round(score)}
+      </span>
+    </div>
+  );
+}
+
 const RecommendedSourceDetail = () => {
   const navigate = useNavigate();
   const { sourceIndex } = useParams<{ sourceIndex: string }>();
@@ -89,14 +114,7 @@ const RecommendedSourceDetail = () => {
               <div className="recommended-rating">
                 {ratingRows.map((row) => (
                   <div className="recommended-rating__row" key={row.label}>
-                    <span
-                      className="recommended-rating__icon"
-                      style={{
-                        background: `conic-gradient(#6366f1 0% ${row.percent}%, #e2e8f0 ${row.percent}% 100%)`
-                      }}
-                    >
-                      <span className="recommended-rating__icon-inner" />
-                    </span>
+                    <ScoreRing score={row.percent} size={64} />
                     <div className="recommended-rating__info">
                       <span className="recommended-rating__label">{row.label}</span>
                       <span className="recommended-rating__value">{row.display}</span>

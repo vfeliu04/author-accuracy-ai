@@ -37,23 +37,40 @@ const SummaryPanel = ({ summary, reportLabel, onOpenReport, stats, topSources }:
               <p>{summary}</p>
             </div>
           ) : null}
+          <div className="summary__verdict-bar">
+            <div
+              className="summary__verdict-segment summary__verdict-segment--supported"
+              style={{ flex: stats?.claims_supported ?? 0 }}
+              title={`${stats?.claims_supported ?? 0} supported`}
+            />
+            <div
+              className="summary__verdict-segment summary__verdict-segment--contradicted"
+              style={{ flex: stats?.claims_contradicted ?? 0 }}
+              title={`${stats?.claims_contradicted ?? 0} contradicted`}
+            />
+            <div
+              className="summary__verdict-segment summary__verdict-segment--notfound"
+              style={{ flex: stats?.claims_not_found ?? 0 }}
+              title={`${stats?.claims_not_found ?? 0} not found`}
+            />
+          </div>
           <div className="summary__analytics">
             <div className="summary__analytics-row">
-              <div className="summary__stat">
+              <div className="summary__stat summary__stat--total">
                 <span>Total Claims</span>
                 <strong>{stats?.claims_total ?? 0}</strong>
               </div>
-              <div className="summary__stat">
+              <div className="summary__stat summary__stat--supported">
                 <span>Supported</span>
                 <strong>{stats?.claims_supported ?? 0}</strong>
               </div>
             </div>
             <div className="summary__analytics-row">
-              <div className="summary__stat">
+              <div className="summary__stat summary__stat--contradicted">
                 <span>Contradicted</span>
                 <strong>{stats?.claims_contradicted ?? 0}</strong>
               </div>
-              <div className="summary__stat">
+              <div className="summary__stat summary__stat--notfound">
                 <span>Not Found</span>
                 <strong>{stats?.claims_not_found ?? 0}</strong>
               </div>

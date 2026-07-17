@@ -1,5 +1,5 @@
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:5001";
-const API_KEY = import.meta.env.VITE_API_KEY;
+export const API_KEY = import.meta.env.VITE_API_KEY;
 
 type RequestOptions = RequestInit & {
   skipAuth?: boolean;
@@ -134,6 +134,14 @@ export type DashboardResponse = {
   chat_suggestions: Array<{ id: number; author: string; text: string }>;
 };
 
+export type ClaimEvidence = {
+  snippet: string;
+  source_id: string;
+  source_name: string;
+  page: number | null;
+  score: number | null;
+};
+
 export type ClaimSummary = {
   claim_id: string;
   text: string;
@@ -141,6 +149,8 @@ export type ClaimSummary = {
   confidence: number;
   confidence_band: string;
   explanation: string;
+  parent_page?: number | null;
+  evidence?: ClaimEvidence[];
 };
 
 export type ClaimsResponse = {
@@ -184,6 +194,13 @@ export type JobResponse = {
   result?: PipelineResponse;
 };
 
+export type ProgressEntry = {
+  step: string;
+  label: string;
+  status: "running" | "done" | "failed";
+  ts: string;
+};
+
 export type JobRecord = {
   job_id: string;
   status: string;
@@ -193,6 +210,7 @@ export type JobRecord = {
   error_message?: string;
   created_at?: string;
   updated_at?: string;
+  progress_json: ProgressEntry[];
 };
 
 export type RecommendedSource = {
