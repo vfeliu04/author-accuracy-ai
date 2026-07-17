@@ -38,7 +38,7 @@ class CredibilityPipeline:
 
         components: Dict[str, float] = {
             "metadata": self._metadata_completeness(metadata),
-            "authority": self._authority_score(metadata),
+            "authority": self._authority_score(metadata, self.settings.authority_publishers_tier1, self.settings.authority_publishers_tier2),
             "recency": self._recency_score(metadata),
             "confidence": self._confidence_score(metadata),
             "user_adjustment": float(metadata.get("user_adjustment", 0.0)),  # manual tweak if present
@@ -73,24 +73,30 @@ class CredibilityPipeline:
         )
         return score
 
+    # Multipliers applied to usage_count weight based on metadata confidence level.
+    _CONFIDENCE_WEIGHT = {"HIGH": 1.0, "MEDIUM": 0.75, "LOW": 0.5}
+
     def aggregate_report(self, report_id: str) -> Dict[str, Any] | None:
         usage_stats = self.repo.source_usage(report_id)
         if not usage_stats:
             return None
-        total_weight = 0
+        total_weight = 0.0
         weighted_sum = 0.0
         details = []
         for record in usage_stats:
             credibility = self.repo.get_credibility(record["source_id"])
             if not credibility:
                 continue
-            weight = record["usage_count"]
+            confidence_level = (credibility.get("metadata_confidence") or "LOW").upper()
+            confidence_multiplier = self._CONFIDENCE_WEIGHT.get(confidence_level, 0.5)
+            weight = record["usage_count"] * confidence_multiplier
             total_weight += weight
             weighted_sum += credibility["score"] * weight
             details.append(
                 {
                     "source_id": record["source_id"],
-                    "usage": weight,
+                    "usage": record["usage_count"],
+                    "metadata_confidence": confidence_level,
                     "score": credibility["score"],
                 }
             )
@@ -109,13 +115,21 @@ class CredibilityPipeline:
         return 30.0 * present / len(fields)
 
     @staticmethod
-    def _authority_score(metadata: Dict[str, Any]) -> float:
+    def _authority_score(
+        metadata: Dict[str, Any],
+        tier1_csv: str = "fao,un,world bank,imf,who,unicef,oecd",
+        tier2_csv: str = "reuters,associated press,bbc,nature,science,lancet",
+    ) -> float:
         publisher = (metadata.get("publisher") or "").lower()
-        if any(keyword in publisher for keyword in ("fao", "un", "world bank", "imf")):
+        tier1 = [kw.strip() for kw in tier1_csv.split(",") if kw.strip()]
+        tier2 = [kw.strip() for kw in tier2_csv.split(",") if kw.strip()]
+        if any(kw in publisher for kw in tier1):
             return 30.0
+        if any(kw in publisher for kw in tier2):
+            return 22.5
         if publisher:
-            return 20.0
-        return 10.0
+            return 15.0
+        return 7.5
 
     @staticmethod
     def _recency_score(metadata: Dict[str, Any]) -> float:

@@ -51,7 +51,6 @@ STOPWORDS = {
     "through",
     "between",
     "within",
-    "into",
     "among",
     "such",
     "more",
@@ -111,6 +110,8 @@ class RecommendationService:
         recommendations: List[Dict[str, Any]] = []
         query_vector = self._embed_query_context(report_title, report_summary, claims)
 
+        # Collect all valid mapped recommendations first, then batch-embed them.
+        candidate_recommendations: List[Dict[str, Any]] = []
         for result in results:
             title = (result.get("display_name") or "").strip()
             if not title or title.lower() in existing_titles:
@@ -119,16 +120,27 @@ class RecommendationService:
                 continue
             recommendation = self._map_openalex_result(result)
             if recommendation:
-                if query_vector:
-                    rec_vector = self._embed_candidate(recommendation)
-                    if rec_vector:
-                        similarity = self._cosine(query_vector, rec_vector)
-                        recommendation["relevance_score"] = similarity
-                recommendations.append(recommendation)
-            if len(recommendations) >= limit:
+                candidate_recommendations.append(recommendation)
+            if len(candidate_recommendations) >= limit:
                 break
+
+        if query_vector and candidate_recommendations:
+            candidate_texts = [
+                " ".join(filter(None, [rec.get("title"), rec.get("abstract"), rec.get("summary")]))
+                for rec in candidate_recommendations
+            ]
+            non_empty_indices = [i for i, t in enumerate(candidate_texts) if t]
+            if non_empty_indices:
+                texts_to_embed = [candidate_texts[i] for i in non_empty_indices]
+                rec_vectors = embed_texts(texts_to_embed)
+                for idx, vec in zip(non_empty_indices, rec_vectors):
+                    if vec:
+                        similarity = self._cosine(query_vector, vec)
+                        candidate_recommendations[idx]["relevance_score"] = similarity
+
+        recommendations = candidate_recommendations
         if query_vector:
-            recommendations = [rec for rec in recommendations if rec.get("relevance_score", 0) >= 0.18]
+            recommendations = [rec for rec in recommendations if rec.get("relevance_score", 0) >= self.settings.recommendation_similarity_threshold]
             recommendations.sort(
                 key=lambda rec: (
                     rec.get("relevance_score", 0),
@@ -170,7 +182,7 @@ class RecommendationService:
             "search": search_param.strip(),
             "sort": "relevance_score:desc",
             "per-page": limit,
-            "filter": "from_publication_date:2018-01-01,has_doi:true",
+            "filter": f"from_publication_date:{self.settings.recommendation_publication_cutoff_year}-01-01,has_doi:true",
         }
         mailto = self.settings.openalex_mailto
         if mailto:

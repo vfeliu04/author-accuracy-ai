@@ -125,6 +125,24 @@ if LangChainFAISS is not None and LangChainEmbeddings is not None and Document i
             docs_with_scores = self.store.similarity_search_with_score(text, k=top_k)
             return [self._format_result(doc, score) for doc, score in docs_with_scores]
 
+        def similarity_search_by_doc(self, text: str, doc_id: str, top_k: int = 3) -> List[Dict[str, Any]]:
+            """Return up to top_k hits filtered to a specific doc_id.
+
+            LangChain FAISS does not support metadata filtering natively, so we
+            over-fetch (top_k * 10) and filter by doc_id after the search.
+            """
+            if not text or self.store is None:
+                return []
+            fetch_k = top_k * 10
+            docs_with_scores = self.store.similarity_search_with_score(text, k=fetch_k)
+            results = []
+            for doc, score in docs_with_scores:
+                if doc.metadata.get("doc_id") == doc_id:
+                    results.append(self._format_result(doc, score))
+                    if len(results) >= top_k:
+                        break
+            return results
+
         def search(self, vector: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
             if not vector or self.store is None:
                 return []
@@ -239,6 +257,25 @@ else:
             if not vectors:
                 return []
             return self.search(vectors[0], top_k=top_k)
+
+        def similarity_search_by_doc(self, text: str, doc_id: str, top_k: int = 3) -> List[Dict[str, Any]]:
+            """Return up to top_k hits filtered to a specific doc_id.
+
+            Over-fetches (top_k * 10) from the FAISS index and filters by doc_id
+            post-search since FAISS has no native metadata filtering.
+            """
+            vectors = embed_texts([text])
+            if not vectors:
+                return []
+            fetch_k = top_k * 10
+            all_hits = self.search(vectors[0], top_k=fetch_k)
+            results = []
+            for hit in all_hits:
+                if hit.get("doc_id") == doc_id:
+                    results.append(hit)
+                    if len(results) >= top_k:
+                        break
+            return results
 
 
 VECTOR_STORE = VectorStore()

@@ -48,12 +48,24 @@ class MetadataService:
         return metadata
 
     def fetch_crossref(self, doi: str) -> Optional[Dict[str, Any]]:
-        headers = {"User-Agent": "AuthorAI/0.1 (mailto:dev@example.com)"}
-        response = requests.get(f"https://api.crossref.org/works/{doi}", headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.warning("Crossref lookup failed for DOI %s: %s", doi, response.status_code)
-            return None
-        return response.json().get("message")
+        import time
+
+        headers = {"User-Agent": f"AuthorAI/0.1 (mailto:{self.settings.crossref_mailto})"}
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.get(f"https://api.crossref.org/works/{doi}", headers=headers, timeout=10)
+                if response.status_code != 200:
+                    logger.warning("Crossref lookup failed for DOI %s: %s", doi, response.status_code)
+                    return None
+                return response.json().get("message")
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                if attempt < max_retries:
+                    logger.warning("Crossref request failed (attempt %d/%d) for DOI %s: %s — retrying in 1s", attempt + 1, max_retries + 1, doi, exc)
+                    time.sleep(1)
+                else:
+                    logger.warning("Crossref request failed after %d attempts for DOI %s: %s", max_retries + 1, doi, exc)
+                    return None
 
     def collect_metadata(self, path: Path) -> Dict[str, Any]:
         embedded = self.fetch_embedded_metadata(path)
@@ -67,7 +79,12 @@ class MetadataService:
             if crossref:
                 merged["title"] = crossref.get("title", [merged.get("title")])[0]
                 merged["publisher"] = crossref.get("publisher")
-                merged["publication_date"] = "-".join(map(str, crossref.get("published", {}).get("date-parts", [[None]])[0]))
+                date_parts = crossref.get("published", {}).get("date-parts", [[None]])[0]
+                if len(date_parts) >= 3 and all(p is not None for p in date_parts[:3]):
+                    year, month, day = date_parts[0], date_parts[1], date_parts[2]
+                    merged["publication_date"] = f"{year}-{month:02d}-{day:02d}"
+                else:
+                    merged["publication_date"] = "-".join(map(str, date_parts))
                 merged["confidence"] = "HIGH"
         if "confidence" not in merged:
             merged["confidence"] = "MEDIUM" if header else "LOW"
