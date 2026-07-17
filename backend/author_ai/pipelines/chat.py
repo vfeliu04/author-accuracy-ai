@@ -9,9 +9,9 @@ from collections import defaultdict
 import re
 
 try:
-    from openai import OpenAI
+    import anthropic as _anthropic
 except ImportError:  # pragma: no cover
-    OpenAI = None  # type: ignore
+    _anthropic = None  # type: ignore
 
 from ..storage.database import Repository
 from ..config import get_settings
@@ -56,11 +56,11 @@ class ChatService:
         self.settings = get_settings()
         self.repo = Repository()
         self.default_mode = CHAT_MODES[0]
-        if OpenAI and self.settings.openai_api_key:
-            self.client = OpenAI(api_key=self.settings.openai_api_key)
+        if _anthropic and self.settings.anthropic_api_key:
+            self.client = _anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
         else:
             self.client = None
-            logger.info("ChatService running in heuristic mode (set OPENAI_API_KEY for LLM answers).")
+            logger.info("ChatService running in heuristic mode (set ANTHROPIC_API_KEY for LLM answers).")
 
     def respond(
         self,
@@ -268,15 +268,14 @@ class ChatService:
 
         system_prompt = self._mode_system_prompt(mode)
         try:
-            response = self.client.chat.completions.create(  # type: ignore[union-attr]
+            response = self.client.messages.create(  # type: ignore[union-attr]
                 model=self.settings.llm_chat_model,
-                temperature=0.2 if mode == "evidence" else 0.35,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
+                max_tokens=2048,
+                system=system_prompt,
+                messages=[{"role": "user", "content": prompt}],
             )
-            choice = response.choices[0].message.content if response.choices else None
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            choice = text_blocks[0] if text_blocks else None
             if choice:
                 return self._format_response(choice)
         except Exception as exc:  # noqa: BLE001
@@ -342,26 +341,21 @@ class ChatService:
     def _small_talk_answer(self, question: Optional[str], history_context: Optional[str]) -> str:
         if not self.client:
             return "Hello! I’m here to help with your report’s accuracy, credibility, and validity. Ask me about metrics, claims, or sources when you’re ready."
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a friendly Author AI assistant. Engage in light small talk, "
-                    "but keep the conversation professional and guide the user back to report quality topics when possible. "
-                    "Avoid speculating about unrelated world knowledge."
-                ),
-            }
-        ]
-        if history_context:
-            messages.append({"role": "user", "content": history_context})
-        messages.append({"role": "user", "content": question or "Just say hello to the user."})
+        system_prompt = (
+            "You are a friendly Author AI assistant. Engage in light small talk, "
+            "but keep the conversation professional and guide the user back to report quality topics when possible. "
+            "Avoid speculating about unrelated world knowledge."
+        )
+        user_content = "\n\n".join(filter(None, [history_context, question or "Just say hello to the user."]))
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.messages.create(  # type: ignore[union-attr]
                 model=self.settings.llm_chat_model,
-                temperature=0.4,
-                messages=messages,
+                max_tokens=512,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_content}],
             )
-            choice = response.choices[0].message.content if response.choices else None
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            choice = text_blocks[0] if text_blocks else None
             if choice:
                 return self._format_response(choice)
         except Exception as exc:  # noqa: BLE001

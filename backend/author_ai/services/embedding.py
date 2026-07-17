@@ -70,13 +70,7 @@ class EmbeddingService:
 _EMBEDDINGS = EmbeddingService()
 
 
-def embed_texts(texts: Iterable[str]) -> List[List[float]]:
-    """Convenience function for callers that do not want to instantiate the service."""
-
-    return _EMBEDDINGS.embed(texts)
-
-
-# Extend EmbeddingService to batch requests when using OpenAI to avoid oversized payloads.
+# Batch helper for splitting large text lists to avoid oversized OpenAI payloads.
 def _batch(iterable, size: int):
     batch: list[str] = []
     for item in iterable:
@@ -88,8 +82,7 @@ def _batch(iterable, size: int):
         yield batch
 
 
-# Wrap embed_texts with batching for safety when OpenAI is enabled.
-def embed_texts(texts: Iterable[str], batch_size: int = 64) -> List[List[float]]:  # type: ignore[override]
+def embed_texts(texts: Iterable[str], batch_size: int = 64) -> List[List[float]]:
     texts = list(texts)
     if not texts:
         return []

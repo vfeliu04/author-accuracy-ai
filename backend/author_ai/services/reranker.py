@@ -7,9 +7,9 @@ from __future__ import annotations
 from typing import List, Dict, Any
 
 try:
-    from openai import OpenAI
+    import anthropic as _anthropic
 except ImportError:  # pragma: no cover - optional dependency
-    OpenAI = None  # type: ignore
+    _anthropic = None  # type: ignore
 
 from ..config import get_settings
 from .logger import setup_logger
@@ -23,11 +23,11 @@ class EvidenceReranker:
     def __init__(self):
         self.settings = get_settings()
         self.model = self.settings.rerank_model
-        if OpenAI and self.settings.openai_api_key and self.model:
-            self.client = OpenAI(api_key=self.settings.openai_api_key)
+        if _anthropic and self.settings.anthropic_api_key and self.model:
+            self.client = _anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
         else:
             self.client = None
-            logger.info("Reranker using vector similarity order (set OPENAI_API_KEY for LLM reranking).")
+            logger.info("Reranker using vector similarity order (set ANTHROPIC_API_KEY for LLM reranking).")
 
     def rerank(self, claim_text: str, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not self.client or not hits:
@@ -39,20 +39,15 @@ class EvidenceReranker:
                 attempt = 0
                 while True:
                     try:
-                        return self.client.chat.completions.create(  # type: ignore[union-attr]
+                        return self.client.messages.create(  # type: ignore[union-attr]
                             model=self.model,
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You rank candidate evidence snippets for factual verification. "
-                                        "Return rankings as newline-separated entries in the format 'index|score', "
-                                        "where index is the snippet number and score is between 0 and 1."
-                                    ),
-                                },
-                                {"role": "user", "content": prompt},
-                            ],
-                            temperature=0.1,
+                            max_tokens=512,
+                            system=(
+                                "You rank candidate evidence snippets for factual verification. "
+                                "Return rankings as newline-separated entries in the format 'index|score', "
+                                "where index is the snippet number and score is between 0 and 1."
+                            ),
+                            messages=[{"role": "user", "content": prompt}],
                         )
                     except Exception as exc:  # noqa: BLE001
                         attempt += 1
@@ -62,7 +57,8 @@ class EvidenceReranker:
                         time.sleep(delay * attempt)
 
             response = _try_rerank()
-            content = response.choices[0].message.content if response.choices else None
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            content = text_blocks[0] if text_blocks else None
             if not content:
                 return hits
             ranking = self._parse_ranking(content, len(hits))

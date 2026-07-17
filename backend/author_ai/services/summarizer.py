@@ -1,5 +1,5 @@
 """
-Lightweight document summarisation helper with optional OpenAI support.
+Lightweight document summarisation helper with optional Anthropic support.
 """
 
 from __future__ import annotations
@@ -9,9 +9,9 @@ from typing import Optional
 import time
 
 try:
-    from openai import OpenAI
+    import anthropic as _anthropic
 except ImportError:  # pragma: no cover - optional dependency
-    OpenAI = None  # type: ignore
+    _anthropic = None  # type: ignore
 
 from ..config import get_settings
 from .logger import setup_logger
@@ -23,11 +23,11 @@ logger = setup_logger(__name__)
 class Summarizer:
     def __init__(self):
         self.settings = get_settings()
-        if OpenAI and self.settings.openai_api_key:
-            self.client: Optional[OpenAI] = OpenAI(api_key=self.settings.openai_api_key)
+        if _anthropic and self.settings.anthropic_api_key:
+            self.client = _anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
         else:
             self.client = None
-            logger.info("Summaries default to heuristic mode (set OPENAI_API_KEY for LLM-powered summaries).")
+            logger.info("Summaries default to heuristic mode (set ANTHROPIC_API_KEY for LLM-powered summaries).")
 
     def summarize(self, text: str, max_sentences: int = 3, word_limit: Optional[int] = None) -> str:
         text = (text or "").strip()
@@ -42,27 +42,22 @@ class Summarizer:
                     attempt = 0
                     while True:
                         try:
-                            return self.client.chat.completions.create(  # type: ignore[union-attr]
+                            return self.client.messages.create(  # type: ignore[union-attr]
                                 model=self.settings.explanation_model,
-                                messages=[
-                                    {
-                                        "role": "system",
-                                        "content": (
-                                            "You are summarising source documents for an accuracy pipeline. "
-                                            "Return a concise paragraph highlighting the document's main claims."
-                                        ),
-                                    },
-                                    {
-                                        "role": "user",
-                                        "content": (
-                                            "Summarise the following document in a single paragraph of approximately "
-                                            f"{desired_words} words (max {desired_words + 20} words). "
-                                            "Highlight why it is relevant for improving a food security report.\n"
-                                            f"{snippet}"
-                                        ),
-                                    },
-                                ],
-                                temperature=0.2,
+                                max_tokens=512,
+                                system=(
+                                    "You are summarising source documents for an accuracy pipeline. "
+                                    "Return a concise paragraph highlighting the document's main claims."
+                                ),
+                                messages=[{
+                                    "role": "user",
+                                    "content": (
+                                        "Summarise the following document in a single paragraph of approximately "
+                                        f"{desired_words} words (max {desired_words + 20} words). "
+                                        "Highlight why it is relevant for improving a food security report.\n"
+                                        f"{snippet}"
+                                    ),
+                                }],
                             )
                         except Exception as exc:  # noqa: BLE001
                             attempt += 1
@@ -72,7 +67,8 @@ class Summarizer:
                             time.sleep(delay * attempt)
 
                 response = _try_summarize()
-                choice = response.choices[0].message.content if response.choices else None
+                text_blocks = [b.text for b in response.content if b.type == "text"]
+                choice = text_blocks[0] if text_blocks else None
                 if choice:
                     return choice.strip()
             except Exception as exc:  # noqa: BLE001
