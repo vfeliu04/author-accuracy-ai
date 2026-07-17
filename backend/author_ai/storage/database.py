@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
@@ -13,13 +14,31 @@ from ..services.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+_thread_local = threading.local()
+
+_METADATA_SCHEMA_VERSION = 1
+
+
+def _stamp_metadata(metadata: dict) -> dict:
+    """Return a copy of *metadata* with schema_version set, for migration detection."""
+    stamped = dict(metadata)
+    stamped.setdefault("schema_version", _METADATA_SCHEMA_VERSION)
+    return stamped
+
 
 def _connect() -> sqlite3.Connection:
     settings = get_settings()
-    settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-    # Use a fresh connection per call; pytest overrides the path via env.
-    conn = sqlite3.connect(settings.sqlite_path)
-    conn.row_factory = sqlite3.Row
+    conn = getattr(_thread_local, "connection", None)
+    if conn is not None:
+        try:
+            conn.cursor()  # cheap liveness check
+        except sqlite3.ProgrammingError:
+            conn = None  # closed — create a fresh one
+    if conn is None:
+        settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(settings.sqlite_path)
+        conn.row_factory = sqlite3.Row
+        _thread_local.connection = conn
     return conn
 
 
@@ -43,7 +62,23 @@ def init_db() -> None:
             text TEXT NOT NULL,
             page_start INTEGER,
             page_end INTEGER,
+            chunk_type TEXT,
+            chart_id TEXT,
+            x_value TEXT,
+            y_value REAL,
+            series_name TEXT,
             metadata TEXT,
+            FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS charts (
+            id TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            page INTEGER NOT NULL,
+            figure_label TEXT,
+            bbox_json TEXT,
+            chart_type TEXT,
+            raw_json TEXT,
             FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
         );
 
@@ -119,6 +154,12 @@ def init_db() -> None:
             created_at TEXT,
             updated_at TEXT
         );
+
+        CREATE INDEX IF NOT EXISTS idx_documents_doc_id ON documents (doc_id);
+        CREATE INDEX IF NOT EXISTS idx_claims_report_id ON claims (report_id);
+        CREATE INDEX IF NOT EXISTS idx_credibility_scores_source_id ON credibility_scores (source_id);
+        CREATE INDEX IF NOT EXISTS idx_chat_logs_session_id ON chat_logs (session_id);
+        CREATE INDEX IF NOT EXISTS idx_chat_logs_report_id ON chat_logs (report_id);
         """
     )
     # Add processing_mode column if missing (for existing DBs)
@@ -127,8 +168,34 @@ def init_db() -> None:
     if "processing_mode" not in cols:
         try:
             cur.execute("ALTER TABLE claims ADD COLUMN processing_mode TEXT;")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+    cur.execute("PRAGMA table_info(chunks);")
+    chunk_cols = [row[1] for row in cur.fetchall()]
+    chunk_alters = {
+        "chunk_type": "ALTER TABLE chunks ADD COLUMN chunk_type TEXT;",
+        "chart_id": "ALTER TABLE chunks ADD COLUMN chart_id TEXT;",
+        "x_value": "ALTER TABLE chunks ADD COLUMN x_value TEXT;",
+        "y_value": "ALTER TABLE chunks ADD COLUMN y_value REAL;",
+        "series_name": "ALTER TABLE chunks ADD COLUMN series_name TEXT;",
+    }
+    for col_name, stmt in chunk_alters.items():
+        if col_name not in chunk_cols:
+            try:
+                cur.execute(stmt)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
+    # Add progress_json column to jobs if missing (existing DBs)
+    cur.execute("PRAGMA table_info(jobs);")
+    job_cols = [row[1] for row in cur.fetchall()]
+    if "progress_json" not in job_cols:
+        try:
+            cur.execute("ALTER TABLE jobs ADD COLUMN progress_json TEXT;")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
     conn.commit()
     conn.close()
 
@@ -172,7 +239,7 @@ class Repository:
                 body_text=excluded.body_text,
                 created_at=excluded.created_at
             """,
-            (doc_id, doc_type, path, json.dumps(metadata), body_text, created_at),
+            (doc_id, doc_type, path, json.dumps(_stamp_metadata(metadata)), body_text, created_at),
         )
 
     def update_document_metadata(self, doc_id: str, updates: dict):
@@ -183,7 +250,7 @@ class Repository:
         metadata.update({k: v for k, v in updates.items() if v is not None})
         self.execute(
             "UPDATE documents SET metadata = ? WHERE doc_id = ?",
-            (json.dumps(metadata), doc_id),
+            (json.dumps(_stamp_metadata(metadata)), doc_id),
         )
 
     def insert_chunks(self, chunks: list[dict]):
@@ -194,14 +261,42 @@ class Repository:
                 chunk["text"],
                 chunk.get("page_start"),
                 chunk.get("page_end"),
-                json.dumps(chunk.get("metadata") or {}),
+                chunk.get("chunk_type"),
+                chunk.get("chart_id"),
+                chunk.get("x_value"),
+                chunk.get("y_value"),
+                chunk.get("series_name"),
+                json.dumps(_stamp_metadata(chunk.get("metadata") or {})),
             )
             for chunk in chunks
         ]
         self.executemany(
             """
-            INSERT OR REPLACE INTO chunks (chunk_id, doc_id, text, page_start, page_end, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO chunks (chunk_id, doc_id, text, page_start, page_end, chunk_type, chart_id, x_value, y_value, series_name, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    def insert_charts(self, charts: list[dict]):
+        if not charts:
+            return
+        rows = [
+            (
+                chart["id"],
+                chart["doc_id"],
+                chart["page"],
+                chart.get("figure_label"),
+                json.dumps(chart.get("bbox") if isinstance(chart.get("bbox"), (list, tuple)) else chart.get("bbox")),
+                chart.get("chart_type"),
+                json.dumps(chart.get("raw_json") or {}),
+            )
+            for chart in charts
+        ]
+        self.executemany(
+            """
+            INSERT OR REPLACE INTO charts (id, doc_id, page, figure_label, bbox_json, chart_type, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -217,7 +312,7 @@ class Repository:
                 claim["confidence_band"],
                 claim["explanation"],
                 claim.get("processing_mode"),
-                json.dumps(claim.get("metadata") or {}),
+                json.dumps(_stamp_metadata(claim.get("metadata") or {})),
             )
             for claim in claims
         ]
@@ -237,7 +332,7 @@ class Repository:
                 e["source_id"],
                 e.get("chunk_id"),
                 e.get("verdict_label"),
-                json.dumps(e.get("metadata") or {}),
+                json.dumps(_stamp_metadata(e.get("metadata") or {})),
             )
             for e in evidence
         ]
@@ -327,6 +422,22 @@ class Repository:
         return [dict(row) | {"metadata": json.loads(row["metadata"] or "{}")}
                 for row in rows]
 
+    def list_charts(self, doc_id: Optional[str] = None) -> list[dict]:
+        rows = self.fetchall(
+            "SELECT * FROM charts WHERE (? IS NULL OR doc_id = ?)",
+            (doc_id, doc_id),
+        )
+        charts = []
+        for row in rows:
+            entry = dict(row)
+            try:
+                entry["bbox"] = json.loads(entry.get("bbox_json") or "null")
+            except json.JSONDecodeError:
+                entry["bbox"] = None
+            entry["raw_json"] = json.loads(entry.get("raw_json") or "{}")
+            charts.append(entry)
+        return charts
+
     def get_document(self, doc_id: str) -> Optional[dict]:
         row = self.fetchone("SELECT * FROM documents WHERE doc_id = ?", (doc_id,))
         if not row:
@@ -345,6 +456,36 @@ class Repository:
         for row in rows:
             documents[row["doc_id"]] = dict(row) | {"metadata": json.loads(row["metadata"] or "{}")}
         return documents
+
+    def list_source_doc_ids(self) -> list[str]:
+        """Return doc_ids for all documents with doc_type='SOURCE'."""
+        rows = self.fetchall("SELECT doc_id FROM documents WHERE doc_type = 'SOURCE'")
+        return [row["doc_id"] for row in rows]
+
+    def list_evidence_for_claim(self, claim_id: str) -> list[dict]:
+        """Return all evidence rows for a given claim_id."""
+        rows = self.fetchall(
+            "SELECT evidence_id, claim_id, source_id, chunk_id, verdict_label, metadata "
+            "FROM claim_evidence WHERE claim_id = ? ORDER BY rowid",
+            (claim_id,),
+        )
+        result = []
+        for row in rows:
+            meta = row["metadata"]
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            result.append({
+                "evidence_id": row["evidence_id"],
+                "claim_id": row["claim_id"],
+                "source_id": row["source_id"],
+                "chunk_id": row["chunk_id"],
+                "verdict_label": row["verdict_label"],
+                "metadata": meta,
+            })
+        return result
 
     def list_evidence_for_claims(self, claim_ids: list[str]) -> list[dict]:
         if not claim_ids:
@@ -508,14 +649,14 @@ class Repository:
         )
 
     def update_job(self, job_id: str, **fields):
-        allowed = {"status", "result_json", "error_message", "updated_at"}
+        allowed = {"status", "result_json", "error_message", "updated_at", "progress_json"}
         columns = []
         values = []
         for key, value in fields.items():
             if key not in allowed:
                 continue
             columns.append(f"{key} = ?")
-            if key == "result_json" and not isinstance(value, str):
+            if key in {"result_json", "progress_json"} and not isinstance(value, str):
                 values.append(json.dumps(value))
             else:
                 values.append(value)
@@ -525,6 +666,27 @@ class Repository:
         self.execute(
             f"UPDATE jobs SET {', '.join(columns)} WHERE job_id = ?",
             tuple(values),
+        )
+
+    def push_job_progress(self, job_id: str, step: str, label: str, status: str = "done") -> None:
+        """Append or update a progress step on the job's progress_json array."""
+        import datetime
+        row = self.fetchone("SELECT progress_json FROM jobs WHERE job_id = ?", (job_id,))
+        if row is None:
+            return
+        entries: list = json.loads(row["progress_json"] or "[]")
+        ts = datetime.datetime.utcnow().isoformat()
+        for entry in entries:
+            if entry["step"] == step:
+                entry["status"] = status
+                entry["label"] = label
+                entry["ts"] = ts
+                break
+        else:
+            entries.append({"step": step, "label": label, "status": status, "ts": ts})
+        self.execute(
+            "UPDATE jobs SET progress_json = ?, updated_at = ? WHERE job_id = ?",
+            (json.dumps(entries), ts, job_id),
         )
 
     def get_job(self, job_id: str) -> Optional[dict]:
@@ -560,4 +722,5 @@ class Repository:
         result = dict(row)
         result["source_ids"] = json.loads(result.get("source_ids") or "[]")
         result["result_json"] = json.loads(result.get("result_json") or "{}")
+        result["progress_json"] = json.loads(result.get("progress_json") or "[]")
         return result
