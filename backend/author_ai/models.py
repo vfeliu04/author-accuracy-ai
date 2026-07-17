@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 
 def _now_iso() -> str:
@@ -92,3 +92,14 @@ class ValidityScores:
     recency: float
     diagnostics: Dict[str, Any]
     last_calculated_at: str = field(default_factory=_now_iso)
+
+
+@dataclass
+class Chart:
+    id: str
+    doc_id: str
+    page: int
+    figure_label: Optional[str] = None
+    bbox: Optional[Tuple[float, float, float, float]] = None
+    chart_type: str = "unknown"
+    raw_json: Dict[str, Any] = field(default_factory=dict)
