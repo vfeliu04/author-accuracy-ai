@@ -95,4 +95,4 @@ This is a working prototype built for local, single-user use:
 
 ## License
 
-No license file is currently included, so all rights are reserved by default.
+Released under the [MIT License](LICENSE).

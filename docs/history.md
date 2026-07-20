@@ -6,8 +6,8 @@ This repository contains four generations of the same idea — automatically che
 
 | Branch | What it is | State |
 |---|---|---|
-| `main` | Mirrors the current app (see below for its unusual past) | **Active — start here** |
-| `author-ai-report-view` | The development branch of the current app | Active |
+| `main` | The current app — the working branch (see below for its unusual past) | **Active — start here** |
+| `author-ai-report-view` | The former development branch of the current app; work now continues on `main` | Superseded by `main` |
 | `author_verify` | Generation 1: the "hallucination-checker" prototype (Flask + Jinja + Bootstrap) | Superseded, kept for reference |
 | `author_verify_broken_code` | `author_verify` plus one experimental commit (literally titled "broken code") adding a multi-extractor `pdf_pipeline/` that never worked correctly | Quarantined experiment |
 | `mvp_rag` | An unrelated, self-contained RAG demo (Flask + Qdrant + GPT-4o-mini) built on a cleared tree | Historical only |
