@@ -72,7 +72,7 @@ When the `anthropic` package is installed and `ANTHROPIC_API_KEY` is set, `_llm_
 
 Without an Anthropic client, `ChatService` runs in "heuristic mode" (logged at startup) and `_compose_answer` produces a deterministic digest instead: bulleted claims with verdicts, supporting snippets, the metrics block, report context, and conversation context, ending with a line noting the response was generated without the LLM.
 
-> **Gotcha:** the *runtime* fallback is broken. If the Anthropic API call raises mid-request, `_llm_answer` calls `_compose_answer` with one positional argument too few (the mode lands in the `mode_help_context` parameter and the required `mode` parameter is missing), so the fallback itself raises a `TypeError` instead of returning the heuristic answer. The heuristic path only works reliably when the client was never configured in the first place.
+The same heuristic digest is also the runtime fallback: if the Anthropic API call raises mid-request, `_llm_answer` logs a warning and returns `_compose_answer`'s deterministic answer instead of failing the request.
 
 ## Persistence and history
 

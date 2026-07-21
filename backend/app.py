@@ -41,50 +41,6 @@ _credibility_pipeline = CredibilityPipeline()
 _validity_pipeline = ValidityPipeline()
 _chat_service = ChatService()
 
-def _resolve_pdf_path(path_str: str) -> Path:
-    path = Path(path_str).expanduser()
-    if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {path}")
-    return path
-
-
-MOCK_DASHBOARD = {
-    "report_title": "World - Hunger Report",
-    "summary": (
-        "The 2025 World Hunger and Food Chain Disruptions report highlights how climate shocks, "
-        "conflict-driven displacement, and fragile logistics networks are converging to keep 735 million "
-        "people in chronic food insecurity. It contrasts regions with resilient storage and cold-chain "
-        "investments against those relying on volatile grain imports, underscoring the need for rapid "
-        "response funds and nutrition-focused safety nets."
-    ),
-    "scores": {
-        "overall": 0.78,
-        "accuracy": 0.74,
-        "credibility": 0.81,
-        "validity": 0.69,
-    },
-    "recommended_sources": [
-        {
-            "id": "https://openalex.org/W123456789",
-            "title": "Global Food Resilience Index 2025",
-            "summary": "Key 2025 insights on food resilience and logistics readiness.",
-            "abstract": "This mock abstract outlines supply chain risks and resilience strategies.",
-            "credibility_score": 82,
-            "validity_score": 74,
-            "date_published": "2025-03-01",
-            "authors": ["FAO Research Division"],
-            "doi": "10.1234/example.2025.001",
-            "url": "https://example.org/global-food-resilience",
-            "openalex_url": "https://openalex.org/W123456789",
-            "host_venue": "FAO",
-        }
-    ],
-    "chat_suggestions": [
-        {"id": 1, "author": "System", "text": "Welcome back! Ask anything about improving this report."},
-        {"id": 2, "author": "User", "text": "What sections should I revise first?"},
-    ],
-}
-
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -166,31 +122,6 @@ def create_app() -> Flask:
             "openalex_url": record.get("openalex_url"),
             "host_venue": record.get("host_venue"),
         }
-
-    def fallback_recommendations(entries: list[dict]) -> list[dict]:
-        recommendations = []
-        for entry in entries:
-            credibility = entry.get("scores", {}).get("credibility")
-            credibility_pct = float(credibility * 100) if isinstance(credibility, (int, float)) else None
-            recommendations.append(
-                normalize_recommendation(
-                    {
-                        "id": entry.get("id"),
-                        "title": entry.get("name"),
-                        "summary": entry.get("summary") or entry.get("summary_text") or "Summary unavailable.",
-                        "abstract": None,
-                        "credibility_score": credibility_pct,
-                        "validity_score": None,
-                        "date_published": None,
-                        "authors": [],
-                        "doi": None,
-                        "url": entry.get("file_url"),
-                        "openalex_url": None,
-                        "host_venue": None,
-                    }
-                )
-            )
-        return recommendations
 
     def _score_fraction(value: Optional[float]) -> float:
         if value is None:
@@ -385,14 +316,6 @@ def create_app() -> Flask:
     def health() -> Dict[str, Any]:
         return jsonify({"status": "ok"})
 
-    @app.post("/api/ingest/source")
-    @require_api_key
-    def ingest_source():
-        payload = request.get_json(force=True)
-        pdf_path = _resolve_pdf_path(payload["path"])
-        result = accuracy.index_source(pdf_path)
-        return jsonify({"chunks": len(result["chunks"]), "tables": len(result["document"]["tables"])})
-
     @app.post("/api/uploads/source")
     @require_api_key
     def upload_source_files():
@@ -441,23 +364,6 @@ def create_app() -> Flask:
         if not upload:
             return jsonify({"error": "File not found"}), 404
         return send_file(upload["path"], as_attachment=False)
-
-    @app.post("/api/verify/report")
-    @require_api_key
-    def verify_report():
-        payload = request.get_json(force=True)
-        pdf_path = _resolve_pdf_path(payload["path"])
-        verification = accuracy.verify_report(pdf_path)
-        validity_scores = validity.score_report(pdf_path)
-        credibility_summary = credibility.aggregate_report(verification["report_id"])
-        return jsonify(
-            {
-                "claims": verification["claims"],
-                "report_id": verification["report_id"],
-                "validity": validity_scores.__dict__,
-                "credibility": credibility_summary,
-            }
-        )
 
     @app.get("/api/dashboard")
     @require_api_key
@@ -668,14 +574,6 @@ def create_app() -> Flask:
             return jsonify({"error": "Invalid pagination parameters"}), 400
         detail = build_source_detail(source_id, limit=limit, page=page)
         return jsonify(detail)
-
-    @app.post("/api/credibility")
-    @require_api_key
-    def score_source():
-        payload = request.get_json(force=True)
-        pdf_path = _resolve_pdf_path(payload["path"])
-        score = credibility.score_source(pdf_path)
-        return jsonify(score.__dict__)
 
     @app.get("/api/claims")
     @require_api_key

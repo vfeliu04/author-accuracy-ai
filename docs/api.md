@@ -53,9 +53,6 @@ Several handlers also return explicit 400/404 responses directly (noted per endp
 | GET | `/api/reports/<job_id>/claims` | yes | Paginated claims with evidence |
 | GET | `/api/sources/<source_id>` | yes | Source detail (credibility, claims) |
 | GET | `/api/claims` | yes | All claims in the database |
-| POST | `/api/ingest/source` | yes | Index a source by server path |
-| POST | `/api/verify/report` | yes | Synchronous verify by server path |
-| POST | `/api/credibility` | yes | Score one source by server path |
 | POST | `/api/chat` | yes | Ask a question about a report |
 | GET | `/api/chat/history` | yes | Chat history for a job's report |
 
@@ -134,7 +131,7 @@ Returns the full job record (404 `{"error": "Job not found"}` otherwise):
 
 ### `GET /api/dashboard` and `GET /api/reports/latest`
 
-These two endpoints are **equivalent**: both look up the most recent job with status `DONE` and return `build_report_summary` for it, or 404 `{"error": "No completed reports"}` if none exists. (A `MOCK_DASHBOARD` constant still exists in `app.py` but is no longer served.)
+These two endpoints are **equivalent**: both look up the most recent job with status `DONE` and return `build_report_summary` for it, or 404 `{"error": "No completed reports"}` if none exists.
 
 ### `GET /api/reports/<job_id>/summary`
 
@@ -181,18 +178,6 @@ Detail view for one uploaded source (404 `Source not found` for unknown IDs; bad
 ### `GET /api/claims`
 
 Returns every claim in the database as `{"claims": [...]}` (no pagination, no evidence enrichment). Because pipeline runs wipe prior data, this is effectively the latest run's claims.
-
-## Ingestion & Credibility (path-based)
-
-These endpoints take a JSON body with a `path` field pointing at a PDF **on the server's filesystem** (`_resolve_pdf_path` raises `FileNotFoundError` → 404 if missing). They predate the upload/job flow; the frontend does not use them.
-
-| Endpoint | Body | Response |
-|---|---|---|
-| `POST /api/ingest/source` | `{"path": "..."}` | `{"chunks": <int>, "tables": <int>}` — indexes the PDF into the vector store |
-| `POST /api/verify/report` | `{"path": "..."}` | `{"claims", "report_id", "validity", "credibility"}` — runs verification **synchronously** (can take minutes; no job record, no environment reset) |
-| `POST /api/credibility` | `{"path": "..."}` | The credibility score object for that single source (`source_id`, `score`, `components`, ...) |
-
-> **Currently broken:** these handlers pass the resolved `Path` straight into `AccuracyPipeline.index_source`/`verify_report` and `CredibilityPipeline.score_source`, but those methods now expect an upload dict (`upload["path"]`, `upload["upload_id"]`). A `Path` is not subscriptable, so any call with an existing file raises `TypeError` and returns 500 `{"error": "Internal Server Error"}`. Use the upload + `/api/run_pipeline` flow instead.
 
 ## Chat
 

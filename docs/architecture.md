@@ -58,8 +58,6 @@ author_-accuracy.ai/
 
 Error handling is centralized: `FileNotFoundError` → 404, `ValueError` → 400, anything else → 500 JSON (Werkzeug `HTTPException`s keep their own status code and description). `build_report_summary` assembles the dashboard payload from a finished job's `result_json` (accuracy = supported/total claims; credibility and validity scaled from 0–100 to 0–1; overall = plain mean of the three). It also lazily backfills `recommended_sources` into `result_json` if a pre-recommendations job is read.
 
-> **Quirk:** a `MOCK_DASHBOARD` constant still sits in `app.py` but is dead code — `/api/dashboard` reads real DB data. A few endpoints (`/api/ingest/source`, `/api/verify/report`, `/api/credibility`) accept raw **filesystem paths** in JSON; they are legacy/dev entry points that no longer work — they pass a `Path` into pipelines that now expect upload dicts (`upload["path"]` raises a `TypeError`). The frontend uses the upload-ID based flow exclusively.
-
 ### Pipelines (`backend/author_ai/pipelines/`)
 
 **Ingestion (`ingestion.py`)** — `IngestionPipeline.ingest` takes a PDF and: runs OCR only when heuristics say text is sparse (via `services/ocr.py` and OCRmyPDF), extracts tables (Tabula or the PDFTables API), detects and parses chart images into synthetic data-point chunks, then reads text per page with PyPDF2. Each page becomes a "section" (`page-N`); section text is chunked with LangChain's `RecursiveCharacterTextSplitter` (1200 chars, 200 overlap; sliding-window fallback if LangChain is missing). The document (with a summary, table previews, and `sections_detail`), its chunks, and its charts are persisted to SQLite. Section summaries come from `SECTION_INDEXER` eagerly or lazily depending on `SECTION_SUMMARY_MODE`.

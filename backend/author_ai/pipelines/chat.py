@@ -286,7 +286,9 @@ class ChatService:
             metrics_context,
             history_context,
             core_context,
+            mode_help_context,
             mode,
+            claim_number_map,
         )
 
     def _compose_answer(

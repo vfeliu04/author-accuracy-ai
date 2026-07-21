@@ -36,5 +36,11 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("RETRIEVAL_SUPPORT_THRESHOLD", "0.35")
     get_settings.cache_clear()
     settings = get_settings()
+    # Module-level pipelines (app.py) initialised their Repository against the
+    # pre-fixture settings, so the sandbox database has no schema yet. Create
+    # it here so any code path touching SQLite finds the tables.
+    from author_ai.storage.database import Repository
+
+    Repository()
     yield settings
     get_settings.cache_clear()
