@@ -1,6 +1,6 @@
 # Author AI — Report Accuracy & Credibility Checker
 
-[![CI](https://github.com/vfeliu04/author_-accuracy.ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author_-accuracy.ai/actions/workflows/ci.yml)
+[![CI](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Author AI fact-checks a report against a set of trusted source documents. Upload source PDFs and a report PDF, and it extracts the factual claims from the report, verifies each claim against the sources with retrieval + LLM judgment, and scores the report on three metrics — then lets you interrogate the results through a grounded chat assistant.

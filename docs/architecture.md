@@ -23,7 +23,7 @@ flowchart TD
 ## Repository layout
 
 ```
-author_-accuracy.ai/
+author-accuracy-ai/
 ├── README.md
 ├── docs/                  # this documentation set
 ├── backend/
