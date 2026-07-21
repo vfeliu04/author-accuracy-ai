@@ -1,6 +1,11 @@
 # Author AI — Report Accuracy & Credibility Checker
 
+[![CI](https://github.com/vfeliu04/author_-accuracy.ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author_-accuracy.ai/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Author AI fact-checks a report against a set of trusted source documents. Upload source PDFs and a report PDF, and it extracts the factual claims from the report, verifies each claim against the sources with retrieval + LLM judgment, and scores the report on three metrics — then lets you interrogate the results through a grounded chat assistant.
+
+![Report dashboard showing verdict stats, grounded chat, score rings, and recommended sources](docs/screenshots/dashboard.png)
 
 ## What it does
 
@@ -72,6 +77,8 @@ npm run dev                 # http://localhost:5173
 ```
 
 Upload a few PDFs from `example_sources/` as sources, `World_Hunger_Fake.pdf` as the report, and run the pipeline. Full setup, optional tools (OCR, table extraction), and troubleshooting: [docs/development.md](docs/development.md).
+
+![Upload page with source and report dropzones](docs/screenshots/upload.png)
 
 ## Documentation
 
