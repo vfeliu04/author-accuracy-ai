@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      # Only the dependencies needed to import the app and run the offline
+      # tests. LLM/OCR/table/chart extras are optional at runtime and their
+      # absence exercises the graceful-degradation paths.
+      - name: Install test dependencies
+        run: pip install flask flask-cors python-dotenv pytest PyPDF2 requests faiss-cpu numpy langchain-text-splitters
+      # test_accuracy_pipeline and test_chart_pipeline are excluded on
+      # purpose: they can call paid embedding/LLM APIs when keys are present.
+      - name: Run offline test suite
+        run: python -m pytest tests/test_chunking.py tests/test_api.py -q
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Type-check and build
+        run: npm run build
