@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, v2]
   pull_request:
-    branches: [main]
+    branches: [main, v2]
 
 jobs:
   backend-tests:
@@ -18,15 +18,12 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      # Only the dependencies needed to import the app and run the offline
-      # tests. LLM/OCR/table/chart extras are optional at runtime and their
-      # absence exercises the graceful-degradation paths.
-      - name: Install test dependencies
-        run: pip install flask flask-cors python-dotenv pytest PyPDF2 requests faiss-cpu numpy langchain-text-splitters
-      # test_accuracy_pipeline and test_chart_pipeline are excluded on
-      # purpose: they can call paid embedding/LLM APIs when keys are present.
-      - name: Run offline test suite
-        run: python -m pytest tests/test_chunking.py tests/test_api.py -q
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Run test suite
+        run: python -m pytest -q
 
   frontend-build:
     runs-on: ubuntu-latest
