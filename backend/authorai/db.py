@@ -15,7 +15,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
@@ -130,7 +130,29 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             );
 
             INSERT INTO meta(key, value) VALUES ('embedding_dim', '{int(embedding_dim)}');
-            PRAGMA user_version = {SCHEMA_VERSION};
+            PRAGMA user_version = 1;
+
+            COMMIT;
+            """
+        )
+    if version < 2:
+        conn.executescript(
+            """
+            BEGIN;
+
+            CREATE TABLE figures(
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              doc_id TEXT NOT NULL REFERENCES documents(id),
+              page INTEGER,
+              image_path TEXT NOT NULL,
+              caption TEXT
+            );
+            CREATE INDEX idx_figures_run ON figures(run_id);
+
+            ALTER TABLE chunks ADD COLUMN figure_id TEXT REFERENCES figures(id);
+
+            PRAGMA user_version = 2;
 
             COMMIT;
             """
@@ -213,6 +235,24 @@ def add_document(
     return doc_id
 
 
+def add_figure(
+    conn: sqlite3.Connection,
+    run_id: str,
+    doc_id: str,
+    image_path: str,
+    page: int | None = None,
+    caption: str | None = None,
+) -> str:
+    figure_id = new_id()
+    with conn:
+        conn.execute(
+            "INSERT INTO figures(id, run_id, doc_id, page, image_path, caption)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (figure_id, run_id, doc_id, page, image_path, caption),
+        )
+    return figure_id
+
+
 # --- chunks --------------------------------------------------------------
 
 
@@ -237,8 +277,8 @@ def add_chunks(
     with conn:
         for chunk, embedding in zip(chunks, embeddings, strict=True):
             cursor = conn.execute(
-                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text, figure_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     doc_id,
@@ -246,6 +286,7 @@ def add_chunks(
                     chunk.get("section"),
                     chunk.get("kind", "text"),
                     chunk["text"],
+                    chunk.get("figure_id"),
                 ),
             )
             chunk_id = cursor.lastrowid

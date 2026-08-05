@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     )
 
     db_path: Path = Path("data/authorai.db")
+    figures_dir: Path = Path("data/figures")
     embedding_model: str = "text-embedding-3-large"
     embedding_dim: int = 3072
     # Read from the unprefixed OPENAI_API_KEY so the existing .env keeps working.
