@@ -26,18 +26,36 @@ def _setup() -> tuple[Settings, object, OpenAIEmbedder]:
     return settings, conn, embedder
 
 
-def cmd_ingest(args: argparse.Namespace) -> None:
-    settings, conn, embedder = _setup()
-    if args.run:
-        if dbmod.get_run(conn, args.run) is None:
-            raise SystemExit(f"Unknown run {args.run!r}")
-        run_id = args.run
+def run_ingest(
+    conn,
+    embedder,
+    figures_dir: Path,
+    pdfs: list[Path],
+    run: str | None,
+    kind: str,
+) -> tuple[str, int]:
+    """Ingest PDFs into a run; returns (run_id, failure_count).
+
+    The run id is printed FIRST so a failure partway through a batch never
+    loses the id of the partially-populated run, and one bad PDF does not
+    abort the rest of the batch.
+    """
+    if run:
+        if dbmod.get_run(conn, run) is None:
+            raise SystemExit(f"Unknown run {run!r}")
+        run_id = run
     else:
         run_id = dbmod.create_run(conn)
-    for pdf in args.pdfs:
-        doc_id = ingest_pdf(
-            conn, embedder, run_id, pdf, kind=args.kind, figures_dir=settings.figures_dir
-        )
+    print(f"run: {run_id}")
+
+    failures = 0
+    for pdf in pdfs:
+        try:
+            doc_id = ingest_pdf(conn, embedder, run_id, pdf, kind=kind, figures_dir=figures_dir)
+        except Exception as exc:  # noqa: BLE001 - report and continue the batch
+            failures += 1
+            print(f"FAILED {pdf.name}: {exc}")
+            continue
         counts = dict(
             conn.execute(
                 "SELECT kind, count(*) FROM chunks WHERE doc_id = ? GROUP BY kind",
@@ -45,7 +63,14 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             ).fetchall()
         )
         print(f"ingested {pdf.name}: {counts}")
-    print(f"run: {run_id}")
+    return run_id, failures
+
+
+def cmd_ingest(args: argparse.Namespace) -> None:
+    settings, conn, embedder = _setup()
+    _, failures = run_ingest(conn, embedder, settings.figures_dir, args.pdfs, args.run, args.kind)
+    if failures:
+        raise SystemExit(f"{failures} PDF(s) failed to ingest")
 
 
 def cmd_search(args: argparse.Namespace) -> None:

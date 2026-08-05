@@ -30,14 +30,26 @@ def test_overlap_is_carried_between_chunks():
     assert chunks[1].startswith(chunks[0][-40:])
 
 
-def test_oversized_paragraph_is_split_on_sentences():
-    paragraph = " ".join(f"Fact {i} is stated here in sentence form." for i in range(30))
+def test_oversized_paragraph_is_split_on_sentences_in_order():
+    paragraph = " ".join(f"Fact {i:02d} is stated here in sentence form." for i in range(30))
     chunks = chunk_text(paragraph, max_chars=200, overlap=0)
     assert all(len(chunk) <= 200 for chunk in chunks)
     joined = " ".join(chunks)
-    for i in range(30):
-        sentence = f"Fact {i} is stated here in sentence form."
-        assert f"Fact {i} " in joined or joined.endswith(sentence)
+    # Every sentence present AND in document order — chunk text is quoted as
+    # evidence downstream, so reordering is a correctness bug, not a nit.
+    positions = [joined.index(f"Fact {i:02d}") for i in range(30)]
+    assert positions == sorted(positions)
+
+
+def test_long_sentence_after_short_ones_keeps_document_order():
+    # Regression: the hard-wrap path used to emit the wrapped segments BEFORE
+    # the accumulated preceding sentences, splicing non-adjacent text.
+    paragraph = "Short intro sentence here. " + "X" * 500
+    chunks = chunk_text(paragraph, max_chars=200, overlap=0)
+    joined = "".join(chunks)
+    assert chunks[0].startswith("Short intro sentence here.")
+    assert joined.index("Short intro") < joined.index("X" * 50)
+    assert all(len(chunk) <= 200 for chunk in chunks)
 
 
 def test_single_sentence_longer_than_cap_is_hard_wrapped():
@@ -52,3 +64,5 @@ def test_invalid_parameters_raise():
         chunk_text("hello", max_chars=100, overlap=100)
     with pytest.raises(ValueError, match="max_chars"):
         chunk_text("hello", max_chars=0, overlap=0)
+    with pytest.raises(ValueError, match="non-negative"):
+        chunk_text("hello", max_chars=100, overlap=-1)

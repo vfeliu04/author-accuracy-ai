@@ -224,8 +224,9 @@ def add_document(
     upload_id: str | None = None,
     title: str | None = None,
     metadata: str = "{}",
+    doc_id: str | None = None,
 ) -> str:
-    doc_id = new_id()
+    doc_id = doc_id or new_id()
     with conn:
         conn.execute(
             "INSERT INTO documents(id, run_id, upload_id, kind, title, metadata)"
@@ -242,8 +243,9 @@ def add_figure(
     image_path: str,
     page: int | None = None,
     caption: str | None = None,
+    figure_id: str | None = None,
 ) -> str:
-    figure_id = new_id()
+    figure_id = figure_id or new_id()
     with conn:
         conn.execute(
             "INSERT INTO figures(id, run_id, doc_id, page, image_path, caption)"

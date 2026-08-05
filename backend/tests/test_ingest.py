@@ -99,6 +99,52 @@ def test_table_text_is_capped(conn, tmp_path, monkeypatch):
     assert text.endswith("[table truncated]")
 
 
+def test_ingest_records_upload_and_absolute_image_path(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest_mod, "parse_pdf", lambda path: _parsed_document())
+    run_id = dbmod.create_run(conn)
+    doc_id = ingest_pdf(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        tmp_path / "fake.pdf",
+        kind="SOURCE",
+        figures_dir=tmp_path / "figures",
+    )
+    document = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (document["upload_id"],)).fetchone()
+    assert upload is not None
+    assert upload["file_name"] == "fake.pdf"
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (doc_id,)).fetchone()
+    assert Path(figure["image_path"]).is_absolute()
+
+
+class _FailingEmbedder:
+    dim = DIM
+
+    def embed(self, texts):
+        raise RuntimeError("embedding provider unavailable")
+
+
+def test_ingest_failure_leaves_no_partial_state(conn, tmp_path, monkeypatch):
+    # A failure in the embedding network call must not leave orphan
+    # document/figure rows or PNG files behind.
+    monkeypatch.setattr(ingest_mod, "parse_pdf", lambda path: _parsed_document())
+    run_id = dbmod.create_run(conn)
+    figures_dir = tmp_path / "figures"
+    with pytest.raises(RuntimeError, match="embedding provider"):
+        ingest_pdf(
+            conn,
+            _FailingEmbedder(),
+            run_id,
+            tmp_path / "fake.pdf",
+            kind="SOURCE",
+            figures_dir=figures_dir,
+        )
+    for table in ("documents", "figures", "chunks", "uploads"):
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    assert not figures_dir.exists()
+
+
 def test_ingest_empty_document_fails_loudly(conn, tmp_path, monkeypatch):
     empty = ParsedDocument(title=None, sections=[], tables=[], figures=[])
     monkeypatch.setattr(ingest_mod, "parse_pdf", lambda path: empty)
