@@ -42,6 +42,14 @@ def test_run_crud(conn):
     assert [r["id"] for r in dbmod.list_runs(conn)] == [run_id]
 
 
+def test_set_run_status_rejects_bad_input(conn):
+    run_id = dbmod.create_run(conn)
+    with pytest.raises(ValueError, match="status"):
+        dbmod.set_run_status(conn, run_id, "FALIED")
+    with pytest.raises(ValueError, match="Unknown run"):
+        dbmod.set_run_status(conn, "does-not-exist", "DONE")
+
+
 def test_chunk_embedding_count_mismatch_raises(conn):
     run_id = dbmod.create_run(conn)
     doc_id = dbmod.add_document(conn, run_id, "SOURCE")

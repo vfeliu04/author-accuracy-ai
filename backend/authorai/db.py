@@ -17,6 +17,8 @@ from authorai.embeddings import normalize
 
 SCHEMA_VERSION = 1
 
+RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
+
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -169,11 +171,15 @@ def list_runs(conn: sqlite3.Connection) -> list[dict]:
 def set_run_status(
     conn: sqlite3.Connection, run_id: str, status: str, error: str | None = None
 ) -> None:
+    if status not in RUN_STATUSES:
+        raise ValueError(f"Unknown run status {status!r}; expected one of {sorted(RUN_STATUSES)}")
     with conn:
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE runs SET status = ?, error = ? WHERE id = ?",
             (status, error, run_id),
         )
+    if cursor.rowcount == 0:
+        raise ValueError(f"Unknown run {run_id!r}")
 
 
 # --- uploads and documents ----------------------------------------------

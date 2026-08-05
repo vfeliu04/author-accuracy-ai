@@ -7,6 +7,7 @@ hits. Every query is scoped to one run via SQL — no post-filtering.
 """
 
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 
 from sqlite_vec import serialize_float32
@@ -86,16 +87,22 @@ def hybrid_search(
     query_embedding: list[float],
     k: int = 10,
 ) -> list[Hit]:
+    """Fuse the vector and keyword channels with Reciprocal Rank Fusion.
+
+    Returns at most `k` hits. Each channel contributes a candidate pool of
+    max(k, CHANNEL_K) — deliberately wider than `k` so the two rankings have
+    enough overlap for the fusion to be meaningful.
+    """
     channel_k = max(k, CHANNEL_K)
     vector_ids = vector_search(conn, run_id, query_embedding, channel_k)
     keyword_ids = keyword_search(conn, run_id, query_text, channel_k)
 
-    scores: dict[int, float] = {}
-    channels: dict[int, list[str]] = {}
+    scores: defaultdict[int, float] = defaultdict(float)
+    channels: defaultdict[int, list[str]] = defaultdict(list)
     for channel, ids in (("vector", vector_ids), ("keyword", keyword_ids)):
         for rank, chunk_id in enumerate(ids):
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank + 1)
-            channels.setdefault(chunk_id, []).append(channel)
+            scores[chunk_id] += 1.0 / (RRF_K + rank + 1)
+            channels[chunk_id].append(channel)
 
     top = sorted(scores, key=lambda chunk_id: scores[chunk_id], reverse=True)[:k]
     rows = get_chunks(conn, top)
