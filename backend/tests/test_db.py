@@ -1,12 +1,17 @@
+import sqlite3
+
 import pytest
 
 from authorai import db as dbmod
+from authorai.embeddings import FakeEmbedder
 from authorai.search import keyword_search
 from tests.conftest import DIM
 
+_EMBEDDER = FakeEmbedder(dim=DIM)
+
 
 def _one_chunk(conn, run_id, doc_id, text):
-    return dbmod.add_chunks(conn, run_id, doc_id, [{"text": text}], [[1.0] + [0.0] * (DIM - 1)])[0]
+    return dbmod.add_chunks(conn, run_id, doc_id, [{"text": text}], _EMBEDDER.embed([text]))[0]
 
 
 def test_migrations_are_idempotent(tmp_path):
@@ -44,20 +49,29 @@ def test_chunk_embedding_count_mismatch_raises(conn):
         dbmod.add_chunks(conn, run_id, doc_id, [{"text": "one"}], [])
 
 
-def test_fts_stays_in_sync_through_insert_update_delete(conn):
+def test_chunk_text_is_immutable(conn):
     run_id = dbmod.create_run(conn)
     doc_id = dbmod.add_document(conn, run_id, "SOURCE")
     chunk_id = _one_chunk(conn, run_id, doc_id, "wheat production statistics")
 
+    # Editing text in place would desync the stored embedding — must be refused.
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        with conn:
+            conn.execute("UPDATE chunks SET text = ? WHERE id = ?", ("rice yields", chunk_id))
+    assert keyword_search(conn, run_id, "wheat") == [chunk_id]
+
+    # Non-text columns stay editable.
+    with conn:
+        conn.execute("UPDATE chunks SET page = 5 WHERE id = ?", (chunk_id,))
+
+
+def test_delete_cleans_both_indexes(conn):
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "SOURCE")
+    chunk_id = _one_chunk(conn, run_id, doc_id, "wheat production statistics")
     assert keyword_search(conn, run_id, "wheat") == [chunk_id]
 
     with conn:
-        conn.execute("UPDATE chunks SET text = ? WHERE id = ?", ("rice yields", chunk_id))
-    assert keyword_search(conn, run_id, "wheat") == []
-    assert keyword_search(conn, run_id, "rice") == [chunk_id]
-
-    with conn:
         conn.execute("DELETE FROM chunks WHERE id = ?", (chunk_id,))
-    assert keyword_search(conn, run_id, "rice") == []
-    vec_rows = conn.execute("SELECT count(*) FROM chunks_vec").fetchone()[0]
-    assert vec_rows == 0
+    assert keyword_search(conn, run_id, "wheat") == []
+    assert conn.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] == 0

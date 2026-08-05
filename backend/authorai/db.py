@@ -52,8 +52,13 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
     if version >= SCHEMA_VERSION:
         return
     if version < 1:
+        # The whole migration — DDL, meta row, and version bump — runs in ONE
+        # transaction so an interruption can never leave a half-created schema
+        # with user_version still 0 (which would brick every later connect).
         conn.executescript(
             f"""
+            BEGIN;
+
             CREATE TABLE meta(
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL
@@ -109,10 +114,11 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
                 VALUES ('delete', old.id, old.text);
               DELETE FROM chunks_vec WHERE chunk_id = old.id;
             END;
-            CREATE TRIGGER chunks_fts_update AFTER UPDATE OF text ON chunks BEGIN
-              INSERT INTO chunks_fts(chunks_fts, rowid, text)
-                VALUES ('delete', old.id, old.text);
-              INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+            -- Chunk text is immutable: an in-place edit would desync the stored
+            -- embedding (there is no way to re-embed from inside SQL). Delete
+            -- the chunk and re-add it instead.
+            CREATE TRIGGER chunks_text_immutable BEFORE UPDATE OF text ON chunks BEGIN
+              SELECT RAISE(ABORT, 'chunk text is immutable — delete the chunk and re-add it');
             END;
 
             CREATE VIRTUAL TABLE chunks_vec USING vec0(
@@ -120,14 +126,13 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
               run_id TEXT PARTITION KEY,
               embedding FLOAT[{embedding_dim}]
             );
+
+            INSERT INTO meta(key, value) VALUES ('embedding_dim', '{int(embedding_dim)}');
+            PRAGMA user_version = {SCHEMA_VERSION};
+
+            COMMIT;
             """
         )
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES ('embedding_dim', ?)",
-            (str(embedding_dim),),
-        )
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:

@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: authorai
+Version: 2.0.0a0
+Summary: Author AI v2 backend — fact-checks a report against trusted source documents
+Requires-Python: >=3.11
+Requires-Dist: fastapi==0.141.1
+Requires-Dist: uvicorn==0.52.1
+Requires-Dist: pydantic==2.13.4
+Requires-Dist: pydantic-settings==2.14.2
+Requires-Dist: sqlite-vec==0.1.9
+Requires-Dist: openai==2.53.0
+Requires-Dist: numpy==2.4.6
+Provides-Extra: dev
+Requires-Dist: pytest==9.1.1; extra == "dev"
+Requires-Dist: httpx==0.28.1; extra == "dev"
+Requires-Dist: ruff==0.16.1; extra == "dev"

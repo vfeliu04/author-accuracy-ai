@@ -67,11 +67,16 @@ def keyword_search(
 
 
 def _fts_query(query_text: str) -> str | None:
-    """Quote each token so user text can't break FTS5 query syntax."""
+    """Quote each token (so user text can't break FTS5 syntax) and OR them.
+
+    OR, not the default implicit AND: queries are claim-length sentences, and
+    requiring every token to appear would make the keyword channel return
+    nothing in practice. BM25 still ranks chunks matching more tokens higher.
+    """
     tokens = [token for token in query_text.split() if token.strip('"')]
     if not tokens:
         return None
-    return " ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+    return " OR ".join('"' + token.replace('"', '""') + '"' for token in tokens)
 
 
 def hybrid_search(
@@ -81,8 +86,9 @@ def hybrid_search(
     query_embedding: list[float],
     k: int = 10,
 ) -> list[Hit]:
-    vector_ids = vector_search(conn, run_id, query_embedding)
-    keyword_ids = keyword_search(conn, run_id, query_text)
+    channel_k = max(k, CHANNEL_K)
+    vector_ids = vector_search(conn, run_id, query_embedding, channel_k)
+    keyword_ids = keyword_search(conn, run_id, query_text, channel_k)
 
     scores: dict[int, float] = {}
     channels: dict[int, list[str]] = {}

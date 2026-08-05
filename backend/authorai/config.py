@@ -10,11 +10,15 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Anchor to backend/.env regardless of the process working directory —
+# a CWD-relative ".env" silently loads nothing when started from elsewhere.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AUTHORAI_",
-        env_file=".env",
+        env_file=_ENV_FILE,
         extra="ignore",
     )
 

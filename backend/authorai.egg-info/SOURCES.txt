@@ -1,0 +1,15 @@
+pyproject.toml
+authorai/__init__.py
+authorai/config.py
+authorai/db.py
+authorai/embeddings.py
+authorai/main.py
+authorai/search.py
+authorai.egg-info/PKG-INFO
+authorai.egg-info/SOURCES.txt
+authorai.egg-info/dependency_links.txt
+authorai.egg-info/requires.txt
+authorai.egg-info/top_level.txt
+tests/test_api.py
+tests/test_db.py
+tests/test_search.py
