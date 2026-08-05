@@ -26,5 +26,8 @@ class Settings(BaseSettings):
     figures_dir: Path = Path("data/figures")
     embedding_model: str = "text-embedding-3-large"
     embedding_dim: int = 3072
-    # Read from the unprefixed OPENAI_API_KEY so the existing .env keeps working.
+    # Read from the unprefixed provider names so the existing .env keeps working.
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    extraction_model: str = "claude-haiku-4-5"
+    caption_model: str = "claude-haiku-4-5"

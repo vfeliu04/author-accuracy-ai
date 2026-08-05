@@ -15,7 +15,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
@@ -157,6 +157,32 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 3:
+        conn.executescript(
+            """
+            BEGIN;
+
+            CREATE TABLE claims(
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              doc_id TEXT NOT NULL REFERENCES documents(id),
+              page INTEGER,
+              text TEXT NOT NULL,
+              value REAL,
+              unit TEXT,
+              year INTEGER,
+              subject TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_claims_run ON claims(run_id);
+
+            ALTER TABLE figures ADD COLUMN description TEXT;
+
+            PRAGMA user_version = 3;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -243,16 +269,50 @@ def add_figure(
     image_path: str,
     page: int | None = None,
     caption: str | None = None,
+    description: str | None = None,
     figure_id: str | None = None,
 ) -> str:
     figure_id = figure_id or new_id()
     with conn:
         conn.execute(
-            "INSERT INTO figures(id, run_id, doc_id, page, image_path, caption)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (figure_id, run_id, doc_id, page, image_path, caption),
+            "INSERT INTO figures(id, run_id, doc_id, page, image_path, caption, description)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (figure_id, run_id, doc_id, page, image_path, caption, description),
         )
     return figure_id
+
+
+def add_claims(conn: sqlite3.Connection, run_id: str, doc_id: str, claims: list[dict]) -> list[str]:
+    """Insert extracted claims in one transaction; returns their ids."""
+    claim_ids: list[str] = []
+    with conn:
+        for claim in claims:
+            claim_id = new_id()
+            conn.execute(
+                "INSERT INTO claims(id, run_id, doc_id, page, text, value, unit, year,"
+                " subject, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    claim_id,
+                    run_id,
+                    doc_id,
+                    claim.get("page"),
+                    claim["text"],
+                    claim.get("value"),
+                    claim.get("unit"),
+                    claim.get("year"),
+                    claim.get("subject"),
+                    now_iso(),
+                ),
+            )
+            claim_ids.append(claim_id)
+    return claim_ids
+
+
+def list_claims(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM claims WHERE run_id = ? ORDER BY page, id", (run_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # --- chunks --------------------------------------------------------------

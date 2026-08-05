@@ -6,7 +6,9 @@ Docling's models. Figures are stored as PNG files plus their caption text —
 LLM-written figure descriptions arrive in Phase 3 with the shared client.
 """
 
-from dataclasses import dataclass
+import json
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +21,12 @@ if TYPE_CHECKING:
     from PIL.Image import Image
 
 TABLE_TEXT_CAP = 4000
+
+FIGURE_DESCRIPTION_PROMPT = (
+    "Describe this figure from a document in 2-3 sentences: what it shows, its "
+    "axes or categories, and the main trend or takeaway. Be specific about any "
+    "values you can read; do not speculate beyond what is visible."
+)
 
 
 @dataclass
@@ -145,15 +153,19 @@ def ingest_pdf(
     kind: str,
     figures_dir: Path | str,
     upload_id: str | None = None,
+    describe: "Callable[[Image], str] | None" = None,
 ) -> str:
     """Ingest one PDF into a run: upload + document rows, chunks, figures.
 
-    All failure-prone external work (parsing, the embedding network call)
-    happens BEFORE anything is written, so an ingestion failure cannot leave
-    a half-ingested document behind; what remains after that point is a short
-    sequence of local SQLite writes. When `upload_id` is not supplied (CLI
-    path), an uploads row is recorded from the file itself so every document
-    stays traceable to its source PDF.
+    All failure-prone external work (parsing, figure descriptions, the
+    embedding network call) happens BEFORE anything is written, so an
+    ingestion failure cannot leave a half-ingested document behind; what
+    remains after that point is a short sequence of local SQLite writes.
+    When `upload_id` is not supplied (CLI path), an uploads row is recorded
+    from the file itself so every document stays traceable to its source PDF.
+    When `describe` is supplied, each figure's chunk text gains an LLM-written
+    description — this must happen here, before embedding, because chunk text
+    is immutable once written.
     """
     path = Path(path)
     parsed = parse_pdf(path)
@@ -179,10 +191,11 @@ def ingest_pdf(
             chunks.append({"text": text, "page": table.page, "kind": "table"})
 
     figure_dir = (Path(figures_dir) / run_id / doc_id).resolve()
-    planned_figures: list[tuple[str, ParsedFigure, Path]] = []
+    planned_figures: list[tuple[str, ParsedFigure, Path, str | None]] = []
     for index, figure in enumerate(parsed.figures, start=1):
         figure_id = dbmod.new_id()
-        planned_figures.append((figure_id, figure, figure_dir / f"fig-{index}.png"))
+        description = describe(figure.image) if describe else None
+        planned_figures.append((figure_id, figure, figure_dir / f"fig-{index}.png", description))
         caption = figure.caption.strip()
         if caption:
             text = caption
@@ -190,6 +203,8 @@ def ingest_pdf(
             text = f"Figure on page {figure.page}"
         else:
             text = "Figure"
+        if description:
+            text = f"{text}\n\n{description}"
         chunks.append({"text": text, "page": figure.page, "kind": "figure", "figure_id": figure_id})
 
     if not chunks:
@@ -200,15 +215,21 @@ def ingest_pdf(
 
     if planned_figures:
         figure_dir.mkdir(parents=True, exist_ok=True)
-    for _figure_id, figure, image_path in planned_figures:
+    for _figure_id, figure, image_path, _description in planned_figures:
         figure.image.save(image_path, format="PNG")
 
     if upload_id is None:
         upload_id = dbmod.add_upload(conn, kind, path.name, str(path.resolve()))
     dbmod.add_document(
-        conn, run_id, kind, upload_id=upload_id, title=parsed.title or path.stem, doc_id=doc_id
+        conn,
+        run_id,
+        kind,
+        upload_id=upload_id,
+        title=parsed.title or path.stem,
+        metadata=json.dumps({"sections": [asdict(section) for section in parsed.sections]}),
+        doc_id=doc_id,
     )
-    for figure_id, figure, image_path in planned_figures:
+    for figure_id, figure, image_path, description in planned_figures:
         dbmod.add_figure(
             conn,
             run_id,
@@ -216,6 +237,7 @@ def ingest_pdf(
             image_path=str(image_path),
             page=figure.page,
             caption=figure.caption or None,
+            description=description,
             figure_id=figure_id,
         )
     dbmod.add_chunks(conn, run_id, doc_id, chunks, embeddings)

@@ -82,6 +82,41 @@ def test_ingest_pdf_writes_document_chunks_and_figures(conn, tmp_path, monkeypat
     assert keyword_search(conn, run_id, "surveys") != []
 
 
+def test_ingest_stores_sections_and_figure_descriptions(conn, tmp_path, monkeypatch):
+    import json
+
+    from tests.conftest import FakeLLM
+
+    monkeypatch.setattr(ingest_mod, "parse_pdf", lambda path: _parsed_document())
+    run_id = dbmod.create_run(conn)
+    llm = FakeLLM(image_description="A line chart showing undernourishment rising to 735 million.")
+
+    doc_id = ingest_pdf(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        tmp_path / "fake.pdf",
+        kind="SOURCE",
+        figures_dir=tmp_path / "figures",
+        describe=lambda image: llm.describe_image(
+            model="claude-haiku-4-5", image=image, prompt="describe"
+        ),
+    )
+
+    # Sections persisted for later claim extraction.
+    document = conn.execute("SELECT metadata FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    sections = json.loads(document["metadata"])["sections"]
+    assert [section["title"] for section in sections] == ["Overview", "Methods"]
+
+    # Figure description stored AND baked into the (immutable) chunk text.
+    assert llm.image_calls == 1
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (doc_id,)).fetchone()
+    assert "line chart" in figure["description"]
+    figure_chunk = conn.execute("SELECT text FROM chunks WHERE kind = 'figure'").fetchone()
+    assert "Trend of undernourishment worldwide" in figure_chunk["text"]
+    assert "line chart" in figure_chunk["text"]
+
+
 def test_table_text_is_capped(conn, tmp_path, monkeypatch):
     huge = ParsedDocument(
         title=None,

@@ -7,7 +7,7 @@ from tests.conftest import DIM
 
 
 def test_run_ingest_prints_run_first_and_survives_a_bad_pdf(conn, tmp_path, monkeypatch, capsys):
-    def fake_ingest_pdf(conn_, embedder, run_id, path, kind, figures_dir):
+    def fake_ingest_pdf(conn_, embedder, run_id, path, kind, figures_dir, describe=None):
         if path.name == "bad.pdf":
             raise ValueError("No extractable content")
         return dbmod.add_document(conn_, run_id, kind, title=path.stem)
