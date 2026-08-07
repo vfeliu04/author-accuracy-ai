@@ -1,0 +1,15 @@
+{
+  "recall": 1.0,
+  "precision": 0.871,
+  "matched": 27,
+  "golden_total": 27,
+  "extracted_total": 31,
+  "model": "claude-opus-5",
+  "run_id": "3eb1a2435c3b477f958095fd11934438",
+  "recorded": "2026-08-07",
+  "recorded_at_dev_baseline": {
+    "recall": 0.973,
+    "precision": 0.973
+  },
+  "note": "Holdout reference at the Phase 3 close. All 27 labels found, including every unflagged fabrication and all table rows. The 4 precision-count misses are duplicate coverage (same fact extracted from both prose and the table), not spurious claims. Labels adversarially audited (27/27 confirmed) before first scoring. Policy: score at phase boundaries only; never tune against this set."
+}
