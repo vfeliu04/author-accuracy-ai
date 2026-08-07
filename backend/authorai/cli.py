@@ -128,8 +128,12 @@ def cmd_extract(args: argparse.Namespace) -> None:
             "Document has no stored sections (ingested before Phase 3?) — re-ingest it"
         )
 
+    # Tables live in their own chunks, never in metadata sections — pass them in
+    # explicitly or every tabulated figure in the report goes unchecked.
+    tables = dbmod.list_chunks_by_kind(conn, document["id"], "table")
+
     llm = AnthropicClient(settings.anthropic_api_key)
-    claims = extract_claims(llm, sections, settings.extraction_model)
+    claims = extract_claims(llm, sections, settings.extraction_model, tables=tables)
 
     # Re-extraction replaces the document's previous claims — deterministic reruns.
     dbmod.add_claims(

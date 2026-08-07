@@ -28,6 +28,14 @@ Rules:
   appears in. Null if unknown.
 - Split compound sentences into separate claims when each part is independently
   checkable.
+
+Tables appear after the sections. Reports routinely put their most checkable
+figures in a table rather than in prose, so treat them as first-class:
+- Every row that states an indicator is its own claim. A row holding both a real
+  and a fabricated figure for the same subject is TWO claims, not one.
+- A row is not a sentence, so for table claims `text` may be composed from the
+  row's cells into a readable statement — but every number, year and quoted
+  phrase must be copied exactly as written. Do not round, convert or reword them.
 """
 
 
@@ -44,23 +52,39 @@ class ClaimExtraction(BaseModel):
     claims: list[ExtractedClaim]
 
 
-def build_extraction_prompt(sections: list[dict]) -> str:
+def _page_marker(item: dict) -> str:
+    page = item.get("page")
+    return f"[page {page}]" if page is not None else "[page unknown]"
+
+
+def build_extraction_prompt(sections: list[dict], tables: list[dict] | None = None) -> str:
     parts = ["Extract the checkable factual claims from this report.\n"]
     for section in sections:
-        page = section.get("page")
         title = section.get("title") or "(untitled section)"
-        marker = f"[page {page}]" if page is not None else "[page unknown]"
-        parts.append(f"{marker} ## {title}\n{section['text']}")
+        parts.append(f"{_page_marker(section)} ## {title}\n{section['text']}")
+    for table in tables or []:
+        parts.append(f"{_page_marker(table)} ## TABLE\n{table['text']}")
     return "\n\n".join(parts)
 
 
-def extract_claims(llm: LLM, sections: list[dict], model: str) -> list[ExtractedClaim]:
-    if not sections:
+def extract_claims(
+    llm: LLM,
+    sections: list[dict],
+    model: str,
+    tables: list[dict] | None = None,
+) -> list[ExtractedClaim]:
+    """Extract claims from a report's prose sections and its tables.
+
+    Tables are passed separately because ingestion stores them as their own
+    chunks, not as section text — without them the report's tabulated figures
+    (often the most checkable claims it makes) are invisible to extraction.
+    """
+    if not sections and not tables:
         raise ValueError("No sections to extract claims from — was the document ingested?")
     result = llm.parse(
         model=model,
         system=EXTRACTION_SYSTEM,
-        prompt=build_extraction_prompt(sections),
+        prompt=build_extraction_prompt(sections, tables),
         output_type=ClaimExtraction,
     )
     return result.claims

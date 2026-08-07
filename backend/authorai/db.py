@@ -374,6 +374,15 @@ def add_chunks(
     return chunk_ids
 
 
+def list_chunks_by_kind(conn: sqlite3.Connection, doc_id: str, kind: str) -> list[dict]:
+    """A document's chunks of one kind, in document order (the rowid is that order)."""
+    rows = conn.execute(
+        "SELECT page, section, text FROM chunks WHERE doc_id = ? AND kind = ? ORDER BY id",
+        (doc_id, kind),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_chunks(conn: sqlite3.Connection, chunk_ids: list[int]) -> dict[int, dict]:
     if not chunk_ids:
         return {}

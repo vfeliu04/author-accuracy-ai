@@ -46,6 +46,21 @@ def test_extract_claims_requires_sections():
         extract_claims(FakeLLM(), [], model="claude-haiku-4-5")
 
 
+def test_tables_reach_the_extraction_prompt():
+    # Reports put their most checkable figures in tables, and tables are stored
+    # as chunks rather than metadata sections — if they do not reach the prompt,
+    # every tabulated claim is silently unextractable.
+    llm = FakeLLM(parse_results={ClaimExtraction: CANNED})
+    tables = [{"page": 2, "text": "| Country | Fabricated |\n| Somalia | 98% decrease |"}]
+    extract_claims(llm, SECTIONS, model="claude-haiku-4-5", tables=tables)
+
+    prompt = llm.parse_calls[0]["prompt"]
+    assert "[page 2] ## TABLE" in prompt
+    assert "98% decrease" in prompt
+    # Sections still come through alongside them.
+    assert "[page 1] ## Overview" in prompt
+
+
 def test_claims_persistence_roundtrip(conn):
     run_id = dbmod.create_run(conn)
     doc_id = dbmod.add_document(conn, run_id, "REPORT")

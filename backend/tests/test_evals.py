@@ -59,6 +59,46 @@ def test_pdf_line_breaks_do_not_defeat_text_containment():
     assert score.missed == []
 
 
+def test_reordered_wording_matches():
+    # Verbatim from the first live run: substring containment scored this a MISS
+    # because neither text contains the other, even though it is plainly the
+    # same claim. This is the case the overlap matcher exists to catch.
+    golden = [
+        {
+            "text": "Coastal communities are immune to malnutrition according to the"
+            " 'Ocean Nutrient Absorption Theory.'",
+            "value": None,
+            "year": None,
+        }
+    ]
+    extracted = [
+        {
+            "text": "a flawed (and fictional) 'Ocean Nutrient Absorption Theory' claims"
+            " that coastal communities are immune to malnutrition",
+            "value": None,
+            "year": None,
+        }
+    ]
+    score = score_extraction(extracted, golden)
+    assert score.matched == 1
+    assert score.missed == []
+
+
+def test_unrelated_claims_sharing_only_filler_words_do_not_match():
+    # The guard on the looser matcher: two claims about entirely different things
+    # must not match just because both are English sentences about hunger.
+    golden = [{"text": "Wheat exports fell by 12 percent.", "value": None, "year": None}]
+    extracted = [
+        {
+            "text": "Armed conflict remains the leading driver of hunger.",
+            "value": None,
+            "year": None,
+        }
+    ]
+    score = score_extraction(extracted, golden)
+    assert score.matched == 0
+
+
 def test_load_golden_parses_jsonl(tmp_path):
     path = tmp_path / "golden.jsonl"
     path.write_text("\n".join(json.dumps(entry) for entry in GOLDEN))
