@@ -82,6 +82,78 @@ def _matches(golden: dict, extracted: dict) -> bool:
     return _overlap(_tokens(golden["text"]), _tokens(extracted["text"])) >= OVERLAP_THRESHOLD
 
 
+@dataclass
+class VerdictScore:
+    accuracy: float
+    correct: int
+    matched: int
+    golden_total: int
+    coverage: float
+    per_class: dict[str, dict]
+    confusion: dict[str, dict[str, int]]
+    downgraded: int
+
+    def summary(self) -> str:
+        per_class = ", ".join(
+            f"{cls} {stats['correct']}/{stats['total']}" for cls, stats in self.per_class.items()
+        )
+        return (
+            f"verdict accuracy {self.accuracy:.2f} ({self.correct}/{self.matched} matched), "
+            f"coverage {self.coverage:.2f} ({self.matched}/{self.golden_total} golden claims "
+            f"had a verdict), per-class: {per_class}, downgraded: {self.downgraded}"
+        )
+
+
+def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore:
+    """Compare stored verdicts against golden expected_verdict labels.
+
+    Rows are matched to golden claims greedily one-to-one with the same
+    matcher extraction scoring uses — a verdict row consumed by one golden
+    claim can never also count for another.
+    """
+    consumed: set[int] = set()
+    correct = 0
+    matched = 0
+    classes = sorted({g["expected_verdict"] for g in golden})
+    confusion: dict[str, dict[str, int]] = {
+        c: dict.fromkeys([*classes, "OTHER"], 0) for c in classes
+    }
+    per_class: dict[str, dict] = {c: {"total": 0, "correct": 0} for c in classes}
+
+    for golden_claim in golden:
+        expected = golden_claim["expected_verdict"]
+        hit = next(
+            (
+                i
+                for i, row in enumerate(verdict_rows)
+                if i not in consumed and _matches(golden_claim, row)
+            ),
+            None,
+        )
+        if hit is None:
+            continue
+        consumed.add(hit)
+        matched += 1
+        predicted = verdict_rows[hit]["verdict"]
+        per_class[expected]["total"] += 1
+        confusion[expected][predicted if predicted in classes else "OTHER"] += 1
+        if predicted == expected:
+            correct += 1
+            per_class[expected]["correct"] += 1
+
+    golden_total = len(golden)
+    return VerdictScore(
+        accuracy=correct / matched if matched else 0.0,
+        correct=correct,
+        matched=matched,
+        golden_total=golden_total,
+        coverage=matched / golden_total if golden_total else 0.0,
+        per_class=per_class,
+        confusion=confusion,
+        downgraded=sum(1 for row in verdict_rows if row.get("quote_verified") == 0),
+    )
+
+
 def score_extraction(extracted: list[dict], golden: list[dict]) -> ExtractionScore:
     matched_extracted: set[int] = set()
     matched = 0

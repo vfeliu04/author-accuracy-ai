@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from authorai.evals import load_golden, score_extraction
 
 GOLDEN = [
@@ -97,6 +99,81 @@ def test_unrelated_claims_sharing_only_filler_words_do_not_match():
     ]
     score = score_extraction(extracted, golden)
     assert score.matched == 0
+
+
+def test_score_verdicts_accuracy_confusion_and_coverage():
+    from authorai.evals import score_verdicts
+
+    golden = [
+        {
+            "text": "Hunger affected 735 million people.",
+            "value": 735e6,
+            "year": None,
+            "expected_verdict": "SUPPORTED",
+        },
+        {
+            "text": "Only 10 million are undernourished.",
+            "value": 10e6,
+            "year": None,
+            "expected_verdict": "CONTRADICTED",
+        },
+        {
+            "text": "The 1923 treaty ended famine.",
+            "value": None,
+            "year": 1923,
+            "expected_verdict": "UNVERIFIABLE",
+        },
+    ]
+    rows = [
+        # Correct SUPPORTED, quote verified.
+        {
+            "text": "Hunger affected 735 million people.",
+            "value": 735e6,
+            "year": None,
+            "verdict": "SUPPORTED",
+            "quote_verified": 1,
+        },
+        # Wrong: golden says CONTRADICTED, pipeline said UNVERIFIABLE after a
+        # failed quote check (counts as downgraded too).
+        {
+            "text": "Only 10 million are undernourished.",
+            "value": 10e6,
+            "year": None,
+            "verdict": "UNVERIFIABLE",
+            "quote_verified": 0,
+        },
+        # No row matches the 1923 golden claim -> coverage gap, not an error.
+    ]
+    score = score_verdicts(rows, golden)
+    assert score.matched == 2
+    assert score.correct == 1
+    assert score.accuracy == 0.5
+    assert score.coverage == pytest.approx(2 / 3)
+    assert score.confusion["CONTRADICTED"]["UNVERIFIABLE"] == 1
+    assert score.confusion["SUPPORTED"]["SUPPORTED"] == 1
+    assert score.per_class["SUPPORTED"] == {"total": 1, "correct": 1}
+    assert score.downgraded == 1
+    assert "accuracy 0.50" in score.summary()
+
+
+def test_score_verdicts_consumes_each_row_once():
+    from authorai.evals import score_verdicts
+
+    golden = [
+        {"text": "A says 10 things.", "value": 10.0, "year": None, "expected_verdict": "SUPPORTED"},
+        {"text": "B says 10 items.", "value": 10.0, "year": None, "expected_verdict": "SUPPORTED"},
+    ]
+    rows = [
+        {
+            "text": "It mentions 10.",
+            "value": 10.0,
+            "year": None,
+            "verdict": "SUPPORTED",
+            "quote_verified": 1,
+        }
+    ]
+    score = score_verdicts(rows, golden)
+    assert score.matched == 1  # one row cannot satisfy two golden claims
 
 
 def test_load_golden_parses_jsonl(tmp_path):

@@ -34,3 +34,5 @@ class Settings(BaseSettings):
     # description task, so it stays on Haiku (as planned in CLAUDE.md Phase 3).
     extraction_model: str = "claude-opus-5"
     caption_model: str = "claude-haiku-4-5"
+    # Verdicts are the product's core judgment — frontier model, like extraction.
+    verdict_model: str = "claude-opus-5"

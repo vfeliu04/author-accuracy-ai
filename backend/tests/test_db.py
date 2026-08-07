@@ -73,6 +73,80 @@ def test_chunk_text_is_immutable(conn):
         conn.execute("UPDATE chunks SET page = 5 WHERE id = ?", (chunk_id,))
 
 
+def _claim(conn, run_id, doc_id, text="Hunger rose in 2023."):
+    return dbmod.add_claims(conn, run_id, doc_id, [{"text": text}])[0]
+
+
+def _verdict_row(claim_id, **overrides):
+    row = {
+        "claim_id": claim_id,
+        "verdict": "SUPPORTED",
+        "raw_verdict": "SUPPORTED",
+        "quote": "hunger rose sharply in 2023",
+        "quote_verified": 1,
+        "quoted_chunk_id": None,
+        "evidence_chunk_ids": [1, 2],
+        "year_flag": None,
+        "rationale": "The source states it.",
+        "model": "test-model",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_verdicts_roundtrip_joins_claim_fields(conn):
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "REPORT")
+    claim_id = _claim(conn, run_id, doc_id)
+    dbmod.add_verdicts(conn, run_id, [_verdict_row(claim_id)])
+
+    [row] = dbmod.list_verdicts(conn, run_id)
+    assert row["claim_id"] == claim_id
+    assert row["verdict"] == "SUPPORTED"
+    assert row["text"] == "Hunger rose in 2023."  # joined from claims
+    assert row["evidence_chunk_ids"] == "[1, 2]"  # stored as JSON
+
+
+def test_verdicts_replace_is_atomic(conn):
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "REPORT")
+    claim_id = _claim(conn, run_id, doc_id)
+    dbmod.add_verdicts(conn, run_id, [_verdict_row(claim_id, rationale="old")])
+
+    # A failed replacement must roll the DELETE back — never leave the run
+    # with neither its old verdicts nor new ones.
+    with pytest.raises(sqlite3.IntegrityError):
+        dbmod.add_verdicts(conn, run_id, [_verdict_row(claim_id, verdict="MAYBE")], replace=True)
+    assert [v["rationale"] for v in dbmod.list_verdicts(conn, run_id)] == ["old"]
+
+    dbmod.add_verdicts(conn, run_id, [_verdict_row(claim_id, rationale="new")], replace=True)
+    assert [v["rationale"] for v in dbmod.list_verdicts(conn, run_id)] == ["new"]
+
+
+def test_reextract_after_verify_cascades_verdicts(conn):
+    # Re-extraction deletes the document's claims; with foreign_keys=ON the
+    # verdicts must CASCADE with them or the delete itself fails.
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "REPORT")
+    claim_id = _claim(conn, run_id, doc_id)
+    dbmod.add_verdicts(conn, run_id, [_verdict_row(claim_id)])
+
+    dbmod.add_claims(conn, run_id, doc_id, [{"text": "A fresh claim."}], replace=True)
+    assert dbmod.list_verdicts(conn, run_id) == []
+
+
+def test_migration_3_to_4_adds_verdicts(tmp_path):
+    path = tmp_path / "db.sqlite"
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    # Rewind to a v3 state and reconnect — the v4 block must re-run cleanly.
+    conn.executescript("DROP TABLE verdicts; PRAGMA user_version = 3;")
+    conn.close()
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    conn.execute("SELECT id FROM verdicts")  # table exists again
+    conn.close()
+
+
 def test_delete_cleans_both_indexes(conn):
     run_id = dbmod.create_run(conn)
     doc_id = dbmod.add_document(conn, run_id, "SOURCE")

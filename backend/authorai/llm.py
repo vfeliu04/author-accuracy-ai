@@ -8,6 +8,9 @@ cost stays visible. Retries are the SDK's built-in ones — no hand-rolled loop.
 
 import base64
 import io
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -28,6 +31,21 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # non-streaming HTTP timeout.
 PARSE_MAX_TOKENS = 16000
 
+BATCH_POLL_SECONDS = 10
+BATCH_TIMEOUT_SECONDS = 3600
+
+
+@dataclass
+class ParseItem:
+    """One structured call in a batch. Carries the same payload the sync path
+    takes — including images — so the two paths stay interchangeable."""
+
+    custom_id: str
+    system: str
+    prompt: str
+    output_type: type[BaseModel]
+    images: "list[Path] | None" = None
+
 
 class LLM(Protocol):
     def parse(
@@ -38,11 +56,63 @@ class LLM(Protocol):
         prompt: str,
         output_type: type[ModelT],
         max_tokens: int = PARSE_MAX_TOKENS,
+        images: "list[Path] | None" = None,
     ) -> ModelT: ...
+
+    def parse_batch(
+        self,
+        *,
+        model: str,
+        items: list[ParseItem],
+        max_tokens: int = PARSE_MAX_TOKENS,
+    ) -> dict[str, BaseModel]: ...
 
     def describe_image(
         self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512
     ) -> str: ...
+
+
+def _content(prompt: str, images: "list[Path] | None"):
+    """User-message content: the plain string, or image blocks before the text."""
+    if not images:
+        return prompt
+    blocks = []
+    for path in images:
+        data = base64.standard_b64encode(Path(path).read_bytes()).decode("ascii")
+        blocks.append(
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": data},
+            }
+        )
+    blocks.append({"type": "text", "text": prompt})
+    return blocks
+
+
+def build_batch_request(item: ParseItem, model: str, max_tokens: int = PARSE_MAX_TOKENS):
+    """The Batch API request for one ParseItem.
+
+    transform_schema() produces exactly the schema messages.parse() would send,
+    so the batch path and the sync path make provably identical requests. The
+    batch param is `output_config` — `output_format` is parse()-only sugar and
+    would be silently dropped from batch params.
+    """
+    from anthropic import transform_schema
+    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+    from anthropic.types.messages.batch_create_params import Request
+
+    return Request(
+        custom_id=item.custom_id,
+        params=MessageCreateParamsNonStreaming(
+            model=model,
+            max_tokens=max_tokens,
+            system=item.system,
+            messages=[{"role": "user", "content": _content(item.prompt, item.images)}],
+            output_config={
+                "format": {"type": "json_schema", "schema": transform_schema(item.output_type)}
+            },
+        ),
+    )
 
 
 class AnthropicClient:
@@ -64,12 +134,13 @@ class AnthropicClient:
         prompt: str,
         output_type: type[ModelT],
         max_tokens: int = PARSE_MAX_TOKENS,
+        images: "list[Path] | None" = None,
     ) -> ModelT:
         response = self._client.messages.parse(
             model=model,
             max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": _content(prompt, images)}],
             output_format=output_type,
         )
         self._log_usage(model, response)
@@ -79,6 +150,72 @@ class AnthropicClient:
                 f"(stop_reason={response.stop_reason!r})"
             )
         return response.parsed_output
+
+    def parse_batch(
+        self,
+        *,
+        model: str,
+        items: list[ParseItem],
+        max_tokens: int = PARSE_MAX_TOKENS,
+        poll_seconds: float = BATCH_POLL_SECONDS,
+        timeout_seconds: float = BATCH_TIMEOUT_SECONDS,
+    ) -> dict[str, BaseModel]:
+        """Run all items through the Batch API; returns results keyed by custom_id.
+
+        ALL-OR-NOTHING: any failed item raises after the batch ends, listing
+        every failure — storing partial results would silently change the
+        denominator of any score computed on them. The batch id is logged the
+        moment it exists so a timeout or interrupt never orphans a paid batch.
+        """
+        requests = [build_batch_request(item, model, max_tokens) for item in items]
+        batch = self._client.messages.batches.create(requests=requests)
+        logger.info(
+            "batch %s created (%d items) — reattach by id if interrupted", batch.id, len(items)
+        )
+
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            batch = self._client.messages.batches.retrieve(batch.id)
+            if batch.processing_status == "ended":
+                break
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"Batch {batch.id} still {batch.processing_status!r} after "
+                    f"{timeout_seconds}s — it is still queued server-side; re-poll or cancel it"
+                )
+            time.sleep(poll_seconds)
+
+        output_types = {item.custom_id: item.output_type for item in items}
+        parsed: dict[str, BaseModel] = {}
+        failures: list[str] = []
+        for result in self._client.messages.batches.results(batch.id):
+            custom_id = result.custom_id
+            if result.result.type != "succeeded":
+                failures.append(f"{custom_id}: {result.result.type}")
+                continue
+            message = result.result.message
+            self._log_usage(model, message)
+            if message.stop_reason == "max_tokens":
+                failures.append(f"{custom_id}: output truncated at max_tokens")
+                continue
+            # Thinking blocks precede the text block — never index content[0].
+            text = next((b.text for b in message.content if b.type == "text"), None)
+            if text is None:
+                failures.append(f"{custom_id}: no text block (stop_reason={message.stop_reason!r})")
+                continue
+            try:
+                parsed[custom_id] = output_types[custom_id].model_validate_json(text)
+            except Exception as exc:  # noqa: BLE001 - recorded per item, raised in aggregate
+                failures.append(f"{custom_id}: unparseable output ({exc})")
+        for custom_id in output_types:
+            if custom_id not in parsed and not any(f.startswith(custom_id) for f in failures):
+                failures.append(f"{custom_id}: no result returned")
+        if failures:
+            raise RuntimeError(
+                f"Batch {batch.id}: {len(failures)}/{len(items)} items failed — "
+                "storing nothing (rerun is safe, replace semantics): " + "; ".join(failures)
+            )
+        return parsed
 
     def describe_image(
         self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512

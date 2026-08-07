@@ -5,6 +5,7 @@ and the sqlite-vec vector index. Every pipeline table carries a `run_id` so
 runs never overwrite each other — there is no reset step, ever.
 """
 
+import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -15,9 +16,13 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
+
+# Shared with verification.py — the DB CHECK constraints and the Verdict model
+# must never drift apart.
+VERDICTS = ("SUPPORTED", "CONTRADICTED", "UNVERIFIABLE")
 
 
 def now_iso() -> str:
@@ -183,6 +188,38 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 4:
+        verdict_check = "('" + "', '".join(VERDICTS) + "')"
+        conn.executescript(
+            f"""
+            BEGIN;
+
+            CREATE TABLE verdicts(
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              -- CASCADE: re-extraction replaces a document's claims inside a
+              -- transaction; with foreign_keys=ON a plain FK would make that
+              -- DELETE fail once verdicts exist. Verdicts on deleted claims
+              -- are meaningless, so they go with them.
+              claim_id TEXT NOT NULL UNIQUE REFERENCES claims(id) ON DELETE CASCADE,
+              verdict TEXT NOT NULL CHECK(verdict IN {verdict_check}),
+              raw_verdict TEXT NOT NULL CHECK(raw_verdict IN {verdict_check}),
+              quote TEXT,
+              quote_verified INTEGER,          -- NULL = no quote applicable, 1 = ok, 0 = FAILED
+              quoted_chunk_id INTEGER REFERENCES chunks(id),
+              evidence_chunk_ids TEXT NOT NULL, -- JSON array of chunk ids shown to the judge
+              year_flag INTEGER,               -- NULL = n/a, 1 = claim year absent from cited chunk
+              rationale TEXT NOT NULL,
+              model TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_verdicts_run ON verdicts(run_id);
+
+            PRAGMA user_version = 4;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -320,6 +357,62 @@ def add_claims(
             )
             claim_ids.append(claim_id)
     return claim_ids
+
+
+def add_verdicts(
+    conn: sqlite3.Connection,
+    run_id: str,
+    verdicts: list[dict],
+    *,
+    replace: bool = False,
+) -> list[str]:
+    """Insert verdicts in one transaction; returns their ids.
+
+    With `replace`, the run's existing verdicts are deleted inside that SAME
+    transaction (the add_claims lesson: delete-then-insert across two
+    transactions loses the old rows when the insert fails).
+    """
+    verdict_ids: list[str] = []
+    with conn:
+        if replace:
+            conn.execute("DELETE FROM verdicts WHERE run_id = ?", (run_id,))
+        for verdict in verdicts:
+            verdict_id = new_id()
+            conn.execute(
+                "INSERT INTO verdicts(id, run_id, claim_id, verdict, raw_verdict, quote,"
+                " quote_verified, quoted_chunk_id, evidence_chunk_ids, year_flag, rationale,"
+                " model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    verdict_id,
+                    run_id,
+                    verdict["claim_id"],
+                    verdict["verdict"],
+                    verdict["raw_verdict"],
+                    verdict.get("quote"),
+                    verdict.get("quote_verified"),
+                    verdict.get("quoted_chunk_id"),
+                    json.dumps(verdict.get("evidence_chunk_ids", [])),
+                    verdict.get("year_flag"),
+                    verdict["rationale"],
+                    verdict["model"],
+                    now_iso(),
+                ),
+            )
+            verdict_ids.append(verdict_id)
+    return verdict_ids
+
+
+def list_verdicts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """A run's verdicts joined with their claims, in document order."""
+    rows = conn.execute(
+        """
+        SELECT v.*, c.text, c.value, c.unit, c.year, c.page
+        FROM verdicts v JOIN claims c ON c.id = v.claim_id
+        WHERE v.run_id = ? ORDER BY c.page, c.id
+        """,
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_claims(conn: sqlite3.Connection, run_id: str) -> list[dict]:

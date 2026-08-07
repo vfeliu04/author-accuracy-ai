@@ -14,13 +14,15 @@ from authorai import db as dbmod
 from authorai.claims import extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.evals import load_golden, score_extraction
+from authorai.evals import load_golden, score_extraction, score_verdicts
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
 from authorai.llm import AnthropicClient
 from authorai.search import hybrid_search
+from authorai.verification import verify_run
 
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
+VERDICT_BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "verdict_baseline.json"
 
 
 def _setup() -> tuple[Settings, sqlite3.Connection]:
@@ -188,6 +190,56 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
         print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
 
 
+def cmd_verify(args: argparse.Namespace) -> None:
+    settings, conn = _setup()
+    embedder = _embedder(settings)
+    llm = AnthropicClient(settings.anthropic_api_key)
+    summary = verify_run(
+        conn,
+        embedder,
+        llm,
+        args.run_id,
+        model=settings.verdict_model,
+        k=args.k,
+        batch=not args.sync,
+    )
+    for verdict, count in summary["counts"].items():
+        print(f"{verdict}: {count}")
+    print(
+        f"downgraded (quote check failed): {summary['downgraded']}, "
+        f"year-flagged: {summary['year_flagged']}, "
+        f"no evidence: {summary['no_evidence']}, total: {summary['total']}"
+    )
+
+
+def cmd_eval_verdict(args: argparse.Namespace) -> None:
+    _, conn = _setup()
+    golden_path = args.golden
+    baseline_path = args.baseline or (VERDICT_BASELINE_PATH if golden_path == GOLDEN_PATH else None)
+    if not golden_path.exists():
+        raise SystemExit(f"Golden set not found at {golden_path}")
+    golden = load_golden(golden_path)
+    verdict_rows = dbmod.list_verdicts(conn, args.run_id)
+    if not verdict_rows:
+        raise SystemExit(f"Run {args.run_id!r} has no verdicts — run `verify` first")
+    score = score_verdicts(verdict_rows, golden)
+    print(score.summary())
+    for expected, predicted_counts in score.confusion.items():
+        wrong = {p: n for p, n in predicted_counts.items() if n and p != expected}
+        if wrong:
+            print(f"confused {expected} -> {wrong}")
+    if baseline_path is None:
+        return
+    if baseline_path.exists():
+        baseline = json.loads(baseline_path.read_text())
+        print(
+            f"baseline: accuracy {baseline['accuracy']:.2f} "
+            f"(delta: {score.accuracy - baseline['accuracy']:+.2f})"
+        )
+    else:
+        print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     settings, conn = _setup()
     embedder = _embedder(settings)
@@ -240,6 +292,34 @@ def main() -> None:
         help="Baseline JSON for the delta line (default: dev baseline, only with the dev golden)",
     )
     eval_extract.set_defaults(func=cmd_eval_extract)
+
+    verify = subparsers.add_parser("verify", help="Verify a run's claims against its sources")
+    verify.add_argument("run_id")
+    verify.add_argument(
+        "--sync",
+        action="store_true",
+        help="Per-claim sync calls instead of the Batch API (full price, immediate)",
+    )
+    verify.add_argument("-k", type=int, default=8, help="Evidence chunks per claim")
+    verify.set_defaults(func=cmd_verify)
+
+    eval_verdict = subparsers.add_parser(
+        "eval-verdict", help="Score stored verdicts against the golden set"
+    )
+    eval_verdict.add_argument("run_id")
+    eval_verdict.add_argument(
+        "--golden",
+        type=Path,
+        default=GOLDEN_PATH,
+        help="Golden JSONL to score against (default: the dev set)",
+    )
+    eval_verdict.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Baseline JSON for the delta line (default: dev verdict baseline, dev golden only)",
+    )
+    eval_verdict.set_defaults(func=cmd_eval_verdict)
 
     search = subparsers.add_parser("search", help="Hybrid-search a run")
     search.add_argument("run_id")
