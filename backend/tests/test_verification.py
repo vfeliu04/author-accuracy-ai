@@ -164,6 +164,85 @@ def test_batch_request_uses_output_config_with_transformed_schema(tmp_path):
     assert content[-1] == {"type": "text", "text": "judge this"}
 
 
+def _stub_batch_client(results):
+    """A fake anthropic client whose batch lifecycle returns canned results."""
+    from types import SimpleNamespace
+
+    batches = SimpleNamespace(
+        create=lambda requests: SimpleNamespace(id="batch-1"),
+        retrieve=lambda batch_id: SimpleNamespace(id=batch_id, processing_status="ended"),
+        results=lambda batch_id: iter(results),
+    )
+    return SimpleNamespace(messages=SimpleNamespace(batches=batches))
+
+
+def _succeeded(custom_id, text):
+    from types import SimpleNamespace
+
+    message = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    return SimpleNamespace(
+        custom_id=custom_id, result=SimpleNamespace(type="succeeded", message=message)
+    )
+
+
+def _errored(custom_id):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(custom_id=custom_id, result=SimpleNamespace(type="errored"))
+
+
+def _items():
+    from authorai.llm import ParseItem
+
+    return [
+        ParseItem(custom_id="ok", system="s", prompt="p1", output_type=Verdict),
+        ParseItem(custom_id="bad", system="s", prompt="p2", output_type=Verdict),
+    ]
+
+
+def test_batch_failed_item_is_retried_sync_once(monkeypatch):
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    client._client = _stub_batch_client(
+        [_succeeded("ok", _verdict().model_dump_json()), _errored("bad")]
+    )
+    retried = []
+
+    def fake_parse(*, model, system, prompt, output_type, max_tokens, images=None):
+        retried.append({"prompt": prompt, "max_tokens": max_tokens})
+        return _verdict(verdict="UNVERIFIABLE", quote=None, evidence_index=None)
+
+    monkeypatch.setattr(client, "parse", fake_parse)
+    results = client.parse_batch(model="m", items=_items(), max_tokens=32000)
+
+    assert set(results) == {"ok", "bad"}
+    assert results["bad"].verdict == "UNVERIFIABLE"
+    [retry] = retried
+    assert retry["prompt"] == "p2"
+    assert retry["max_tokens"] == 16000  # capped for sync — SDK non-streaming ceiling
+
+
+def test_batch_item_failing_twice_raises_listing_it(monkeypatch):
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    client._client = _stub_batch_client(
+        [_succeeded("ok", _verdict().model_dump_json()), _errored("bad")]
+    )
+
+    def failing_parse(**kwargs):
+        raise RuntimeError("still broken")
+
+    monkeypatch.setattr(client, "parse", failing_parse)
+    with pytest.raises(RuntimeError, match="bad: errored.*still broken"):
+        client.parse_batch(model="m", items=_items())
+
+
 # --- verify_run orchestration --------------------------------------------
 
 

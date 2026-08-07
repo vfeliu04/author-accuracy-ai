@@ -31,6 +31,11 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # non-streaming HTTP timeout.
 PARSE_MAX_TOKENS = 16000
 
+# Batch requests face no HTTP timeout, so they can afford more headroom —
+# observed live: a hard verdict item burned the full 16k on thinking and came
+# back truncated.
+BATCH_MAX_TOKENS = 32000
+
 BATCH_POLL_SECONDS = 10
 BATCH_TIMEOUT_SECONDS = 3600
 
@@ -162,10 +167,13 @@ class AnthropicClient:
     ) -> dict[str, BaseModel]:
         """Run all items through the Batch API; returns results keyed by custom_id.
 
-        ALL-OR-NOTHING: any failed item raises after the batch ends, listing
-        every failure — storing partial results would silently change the
-        denominator of any score computed on them. The batch id is logged the
-        moment it exists so a timeout or interrupt never orphans a paid batch.
+        A failed item gets ONE sync retry (logged — observed live failure modes
+        are transient: corrupted verdict literals, max_tokens truncation), then
+        the call is ALL-OR-NOTHING: items that fail twice raise after the batch
+        ends, listing every failure — storing partial results would silently
+        change the denominator of any score computed on them. The batch id is
+        logged the moment it exists so a timeout or interrupt never orphans a
+        paid batch.
         """
         requests = [build_batch_request(item, model, max_tokens) for item in items]
         batch = self._client.messages.batches.create(requests=requests)
@@ -210,11 +218,34 @@ class AnthropicClient:
         for custom_id in output_types:
             if custom_id not in parsed and not any(f.startswith(custom_id) for f in failures):
                 failures.append(f"{custom_id}: no result returned")
+
         if failures:
-            raise RuntimeError(
-                f"Batch {batch.id}: {len(failures)}/{len(items)} items failed — "
-                "storing nothing (rerun is safe, replace semantics): " + "; ".join(failures)
-            )
+            # One sync retry per failed item — loudly logged, never silent.
+            items_by_id = {item.custom_id: item for item in items}
+            still_failing: list[str] = []
+            for failure in failures:
+                custom_id = failure.split(":", 1)[0]
+                item = items_by_id[custom_id]
+                logger.warning("batch item failed (%s) — retrying once sync", failure)
+                try:
+                    parsed[custom_id] = self.parse(
+                        model=model,
+                        system=item.system,
+                        prompt=item.prompt,
+                        output_type=item.output_type,
+                        # Sync must stay under the SDK's non-streaming ceiling
+                        # even when the batch ran with more headroom.
+                        max_tokens=min(max_tokens, PARSE_MAX_TOKENS),
+                        images=item.images,
+                    )
+                except Exception as exc:  # noqa: BLE001 - aggregated below
+                    still_failing.append(f"{failure}; retry: {exc}")
+            if still_failing:
+                raise RuntimeError(
+                    f"Batch {batch.id}: {len(still_failing)}/{len(items)} items failed even "
+                    "after a sync retry — storing nothing (rerun is safe, replace "
+                    "semantics): " + "; ".join(still_failing)
+                )
         return parsed
 
     def describe_image(

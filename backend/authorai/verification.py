@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from authorai import db as dbmod
 from authorai.db import VERDICTS
 from authorai.embeddings import Embedder
-from authorai.llm import LLM, ParseItem
+from authorai.llm import BATCH_MAX_TOKENS, LLM, ParseItem
 from authorai.log import setup_logger
 from authorai.search import Hit, hybrid_search
 
@@ -281,7 +281,7 @@ def verify_run(
 
     if items:
         if batch:
-            results = llm.parse_batch(model=model, items=items)
+            results = llm.parse_batch(model=model, items=items, max_tokens=BATCH_MAX_TOKENS)
         else:
             results = {
                 item.custom_id: llm.parse(
