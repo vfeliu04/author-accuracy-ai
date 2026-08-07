@@ -1,11 +1,12 @@
 {
-  "recall": 0.7812,
-  "precision": 0.9259,
-  "matched": 25,
-  "golden_total": 32,
+  "recall": 0.7297,
+  "precision": 1.0,
+  "matched": 27,
+  "golden_total": 37,
   "extracted_total": 27,
   "model": "claude-opus-5",
   "run_id": "6fc062e08aa4492ab138182a5c53f184",
   "recorded": "2026-08-07",
-  "note": "Supersedes the 0.59/0.83 first baseline. Two changes earned it: table chunks are now fed into the extraction prompt (recovered all 8 tabulated claims, incl. the 733m/10m undernourished pair), and the scorer matches on content-word overlap instead of substring containment (recovered 2 claims that were found but reworded). Remaining misses are all general prose statements; 4 of them were matched in the pre-table run, so extraction of prose claims may have regressed slightly or may just be run-to-run variance \u2014 unmeasured, needs a repeat run to tell apart."
+  "noise_floor": "\u00b11 matched claim run-to-run (~\u00b10.03 recall), measured over 4 repeat extractions",
+  "note": "Golden set expanded 32 -> 37 (exhaustive over the report) and adversarially audited: 8 verdicts corrected. Baseline is the last committed extractor (pre prompt-fix) scored on this new golden set. Not comparable to the previous 0.78 figure - the ruler changed, not the extractor."
 }

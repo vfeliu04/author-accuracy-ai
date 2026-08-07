@@ -161,9 +161,13 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 def cmd_eval_extract(args: argparse.Namespace) -> None:
     _, conn = _setup()
-    if not GOLDEN_PATH.exists():
-        raise SystemExit(f"Golden set not found at {GOLDEN_PATH}")
-    golden = load_golden(GOLDEN_PATH)
+    golden_path = args.golden
+    # The baseline only means something for the golden set it was recorded
+    # against — comparing a holdout score to the dev baseline would mislead.
+    baseline_path = args.baseline or (BASELINE_PATH if golden_path == GOLDEN_PATH else None)
+    if not golden_path.exists():
+        raise SystemExit(f"Golden set not found at {golden_path}")
+    golden = load_golden(golden_path)
     extracted = dbmod.list_claims(conn, args.run_id)
     if not extracted:
         raise SystemExit(f"Run {args.run_id!r} has no claims — run `extract` first")
@@ -171,15 +175,17 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     print(score.summary())
     for text in score.missed:
         print(f"MISSED: {text}")
-    if BASELINE_PATH.exists():
-        baseline = json.loads(BASELINE_PATH.read_text())
+    if baseline_path is None:
+        return
+    if baseline_path.exists():
+        baseline = json.loads(baseline_path.read_text())
         print(
             f"baseline: recall {baseline['recall']:.2f}, precision {baseline['precision']:.2f} "
             f"(delta: recall {score.recall - baseline['recall']:+.2f}, "
             f"precision {score.precision - baseline['precision']:+.2f})"
         )
     else:
-        print(f"no baseline yet — to accept this as baseline, write {BASELINE_PATH}")
+        print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -221,6 +227,18 @@ def main() -> None:
         "eval-extract", help="Score extracted claims against the golden set"
     )
     eval_extract.add_argument("run_id")
+    eval_extract.add_argument(
+        "--golden",
+        type=Path,
+        default=GOLDEN_PATH,
+        help="Golden JSONL to score against (default: the dev set)",
+    )
+    eval_extract.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Baseline JSON for the delta line (default: dev baseline, only with the dev golden)",
+    )
     eval_extract.set_defaults(func=cmd_eval_extract)
 
     search = subparsers.add_parser("search", help="Hybrid-search a run")
