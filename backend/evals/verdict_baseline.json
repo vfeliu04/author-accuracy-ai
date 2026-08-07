@@ -13,6 +13,6 @@
   "model": "claude-opus-5",
   "run_id": "6fc062e08aa4492ab138182a5c53f184",
   "recorded": "2026-08-08",
-  "noise_floor": "accuracy 0.75-0.78 over 3 runs (\u00b11 claim); treat |delta| <= 0.03 as noise",
-  "note": "First verdict baseline, judge prompt v1. All 8 errors are under-commitment (S/C judged UNVERIFIABLE): 5 are embedded fabrications where the judge evaluated the reporting frame ('some analyses claim X') instead of the embedded assertion X \u2014 a convention mismatch with the golden labels, not a retrieval gap (diagnosed from rationales; evidence was present). The judge never fabricated support: no UNVERIFIABLE->S/C and no S<->C confusion. Quote checks: 0-1 downgrades per run."
+  "noise_floor": "accuracy 0.72-0.78 over 5 v1-prompt runs (\u00b12 claims); the CONTRADICTED->SUPPORTED confusion appears intermittently under v1 too (0-1 claims/run) \u2014 earlier attribution of it to the prompt experiment was wrong",
+  "note": "First verdict baseline, judge prompt v1. All 8 errors are under-commitment (S/C judged UNVERIFIABLE): 5 are embedded fabrications where the judge evaluated the reporting frame ('some analyses claim X') instead of the embedded assertion X \u2014 a convention mismatch with the golden labels, not a retrieval gap (diagnosed from rationales; evidence was present). The judge never fabricated support: no UNVERIFIABLE->S/C and no S<->C confusion. Quote checks: 0-1 downgrades per run. ADDENDUM: two measured attempts to fix the embedded-fabrication convention in the judge prompt scored 0.75 both times (within noise, no improvement) \u2014 reverted; the proper fix is likely extraction-altitude (store the embedded assertion as the claim), deferred to Phase 5."
 }
