@@ -22,6 +22,13 @@ logger = setup_logger(__name__)
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
+# Claude Opus 5 thinks by default, and thinking shares this budget with the
+# response — a report yielding dozens of claims truncates at 8192 and comes back
+# unparseable. 16000 is the ceiling that still stays under the SDK's
+# non-streaming HTTP timeout.
+PARSE_MAX_TOKENS = 16000
+
+
 class LLM(Protocol):
     def parse(
         self,
@@ -30,7 +37,7 @@ class LLM(Protocol):
         system: str,
         prompt: str,
         output_type: type[ModelT],
-        max_tokens: int = 8192,
+        max_tokens: int = PARSE_MAX_TOKENS,
     ) -> ModelT: ...
 
     def describe_image(
@@ -56,7 +63,7 @@ class AnthropicClient:
         system: str,
         prompt: str,
         output_type: type[ModelT],
-        max_tokens: int = 8192,
+        max_tokens: int = PARSE_MAX_TOKENS,
     ) -> ModelT:
         response = self._client.messages.parse(
             model=model,

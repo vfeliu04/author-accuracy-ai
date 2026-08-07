@@ -34,7 +34,14 @@ def load_golden(path: Path | str) -> list[dict]:
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"[^a-z0-9 ]", "", text.lower())
+    """Lowercase, with every run of non-alphanumerics collapsed to one space.
+
+    Substituting a space rather than deleting matters: claim text extracted
+    verbatim from the PDF carries line breaks mid-sentence, and deleting them
+    welds words together ("hunger\\nrose" -> "hungerrose") so containment
+    against the hand-written golden text silently fails and recall reads low.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
 def _matches(golden: dict, extracted: dict) -> bool:

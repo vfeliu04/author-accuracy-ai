@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from authorai import db as dbmod
@@ -53,6 +55,21 @@ def test_claims_persistence_roundtrip(conn):
     assert stored[0]["text"] == CANNED.claims[0].text
     assert stored[0]["value"] == 735_000_000
     assert stored[0]["year"] == 2023
+
+
+def test_replace_swaps_claims_atomically(conn):
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "REPORT")
+    dbmod.add_claims(conn, run_id, doc_id, [{"text": "stale claim"}])
+
+    # A failed re-extraction must roll the DELETE back too, so the document is
+    # never left with neither its old claims nor the new ones.
+    with pytest.raises(sqlite3.IntegrityError):
+        dbmod.add_claims(conn, run_id, doc_id, [{"text": None}], replace=True)
+    assert [c["text"] for c in dbmod.list_claims(conn, run_id)] == ["stale claim"]
+
+    dbmod.add_claims(conn, run_id, doc_id, [{"text": "fresh claim"}], replace=True)
+    assert [c["text"] for c in dbmod.list_claims(conn, run_id)] == ["fresh claim"]
 
 
 def test_anthropic_client_refuses_missing_key():

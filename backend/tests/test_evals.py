@@ -49,6 +49,16 @@ def test_each_extracted_claim_matches_at_most_one_golden():
     assert len(score.missed) == 1
 
 
+def test_pdf_line_breaks_do_not_defeat_text_containment():
+    # Claim text is extracted VERBATIM from the PDF, so it carries line breaks
+    # mid-sentence. Normalizing must turn them into spaces, not delete them —
+    # deleting welds words together and the golden claim reads as MISSED.
+    extracted = [{"text": "The report claims food\naid  doubled.", "value": None, "year": None}]
+    score = score_extraction(extracted, GOLDEN[2:])
+    assert score.matched == 1
+    assert score.missed == []
+
+
 def test_load_golden_parses_jsonl(tmp_path):
     path = tmp_path / "golden.jsonl"
     path.write_text("\n".join(json.dumps(entry) for entry in GOLDEN))

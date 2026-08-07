@@ -282,10 +282,24 @@ def add_figure(
     return figure_id
 
 
-def add_claims(conn: sqlite3.Connection, run_id: str, doc_id: str, claims: list[dict]) -> list[str]:
-    """Insert extracted claims in one transaction; returns their ids."""
+def add_claims(
+    conn: sqlite3.Connection,
+    run_id: str,
+    doc_id: str,
+    claims: list[dict],
+    *,
+    replace: bool = False,
+) -> list[str]:
+    """Insert extracted claims in one transaction; returns their ids.
+
+    With `replace`, the document's existing claims are deleted inside that SAME
+    transaction — deleting first and inserting after would leave the document
+    holding neither the old claims nor the new ones if the insert failed.
+    """
     claim_ids: list[str] = []
     with conn:
+        if replace:
+            conn.execute("DELETE FROM claims WHERE doc_id = ?", (doc_id,))
         for claim in claims:
             claim_id = new_id()
             conn.execute(

@@ -7,6 +7,7 @@ Usage (inside the conda env, from backend/):
 
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 from authorai import db as dbmod
@@ -22,15 +23,23 @@ GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
 
 
-def _setup() -> tuple[Settings, object, OpenAIEmbedder]:
+def _setup() -> tuple[Settings, sqlite3.Connection]:
     settings = Settings()
-    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
-    embedder = OpenAIEmbedder(
+    return settings, dbmod.connect(settings.db_path, settings.embedding_dim)
+
+
+def _embedder(settings: Settings) -> OpenAIEmbedder:
+    """Built only by commands that actually embed.
+
+    `extract` and `eval-extract` touch no vectors; constructing the embedder
+    for them would demand an OPENAI_API_KEY they never use and turn a working
+    offline scoring run into a hard failure.
+    """
+    return OpenAIEmbedder(
         api_key=settings.openai_api_key,
         model=settings.embedding_model,
         dim=settings.embedding_dim,
     )
-    return settings, conn, embedder
 
 
 def run_ingest(
@@ -77,7 +86,8 @@ def run_ingest(
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
-    settings, conn, embedder = _setup()
+    settings, conn = _setup()
+    embedder = _embedder(settings)
     describe = None
     if not args.no_describe_figures:
         llm = AnthropicClient(settings.anthropic_api_key)
@@ -94,7 +104,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
-    settings, conn, _ = _setup()
+    settings, conn = _setup()
     if args.doc:
         document = conn.execute(
             "SELECT * FROM documents WHERE id = ? AND run_id = ?", (args.doc, args.run_id)
@@ -122,9 +132,13 @@ def cmd_extract(args: argparse.Namespace) -> None:
     claims = extract_claims(llm, sections, settings.extraction_model)
 
     # Re-extraction replaces the document's previous claims — deterministic reruns.
-    with conn:
-        conn.execute("DELETE FROM claims WHERE doc_id = ?", (document["id"],))
-    dbmod.add_claims(conn, args.run_id, document["id"], [claim.model_dump() for claim in claims])
+    dbmod.add_claims(
+        conn,
+        args.run_id,
+        document["id"],
+        [claim.model_dump() for claim in claims],
+        replace=True,
+    )
 
     for claim in claims:
         details = ", ".join(
@@ -142,7 +156,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_eval_extract(args: argparse.Namespace) -> None:
-    _, conn, _ = _setup()
+    _, conn = _setup()
     if not GOLDEN_PATH.exists():
         raise SystemExit(f"Golden set not found at {GOLDEN_PATH}")
     golden = load_golden(GOLDEN_PATH)
@@ -165,7 +179,8 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    _, conn, embedder = _setup()
+    settings, conn = _setup()
+    embedder = _embedder(settings)
     query = " ".join(args.query)
     [query_embedding] = embedder.embed([query])
     hits = hybrid_search(conn, args.run_id, query, query_embedding, k=args.k)

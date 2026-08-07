@@ -29,5 +29,8 @@ class Settings(BaseSettings):
     # Read from the unprefixed provider names so the existing .env keeps working.
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
-    extraction_model: str = "claude-haiku-4-5"
+    # Extraction is the accuracy-critical language judgment the whole score rests
+    # on — it runs on the frontier model. Figure captioning is a cheap, bounded
+    # description task, so it stays on Haiku (as planned in CLAUDE.md Phase 3).
+    extraction_model: str = "claude-opus-5"
     caption_model: str = "claude-haiku-4-5"
