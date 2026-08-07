@@ -1,12 +1,12 @@
 {
-  "recall": 0.7297,
-  "precision": 1.0,
-  "matched": 27,
+  "recall": 0.973,
+  "precision": 0.973,
+  "matched": 36,
   "golden_total": 37,
-  "extracted_total": 27,
+  "extracted_total": 37,
   "model": "claude-opus-5",
   "run_id": "6fc062e08aa4492ab138182a5c53f184",
   "recorded": "2026-08-07",
   "noise_floor": "\u00b11 matched claim run-to-run (~\u00b10.03 recall), measured over 4 repeat extractions",
-  "note": "Golden set expanded 32 -> 37 (exhaustive over the report) and adversarially audited: 8 verdicts corrected. Baseline is the last committed extractor (pre prompt-fix) scored on this new golden set. Not comparable to the previous 0.78 figure - the ruler changed, not the extractor."
+  "note": "Prompt-fix baseline: exhaustive-extraction instruction recovered all 6 prose claims the table addition had displaced (each 0/4 in repeat runs before, all found after). Only remaining miss is the embedded 'potatoes' appositive. Independently confirmed on the holdout at the same commit."
 }

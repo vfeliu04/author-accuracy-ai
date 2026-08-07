@@ -28,6 +28,12 @@ Rules:
   appears in. Null if unknown.
 - Split compound sentences into separate claims when each part is independently
   checkable.
+- Be exhaustive: every checkable assertion in the text should appear in your
+  output. A sentence does not need a named source, a citation, or a number to
+  be a claim — general statements of fact about drivers, trends, or causes
+  ("X remains the leading cause of Y", "Z destabilizes W worldwide") are
+  claims too. Do not skip a topic sentence merely because a neighbouring
+  sentence carries the citation.
 
 Tables appear after the sections. Reports routinely put their most checkable
 figures in a table rather than in prose, so treat them as first-class:
