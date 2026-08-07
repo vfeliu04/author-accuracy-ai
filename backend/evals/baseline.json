@@ -1,0 +1,11 @@
+{
+  "recall": 0.5938,
+  "precision": 0.8261,
+  "matched": 19,
+  "golden_total": 32,
+  "extracted_total": 23,
+  "model": "claude-opus-5",
+  "run_id": "6fc062e08aa4492ab138182a5c53f184",
+  "recorded": "2026-08-07",
+  "note": "First live extraction baseline. Known gap: extract_claims receives only documents.metadata sections, so claims living in TABLES are structurally invisible \u2014 the report's fabricated statistics table accounts for most MISSED entries. Two further misses are matcher artifacts (same claim, different word order, defeating substring containment)."
+}
