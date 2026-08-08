@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from authorai import db as dbmod
+
 
 @dataclass
 class ExtractionScore:
@@ -59,6 +61,16 @@ _STOPWORDS = frozenset(
 OVERLAP_THRESHOLD = 0.6
 
 
+# Relative tolerance for "these are the same number" — used by BOTH the match
+# gate and the pairing tie-breaker; two tolerances would let a row pass the
+# gate yet score no pairing bonus, silently reordering pairs.
+VALUE_TOLERANCE = 0.001
+
+
+def _values_match(a: float | None, b: float | None) -> bool:
+    return a is not None and b is not None and abs(a - b) <= abs(a) * VALUE_TOLERANCE
+
+
 def _tokens(text: str) -> set[str]:
     return {token for token in _normalize(text).split() if token not in _STOPWORDS}
 
@@ -72,14 +84,38 @@ def _overlap(golden_tokens: set[str], extracted_tokens: set[str]) -> float:
 
 def _matches(golden: dict, extracted: dict) -> bool:
     """A golden claim counts as found if value+year line up, or the wording overlaps."""
-    g_value, e_value = golden.get("value"), extracted.get("value")
     g_year, e_year = golden.get("year"), extracted.get("year")
-    if g_value is not None and e_value is not None:
-        values_match = abs(g_value - e_value) <= abs(g_value) * 0.001
-        years_compatible = g_year is None or e_year is None or g_year == e_year
-        if values_match and years_compatible:
-            return True
+    years_compatible = g_year is None or e_year is None or g_year == e_year
+    if _values_match(golden.get("value"), extracted.get("value")) and years_compatible:
+        return True
     return _overlap(_tokens(golden["text"]), _tokens(extracted["text"])) >= OVERLAP_THRESHOLD
+
+
+def _pair(golden: list[dict], rows: list[dict], quality=None):
+    """One-to-one pairing of golden claims to rows; yields (golden_claim, row_index|None).
+
+    The consume-each-row-once rule lives HERE, once, for both scorers. With
+    `quality`, ties among matching rows go to the best-fitting one (verdict
+    scoring — the pairing decides which label a row is compared to); without
+    it, first match wins (extraction scoring — pairing-insensitive counting,
+    and the recorded baselines were produced under first-match; max() returns
+    the first maximum, so a constant key reproduces it exactly).
+    """
+    consumed: set[int] = set()
+    for golden_claim in golden:
+        candidates = [
+            i for i, row in enumerate(rows) if i not in consumed and _matches(golden_claim, row)
+        ]
+        if not candidates:
+            yield golden_claim, None
+            continue
+        hit = (
+            max(candidates, key=lambda i: quality(golden_claim, rows[i]))
+            if quality
+            else candidates[0]
+        )
+        consumed.add(hit)
+        yield golden_claim, hit
 
 
 @dataclass
@@ -107,30 +143,25 @@ class VerdictScore:
 def _pair_quality(golden: dict, row: dict) -> float:
     """How specifically a matching row fits this golden claim.
 
-    Text overlap dominates; a value+year agreement adds a small bonus. This
-    exists because _matches alone is a yes/no gate: two claims sharing a bare
-    value (e.g. "fewer than a dozen" and "12% of Asia's rice", both value=12)
-    both pass it, and for VERDICT scoring the pairing decides which
+    Text overlap dominates; a value agreement adds a small bonus. This exists
+    because _matches alone is a yes/no gate: two claims sharing a bare value
+    (e.g. "fewer than a dozen" and "12% of Asia's rice", both value=12) both
+    pass it, and for VERDICT scoring the pairing decides which
     expected_verdict a row is compared against — first-match pairing silently
     corrupted the first holdout reference (recorded 0.89, true 0.96).
     """
     quality = _overlap(_tokens(golden["text"]), _tokens(row["text"]))
-    g_value, r_value = golden.get("value"), row.get("value")
-    if g_value is not None and r_value is not None:
-        if abs(g_value - r_value) <= abs(g_value) * 0.001:
-            quality += 0.5
+    if _values_match(golden.get("value"), row.get("value")):
+        quality += 0.5
     return quality
 
 
 def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore:
     """Compare stored verdicts against golden expected_verdict labels.
 
-    Rows are matched to golden claims one-to-one; when several unconsumed rows
-    match a golden claim, the BEST-fitting one (text overlap first) is paired —
-    unlike extraction scoring, the pairing here determines which label each
-    verdict is compared to, so first-match is not good enough.
+    Pairing is one-to-one, best-fit (see _pair) — unlike extraction scoring,
+    the pairing here determines which label each verdict is compared to.
     """
-    consumed: set[int] = set()
     correct = 0
     matched = 0
     classes = sorted({g["expected_verdict"] for g in golden})
@@ -139,17 +170,10 @@ def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore
     }
     per_class: dict[str, dict] = {c: {"total": 0, "correct": 0} for c in classes}
 
-    for golden_claim in golden:
-        expected = golden_claim["expected_verdict"]
-        candidates = [
-            i
-            for i, row in enumerate(verdict_rows)
-            if i not in consumed and _matches(golden_claim, row)
-        ]
-        if not candidates:
+    for golden_claim, hit in _pair(golden, verdict_rows, quality=_pair_quality):
+        if hit is None:
             continue
-        hit = max(candidates, key=lambda i: _pair_quality(golden_claim, verdict_rows[i]))
-        consumed.add(hit)
+        expected = golden_claim["expected_verdict"]
         matched += 1
         predicted = verdict_rows[hit]["verdict"]
         per_class[expected]["total"] += 1
@@ -167,38 +191,23 @@ def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore
         coverage=matched / golden_total if golden_total else 0.0,
         per_class=per_class,
         confusion=confusion,
-        # A downgrade is raw != final — quote_verified==0 alone also covers
-        # raw-UNVERIFIABLE verdicts whose volunteered quote failed, which were
-        # never downgraded.
-        downgraded=sum(
-            1 for row in verdict_rows if row.get("raw_verdict") not in (None, row.get("verdict"))
-        ),
+        downgraded=sum(1 for row in verdict_rows if dbmod.is_downgraded(row)),
     )
 
 
 def score_extraction(extracted: list[dict], golden: list[dict]) -> ExtractionScore:
-    matched_extracted: set[int] = set()
     matched = 0
     missed: list[str] = []
-    for golden_claim in golden:
-        hit = next(
-            (
-                i
-                for i, candidate in enumerate(extracted)
-                if i not in matched_extracted and _matches(golden_claim, candidate)
-            ),
-            None,
-        )
+    for golden_claim, hit in _pair(golden, extracted):
         if hit is None:
             missed.append(golden_claim["text"])
         else:
-            matched_extracted.add(hit)
             matched += 1
     golden_total = len(golden)
     extracted_total = len(extracted)
     return ExtractionScore(
         recall=matched / golden_total if golden_total else 0.0,
-        precision=len(matched_extracted) / extracted_total if extracted_total else 0.0,
+        precision=matched / extracted_total if extracted_total else 0.0,
         matched=matched,
         golden_total=golden_total,
         extracted_total=extracted_total,

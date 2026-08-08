@@ -161,18 +161,34 @@ def cmd_extract(args: argparse.Namespace) -> None:
     print(f"{len(claims)} claims extracted and stored")
 
 
-def cmd_eval_extract(args: argparse.Namespace) -> None:
-    _, conn = _setup()
-    golden_path = args.golden
-    # The baseline only means something for the golden set it was recorded
-    # against — comparing a holdout score to the dev baseline would mislead.
-    # Resolve before comparing: the dev golden passed as a relative path must
-    # still count as the dev golden.
-    is_dev = golden_path.resolve() == GOLDEN_PATH.resolve()
-    baseline_path = args.baseline or (BASELINE_PATH if is_dev else None)
+def _resolve_baseline(args: argparse.Namespace, default_path: Path) -> Path | None:
+    """A baseline only means something for the golden set it was recorded
+    against — comparing a holdout score to the dev baseline would mislead.
+    Resolve before comparing so the dev golden passed as a relative path
+    still counts as the dev golden."""
+    if args.baseline:
+        return args.baseline
+    return default_path if args.golden.resolve() == GOLDEN_PATH.resolve() else None
+
+
+def _load_golden_or_exit(golden_path: Path) -> list[dict]:
     if not golden_path.exists():
         raise SystemExit(f"Golden set not found at {golden_path}")
-    golden = load_golden(golden_path)
+    return load_golden(golden_path)
+
+
+def _print_baseline_delta(baseline_path: Path | None, delta_line) -> None:
+    if baseline_path is None:
+        return
+    if baseline_path.exists():
+        print(delta_line(json.loads(baseline_path.read_text())))
+    else:
+        print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
+
+
+def cmd_eval_extract(args: argparse.Namespace) -> None:
+    _, conn = _setup()
+    golden = _load_golden_or_exit(args.golden)
     extracted = dbmod.list_claims(conn, args.run_id)
     if not extracted:
         raise SystemExit(f"Run {args.run_id!r} has no claims — run `extract` first")
@@ -180,17 +196,14 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     print(score.summary())
     for text in score.missed:
         print(f"MISSED: {text}")
-    if baseline_path is None:
-        return
-    if baseline_path.exists():
-        baseline = json.loads(baseline_path.read_text())
-        print(
-            f"baseline: recall {baseline['recall']:.2f}, precision {baseline['precision']:.2f} "
-            f"(delta: recall {score.recall - baseline['recall']:+.2f}, "
-            f"precision {score.precision - baseline['precision']:+.2f})"
-        )
-    else:
-        print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
+    _print_baseline_delta(
+        _resolve_baseline(args, BASELINE_PATH),
+        lambda b: (
+            f"baseline: recall {b['recall']:.2f}, precision {b['precision']:.2f} "
+            f"(delta: recall {score.recall - b['recall']:+.2f}, "
+            f"precision {score.precision - b['precision']:+.2f})"
+        ),
+    )
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
@@ -217,13 +230,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
 def cmd_eval_verdict(args: argparse.Namespace) -> None:
     _, conn = _setup()
-    golden_path = args.golden
-    baseline_path = args.baseline or (
-        VERDICT_BASELINE_PATH if golden_path.resolve() == GOLDEN_PATH.resolve() else None
-    )
-    if not golden_path.exists():
-        raise SystemExit(f"Golden set not found at {golden_path}")
-    golden = load_golden(golden_path)
+    golden = _load_golden_or_exit(args.golden)
     verdict_rows = dbmod.list_verdicts(conn, args.run_id)
     if not verdict_rows:
         raise SystemExit(f"Run {args.run_id!r} has no verdicts — run `verify` first")
@@ -233,16 +240,12 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
         wrong = {p: n for p, n in predicted_counts.items() if n and p != expected}
         if wrong:
             print(f"confused {expected} -> {wrong}")
-    if baseline_path is None:
-        return
-    if baseline_path.exists():
-        baseline = json.loads(baseline_path.read_text())
-        print(
-            f"baseline: accuracy {baseline['accuracy']:.2f} "
-            f"(delta: {score.accuracy - baseline['accuracy']:+.2f})"
-        )
-    else:
-        print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
+    _print_baseline_delta(
+        _resolve_baseline(args, VERDICT_BASELINE_PATH),
+        lambda b: (
+            f"baseline: accuracy {b['accuracy']:.2f} (delta: {score.accuracy - b['accuracy']:+.2f})"
+        ),
+    )
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -260,6 +263,22 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"[{hit.score:.4f} {channels}{page} {hit.kind}] {hit.text[:160]}")
 
 
+def _add_eval_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("run_id")
+    parser.add_argument(
+        "--golden",
+        type=Path,
+        default=GOLDEN_PATH,
+        help="Golden JSONL to score against (default: the dev set)",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Baseline JSON for the delta line (default: the dev baseline, dev golden only)",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="authorai")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -267,7 +286,7 @@ def main() -> None:
     ingest = subparsers.add_parser("ingest", help="Ingest PDFs into a run")
     ingest.add_argument("pdfs", nargs="+", type=Path)
     ingest.add_argument("--run", help="Existing run id (default: create a new run)")
-    ingest.add_argument("--kind", choices=["SOURCE", "REPORT"], default="SOURCE")
+    ingest.add_argument("--kind", choices=dbmod.DOC_KINDS, default="SOURCE")
     ingest.add_argument(
         "--no-describe-figures",
         action="store_true",
@@ -283,19 +302,7 @@ def main() -> None:
     eval_extract = subparsers.add_parser(
         "eval-extract", help="Score extracted claims against the golden set"
     )
-    eval_extract.add_argument("run_id")
-    eval_extract.add_argument(
-        "--golden",
-        type=Path,
-        default=GOLDEN_PATH,
-        help="Golden JSONL to score against (default: the dev set)",
-    )
-    eval_extract.add_argument(
-        "--baseline",
-        type=Path,
-        default=None,
-        help="Baseline JSON for the delta line (default: dev baseline, only with the dev golden)",
-    )
+    _add_eval_args(eval_extract)
     eval_extract.set_defaults(func=cmd_eval_extract)
 
     verify = subparsers.add_parser("verify", help="Verify a run's claims against its sources")
@@ -311,19 +318,7 @@ def main() -> None:
     eval_verdict = subparsers.add_parser(
         "eval-verdict", help="Score stored verdicts against the golden set"
     )
-    eval_verdict.add_argument("run_id")
-    eval_verdict.add_argument(
-        "--golden",
-        type=Path,
-        default=GOLDEN_PATH,
-        help="Golden JSONL to score against (default: the dev set)",
-    )
-    eval_verdict.add_argument(
-        "--baseline",
-        type=Path,
-        default=None,
-        help="Baseline JSON for the delta line (default: dev verdict baseline, dev golden only)",
-    )
+    _add_eval_args(eval_verdict)
     eval_verdict.set_defaults(func=cmd_eval_verdict)
 
     search = subparsers.add_parser("search", help="Hybrid-search a run")

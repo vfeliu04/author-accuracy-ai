@@ -2,6 +2,7 @@ import pytest
 from pydantic import BaseModel
 
 from authorai import db as dbmod
+from authorai.llm import BATCH_MAX_TOKENS, PARSE_MAX_TOKENS
 
 DIM = 8
 
@@ -32,7 +33,9 @@ class FakeLLM:
         self.parse_calls: list[dict] = []
         self.image_calls: int = 0
 
-    def parse(self, *, model, system, prompt, output_type, max_tokens=16000, images=None):
+    def parse(
+        self, *, model, system, prompt, output_type, max_tokens=PARSE_MAX_TOKENS, images=None
+    ):
         self.parse_calls.append(
             {
                 "model": model,
@@ -47,7 +50,7 @@ class FakeLLM:
             return result.pop(0)
         return result
 
-    def parse_batch(self, *, model, items, max_tokens=16000):
+    def parse_batch(self, *, model, items, max_tokens=BATCH_MAX_TOKENS):
         # Mirrors AnthropicClient.parse_batch's contract: dict keyed by custom_id.
         return {
             item.custom_id: self.parse(

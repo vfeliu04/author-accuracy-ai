@@ -13,14 +13,13 @@ in `raw_verdict` so the downgrade rate stays measurable.
 import re
 import sqlite3
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from authorai import db as dbmod
-from authorai.db import VERDICTS
+from authorai.db import VERDICTS, VerdictLiteral
 from authorai.embeddings import Embedder
-from authorai.llm import BATCH_MAX_TOKENS, LLM, ParseItem
+from authorai.llm import LLM, ParseItem
 from authorai.log import setup_logger
 from authorai.search import Hit, hybrid_search
 
@@ -31,6 +30,12 @@ MAX_IMAGES = 2
 # A normalized quote shorter than this ("2024", "hunger") would "verify"
 # against nearly any chunk — too weak to ground a verdict.
 MIN_QUOTE_CHARS = 10
+
+# The policy "these verdicts assert something and therefore need a verified
+# quote; failing that they fall back to the third" — stated once, used by
+# every gate in check_verdict.
+PROVABLE_VERDICTS = ("SUPPORTED", "CONTRADICTED")
+UNPROVEN_VERDICT = "UNVERIFIABLE"
 
 VERDICT_SYSTEM = """\
 You verify one claim from a report against numbered evidence excerpts taken
@@ -66,7 +71,7 @@ class Verdict(BaseModel):
     rather than throw during batch parsing and kill the whole run.
     """
 
-    verdict: Literal["SUPPORTED", "CONTRADICTED", "UNVERIFIABLE"]
+    verdict: VerdictLiteral
     quote: str | None = Field(
         default=None, description="Verbatim quote from ONE evidence excerpt; null for UNVERIFIABLE"
     )
@@ -137,11 +142,10 @@ def check_verdict(claim: dict, verdict: Verdict, hits: list[Hit]) -> dict:
     raw = verdict.verdict
     final = raw
     quote_verified: int | None = None
-    quoted_chunk_id: int | None = None
+    quoted_hit: Hit | None = None
 
-    quote = (verdict.quote or "").strip()
-    normalized = _normalize_quote(quote) if quote else ""
-    if quote and len(normalized) >= MIN_QUOTE_CHARS:
+    normalized = _normalize_quote(verdict.quote or "")
+    if len(normalized) >= MIN_QUOTE_CHARS:
         candidates: list[Hit] = []
         if verdict.evidence_index is not None and 1 <= verdict.evidence_index <= len(hits):
             candidates.append(hits[verdict.evidence_index - 1])
@@ -149,21 +153,21 @@ def check_verdict(claim: dict, verdict: Verdict, hits: list[Hit]) -> dict:
         for hit in candidates:
             if normalized in _normalize_quote(hit.text):
                 quote_verified = 1
-                quoted_chunk_id = hit.chunk_id
+                quoted_hit = hit
                 break
         else:
             quote_verified = 0
-    elif raw in ("SUPPORTED", "CONTRADICTED"):
+    elif raw in PROVABLE_VERDICTS:
         # Missing or trivially short quote where one is mandatory.
         quote_verified = 0
 
-    if raw in ("SUPPORTED", "CONTRADICTED") and quote_verified != 1:
-        final = "UNVERIFIABLE"
+    if raw in PROVABLE_VERDICTS and quote_verified != 1:
+        final = UNPROVEN_VERDICT
         logger.info("verdict downgraded to UNVERIFIABLE (quote check failed) claim=%s", claim["id"])
 
     year_flag: int | None = None
-    if claim.get("year") is not None and final in ("SUPPORTED", "CONTRADICTED"):
-        quoted_hit = next(h for h in hits if h.chunk_id == quoted_chunk_id)
+    if claim.get("year") is not None and final in PROVABLE_VERDICTS:
+        # final in PROVABLE_VERDICTS implies the quote verified, so quoted_hit is set.
         year_flag = 0 if re.search(rf"\b{claim['year']}\b", quoted_hit.text) else 1
 
     return {
@@ -172,10 +176,26 @@ def check_verdict(claim: dict, verdict: Verdict, hits: list[Hit]) -> dict:
         "raw_verdict": raw,
         "quote": verdict.quote,
         "quote_verified": quote_verified,
-        "quoted_chunk_id": quoted_chunk_id,
+        "quoted_chunk_id": quoted_hit.chunk_id if quoted_hit else None,
         "evidence_chunk_ids": [hit.chunk_id for hit in hits],
         "year_flag": year_flag,
         "rationale": verdict.rationale,
+    }
+
+
+def _no_evidence_row(claim_id: str) -> dict:
+    """The verdict row for a claim retrieval found nothing for — the one
+    other place besides check_verdict that builds the row shape."""
+    return {
+        "claim_id": claim_id,
+        "verdict": UNPROVEN_VERDICT,
+        "raw_verdict": UNPROVEN_VERDICT,
+        "quote": None,
+        "quote_verified": None,
+        "quoted_chunk_id": None,
+        "evidence_chunk_ids": [],
+        "year_flag": None,
+        "rationale": "No evidence retrieved from the source documents.",
     }
 
 
@@ -257,44 +277,31 @@ def verify_run(
         )
 
     evidence = retrieve_evidence(conn, embedder, run_id, claims, k=k)
+    claims_by_id = {claim["id"]: claim for claim in claims}
 
     rows: list[dict] = []
     items: list[ParseItem] = []
-    judged_claims: dict[str, dict] = {}
     for claim in claims:
         hits = evidence[claim["id"]]
         if not hits:
             # Nothing retrieved: there is no judgment to make — bookkeeping,
             # not a silent fallback, and logged as such.
             logger.warning("no evidence retrieved for claim %s — UNVERIFIABLE", claim["id"])
-            rows.append(
-                {
-                    "claim_id": claim["id"],
-                    "verdict": "UNVERIFIABLE",
-                    "raw_verdict": "UNVERIFIABLE",
-                    "quote": None,
-                    "quote_verified": None,
-                    "quoted_chunk_id": None,
-                    "evidence_chunk_ids": [],
-                    "year_flag": None,
-                    "rationale": "No evidence retrieved from the source documents.",
-                }
-            )
+            rows.append(_no_evidence_row(claim["id"]))
             continue
-        judged_claims[claim["id"]] = claim
         items.append(
             ParseItem(
                 custom_id=claim["id"],
                 system=VERDICT_SYSTEM,
                 prompt=build_verdict_prompt(claim, hits),
                 output_type=Verdict,
-                images=images_for(conn, hits) or None,
+                images=images_for(conn, hits),
             )
         )
 
     if items:
         if batch:
-            results = llm.parse_batch(model=model, items=items, max_tokens=BATCH_MAX_TOKENS)
+            results = llm.parse_batch(model=model, items=items)
         else:
             # Deliberate divergence: sync is the debug path and stays at the
             # non-streaming ceiling (PARSE_MAX_TOKENS); a thinking-heavy claim
@@ -310,7 +317,7 @@ def verify_run(
                 for item in items
             }
         for claim_id, verdict in results.items():
-            rows.append(check_verdict(judged_claims[claim_id], verdict, evidence[claim_id]))
+            rows.append(check_verdict(claims_by_id[claim_id], verdict, evidence[claim_id]))
 
     for row in rows:
         row["model"] = model
@@ -318,9 +325,7 @@ def verify_run(
 
     return {
         "counts": {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS},
-        # raw != final is the downgrade; quote_verified==0 alone also counts
-        # raw-UNVERIFIABLE verdicts whose volunteered quote failed.
-        "downgraded": sum(1 for r in rows if r["raw_verdict"] != r["verdict"]),
+        "downgraded": sum(1 for r in rows if dbmod.is_downgraded(r)),
         "year_flagged": sum(1 for r in rows if r["year_flag"] == 1),
         "no_evidence": sum(1 for r in rows if not r["evidence_chunk_ids"]),
         "total": len(rows),

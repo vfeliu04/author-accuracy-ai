@@ -10,6 +10,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, get_args
 
 import sqlite_vec
 from sqlite_vec import serialize_float32
@@ -20,9 +21,22 @@ SCHEMA_VERSION = 4
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
-# Shared with verification.py — the DB CHECK constraints and the Verdict model
-# must never drift apart.
-VERDICTS = ("SUPPORTED", "CONTRADICTED", "UNVERIFIABLE")
+DOC_KINDS = ("SOURCE", "REPORT")
+
+# THE verdict vocabulary: the Verdict model annotates with the Literal and the
+# SQL CHECK interpolates the derived tuple, so the two cannot drift apart.
+VerdictLiteral = Literal["SUPPORTED", "CONTRADICTED", "UNVERIFIABLE"]
+VERDICTS: tuple[str, ...] = get_args(VerdictLiteral)
+
+
+def is_downgraded(verdict_row: dict) -> bool:
+    """Did the code checks downgrade this verdict from what the model said?
+
+    The one definition both the pipeline summary and the eval scorer use —
+    quote_verified==0 alone is NOT it (a raw-UNVERIFIABLE verdict whose
+    volunteered quote failed was never downgraded).
+    """
+    return verdict_row.get("raw_verdict") not in (None, verdict_row.get("verdict"))
 
 
 def now_iso() -> str:

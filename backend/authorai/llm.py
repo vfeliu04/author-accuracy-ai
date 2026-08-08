@@ -69,7 +69,7 @@ class LLM(Protocol):
         *,
         model: str,
         items: list[ParseItem],
-        max_tokens: int = PARSE_MAX_TOKENS,
+        max_tokens: int = BATCH_MAX_TOKENS,
     ) -> dict[str, BaseModel]: ...
 
     def describe_image(
@@ -77,24 +77,35 @@ class LLM(Protocol):
     ) -> str: ...
 
 
+def _image_block(png_bytes: bytes) -> dict:
+    """THE Anthropic image content block — every image this module sends goes
+    through here, so the wire shape exists once."""
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.standard_b64encode(png_bytes).decode("ascii"),
+        },
+    }
+
+
 def _content(prompt: str, images: "list[Path] | None"):
     """User-message content: the plain string, or image blocks before the text."""
     if not images:
         return prompt
-    blocks = []
-    for path in images:
-        data = base64.standard_b64encode(Path(path).read_bytes()).decode("ascii")
-        blocks.append(
-            {
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/png", "data": data},
-            }
-        )
+    blocks = [_image_block(Path(path).read_bytes()) for path in images]
     blocks.append({"type": "text", "text": prompt})
     return blocks
 
 
-def build_batch_request(item: ParseItem, model: str, max_tokens: int = PARSE_MAX_TOKENS):
+def _first_text(message) -> str | None:
+    """The first text block's text — thinking blocks precede it, so never
+    index content[0]."""
+    return next((b.text for b in message.content if b.type == "text"), None)
+
+
+def build_batch_request(item: ParseItem, model: str, max_tokens: int = BATCH_MAX_TOKENS):
     """The Batch API request for one ParseItem.
 
     transform_schema() produces exactly the schema messages.parse() would send,
@@ -165,9 +176,7 @@ class AnthropicClient:
         *,
         model: str,
         items: list[ParseItem],
-        max_tokens: int = PARSE_MAX_TOKENS,
-        poll_seconds: float = BATCH_POLL_SECONDS,
-        timeout_seconds: float = BATCH_TIMEOUT_SECONDS,
+        max_tokens: int = BATCH_MAX_TOKENS,
     ) -> dict[str, BaseModel]:
         """Run all items through the Batch API; returns results keyed by custom_id.
 
@@ -185,7 +194,7 @@ class AnthropicClient:
             "batch %s created (%d items) — reattach by id if interrupted", batch.id, len(items)
         )
 
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + BATCH_TIMEOUT_SECONDS
         while True:
             batch = self._client.messages.batches.retrieve(batch.id)
             if batch.processing_status == "ended":
@@ -193,44 +202,45 @@ class AnthropicClient:
             if time.monotonic() > deadline:
                 raise TimeoutError(
                     f"Batch {batch.id} still {batch.processing_status!r} after "
-                    f"{timeout_seconds}s — it is still queued server-side; re-poll or cancel it"
+                    f"{BATCH_TIMEOUT_SECONDS}s — it is still queued server-side; "
+                    "re-poll or cancel it"
                 )
-            time.sleep(poll_seconds)
+            time.sleep(BATCH_POLL_SECONDS)
 
         output_types = {item.custom_id: item.output_type for item in items}
         parsed: dict[str, BaseModel] = {}
-        failures: list[str] = []
+        # Keyed by custom_id so nothing ever parses ids back out of message
+        # strings (and a custom_id that prefixes another can't mask a failure).
+        failures: dict[str, str] = {}
         for result in self._client.messages.batches.results(batch.id):
             custom_id = result.custom_id
             if result.result.type != "succeeded":
-                failures.append(f"{custom_id}: {result.result.type}")
+                failures[custom_id] = result.result.type
                 continue
             message = result.result.message
             self._log_usage(model, message)
             if message.stop_reason == "max_tokens":
-                failures.append(f"{custom_id}: output truncated at max_tokens")
+                failures[custom_id] = "output truncated at max_tokens"
                 continue
-            # Thinking blocks precede the text block — never index content[0].
-            text = next((b.text for b in message.content if b.type == "text"), None)
+            text = _first_text(message)
             if text is None:
-                failures.append(f"{custom_id}: no text block (stop_reason={message.stop_reason!r})")
+                failures[custom_id] = f"no text block (stop_reason={message.stop_reason!r})"
                 continue
             try:
                 parsed[custom_id] = output_types[custom_id].model_validate_json(text)
             except Exception as exc:  # noqa: BLE001 - recorded per item, raised in aggregate
-                failures.append(f"{custom_id}: unparseable output ({exc})")
+                failures[custom_id] = f"unparseable output ({exc})"
         for custom_id in output_types:
-            if custom_id not in parsed and not any(f.startswith(custom_id) for f in failures):
-                failures.append(f"{custom_id}: no result returned")
+            if custom_id not in parsed and custom_id not in failures:
+                failures[custom_id] = "no result returned"
 
         if failures:
             # One sync retry per failed item — loudly logged, never silent.
             items_by_id = {item.custom_id: item for item in items}
             still_failing: list[str] = []
-            for failure in failures:
-                custom_id = failure.split(":", 1)[0]
+            for custom_id, reason in failures.items():
                 item = items_by_id[custom_id]
-                logger.warning("batch item failed (%s) — retrying once sync", failure)
+                logger.warning("batch item %s failed (%s) — retrying once sync", custom_id, reason)
                 try:
                     parsed[custom_id] = self.parse(
                         model=model,
@@ -246,7 +256,7 @@ class AnthropicClient:
                         timeout=600.0,
                     )
                 except Exception as exc:  # noqa: BLE001 - aggregated below
-                    still_failing.append(f"{failure}; retry: {exc}")
+                    still_failing.append(f"{custom_id}: {reason}; retry: {exc}")
             if still_failing:
                 raise RuntimeError(
                     f"Batch {batch.id}: {len(still_failing)}/{len(items)} items failed even "
@@ -260,7 +270,6 @@ class AnthropicClient:
     ) -> str:
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        data = base64.standard_b64encode(buffer.getvalue()).decode("ascii")
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -268,21 +277,14 @@ class AnthropicClient:
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": data,
-                            },
-                        },
+                        _image_block(buffer.getvalue()),
                         {"type": "text", "text": prompt},
                     ],
                 }
             ],
         )
         self._log_usage(model, response)
-        text = next((block.text for block in response.content if block.type == "text"), "")
+        text = _first_text(response) or ""
         if not text.strip():
             raise RuntimeError(
                 f"LLM image call returned no text (stop_reason={response.stop_reason!r})"
