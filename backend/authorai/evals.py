@@ -104,12 +104,31 @@ class VerdictScore:
         )
 
 
+def _pair_quality(golden: dict, row: dict) -> float:
+    """How specifically a matching row fits this golden claim.
+
+    Text overlap dominates; a value+year agreement adds a small bonus. This
+    exists because _matches alone is a yes/no gate: two claims sharing a bare
+    value (e.g. "fewer than a dozen" and "12% of Asia's rice", both value=12)
+    both pass it, and for VERDICT scoring the pairing decides which
+    expected_verdict a row is compared against — first-match pairing silently
+    corrupted the first holdout reference (recorded 0.89, true 0.96).
+    """
+    quality = _overlap(_tokens(golden["text"]), _tokens(row["text"]))
+    g_value, r_value = golden.get("value"), row.get("value")
+    if g_value is not None and r_value is not None:
+        if abs(g_value - r_value) <= abs(g_value) * 0.001:
+            quality += 0.5
+    return quality
+
+
 def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore:
     """Compare stored verdicts against golden expected_verdict labels.
 
-    Rows are matched to golden claims greedily one-to-one with the same
-    matcher extraction scoring uses — a verdict row consumed by one golden
-    claim can never also count for another.
+    Rows are matched to golden claims one-to-one; when several unconsumed rows
+    match a golden claim, the BEST-fitting one (text overlap first) is paired —
+    unlike extraction scoring, the pairing here determines which label each
+    verdict is compared to, so first-match is not good enough.
     """
     consumed: set[int] = set()
     correct = 0
@@ -122,16 +141,14 @@ def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore
 
     for golden_claim in golden:
         expected = golden_claim["expected_verdict"]
-        hit = next(
-            (
-                i
-                for i, row in enumerate(verdict_rows)
-                if i not in consumed and _matches(golden_claim, row)
-            ),
-            None,
-        )
-        if hit is None:
+        candidates = [
+            i
+            for i, row in enumerate(verdict_rows)
+            if i not in consumed and _matches(golden_claim, row)
+        ]
+        if not candidates:
             continue
+        hit = max(candidates, key=lambda i: _pair_quality(golden_claim, verdict_rows[i]))
         consumed.add(hit)
         matched += 1
         predicted = verdict_rows[hit]["verdict"]
@@ -150,7 +167,12 @@ def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore
         coverage=matched / golden_total if golden_total else 0.0,
         per_class=per_class,
         confusion=confusion,
-        downgraded=sum(1 for row in verdict_rows if row.get("quote_verified") == 0),
+        # A downgrade is raw != final — quote_verified==0 alone also covers
+        # raw-UNVERIFIABLE verdicts whose volunteered quote failed, which were
+        # never downgraded.
+        downgraded=sum(
+            1 for row in verdict_rows if row.get("raw_verdict") not in (None, row.get("verdict"))
+        ),
     )
 
 

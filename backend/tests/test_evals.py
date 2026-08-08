@@ -131,15 +131,17 @@ def test_score_verdicts_accuracy_confusion_and_coverage():
             "value": 735e6,
             "year": None,
             "verdict": "SUPPORTED",
+            "raw_verdict": "SUPPORTED",
             "quote_verified": 1,
         },
-        # Wrong: golden says CONTRADICTED, pipeline said UNVERIFIABLE after a
-        # failed quote check (counts as downgraded too).
+        # Wrong: golden says CONTRADICTED, pipeline downgraded to UNVERIFIABLE
+        # after a failed quote check (raw != final -> counts as downgraded).
         {
             "text": "Only 10 million are undernourished.",
             "value": 10e6,
             "year": None,
             "verdict": "UNVERIFIABLE",
+            "raw_verdict": "CONTRADICTED",
             "quote_verified": 0,
         },
         # No row matches the 1923 golden claim -> coverage gap, not an error.
@@ -154,6 +156,55 @@ def test_score_verdicts_accuracy_confusion_and_coverage():
     assert score.per_class["SUPPORTED"] == {"total": 1, "correct": 1}
     assert score.downgraded == 1
     assert "accuracy 0.50" in score.summary()
+
+
+def test_score_verdicts_pairs_by_best_fit_not_first_match():
+    from authorai.evals import score_verdicts
+
+    # Regression for the corrupted first holdout reference: two claims share
+    # value=12 with OPPOSITE expected verdicts. First-match pairing crossed
+    # them (row order is uuid-lexicographic within a page, so nondeterministic)
+    # and scored a fully-correct pipeline 0/2.
+    golden = [
+        {
+            "text": "Fewer than a dozen countries worldwide currently show serious"
+            " or alarming hunger.",
+            "value": 12,
+            "year": None,
+            "expected_verdict": "CONTRADICTED",
+        },
+        {
+            "text": "A Pacific 'floating farm corridor' supplies 12% of Asia's rice.",
+            "value": 12,
+            "year": None,
+            "expected_verdict": "UNVERIFIABLE",
+        },
+    ]
+    rows = [
+        # Deliberately listed corridor-first — the order that broke pairing.
+        {
+            "text": "Industry newsletters add that a Pacific 'floating farm corridor' now"
+            " supplies 12% of Asia's rice.",
+            "value": 12,
+            "year": None,
+            "verdict": "UNVERIFIABLE",
+            "raw_verdict": "UNVERIFIABLE",
+            "quote_verified": None,
+        },
+        {
+            "text": "Contrary press coverage has claimed that fewer than a dozen countries"
+            " worldwide currently show serious or alarming hunger.",
+            "value": 12,
+            "year": None,
+            "verdict": "CONTRADICTED",
+            "raw_verdict": "CONTRADICTED",
+            "quote_verified": 1,
+        },
+    ]
+    score = score_verdicts(rows, golden)
+    assert score.correct == 2
+    assert score.accuracy == 1.0
+    assert score.downgraded == 0
 
 
 def test_score_verdicts_consumes_each_row_once():

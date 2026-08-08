@@ -140,8 +140,12 @@ class AnthropicClient:
         output_type: type[ModelT],
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
+        timeout: float | None = None,
     ) -> ModelT:
-        response = self._client.messages.parse(
+        # An explicit timeout lifts the SDK's non-streaming max_tokens guard —
+        # used by the batch retry so a thinking-heavy item keeps its headroom.
+        client = self._client if timeout is None else self._client.with_options(timeout=timeout)
+        response = client.messages.parse(
             model=model,
             max_tokens=max_tokens,
             system=system,
@@ -233,10 +237,13 @@ class AnthropicClient:
                         system=item.system,
                         prompt=item.prompt,
                         output_type=item.output_type,
-                        # Sync must stay under the SDK's non-streaming ceiling
-                        # even when the batch ran with more headroom.
-                        max_tokens=min(max_tokens, PARSE_MAX_TOKENS),
+                        # Full batch headroom: capping the retry at the sync
+                        # ceiling would re-truncate the exact thinking-heavy
+                        # items the retry exists for. The explicit timeout
+                        # lifts the SDK's non-streaming guard.
+                        max_tokens=max_tokens,
                         images=item.images,
+                        timeout=600.0,
                     )
                 except Exception as exc:  # noqa: BLE001 - aggregated below
                     still_failing.append(f"{failure}; retry: {exc}")

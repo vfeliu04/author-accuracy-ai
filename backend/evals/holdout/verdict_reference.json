@@ -1,17 +1,17 @@
 {
-  "accuracy": 0.89,
-  "correct": 24,
+  "accuracy": 0.963,
+  "correct": 26,
   "matched": 27,
   "golden_total": 27,
   "coverage": 1.0,
   "per_class": {
     "SUPPORTED": "15/15",
-    "CONTRADICTED": "7/8",
-    "UNVERIFIABLE": "2/4"
+    "CONTRADICTED": "8/8",
+    "UNVERIFIABLE": "3/4"
   },
   "downgraded": 0,
   "model": "claude-opus-5",
   "run_id": "3eb1a2435c3b477f958095fd11934438",
   "recorded": "2026-08-08",
-  "note": "Holdout verdict reference at the Phase 4 close (judge prompt v1). HIGHER than dev (0.78): the holdout states fabrications straight and the judge handles bare assertions well (SUPPORTED 15/15, every bare fabrication correctly CONTRADICTED); dev's misses concentrate in its 'some analyses claim X' reported-speech framing. The 2 UNVERIFIABLE->CONTRADICTED misses are the deliberately borderline convention cases (Protein Accord 2027, Iceland certification). One batch item needed the sync retry. Policy: phase boundaries only, never tune against."
+  "note": "CORRECTED holdout verdict reference (judge prompt v1). The first recording (0.89) was corrupted by a scorer bug found in the phase-end review: value-only matching cross-paired the two value=12 claims ('fewer than a dozen' vs 'floating farm corridor'), charging the pipeline with two errors it never made; the note's Iceland miss never happened. With best-fit pairing: every bare fabrication correctly CONTRADICTED (8/8), SUPPORTED 15/15, and the single true miss is the deliberately borderline Protein Accord (UNVERIFIABLE judged CONTRADICTED). Dev numbers were never affected \u2014 its golden values are collision-free. Policy: phase boundaries only, never tune against."
 }

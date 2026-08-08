@@ -18,7 +18,7 @@ from authorai.evals import load_golden, score_extraction, score_verdicts
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
 from authorai.llm import AnthropicClient
 from authorai.search import hybrid_search
-from authorai.verification import verify_run
+from authorai.verification import EVIDENCE_K, verify_run
 
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
@@ -166,7 +166,10 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     golden_path = args.golden
     # The baseline only means something for the golden set it was recorded
     # against — comparing a holdout score to the dev baseline would mislead.
-    baseline_path = args.baseline or (BASELINE_PATH if golden_path == GOLDEN_PATH else None)
+    # Resolve before comparing: the dev golden passed as a relative path must
+    # still count as the dev golden.
+    is_dev = golden_path.resolve() == GOLDEN_PATH.resolve()
+    baseline_path = args.baseline or (BASELINE_PATH if is_dev else None)
     if not golden_path.exists():
         raise SystemExit(f"Golden set not found at {golden_path}")
     golden = load_golden(golden_path)
@@ -215,7 +218,9 @@ def cmd_verify(args: argparse.Namespace) -> None:
 def cmd_eval_verdict(args: argparse.Namespace) -> None:
     _, conn = _setup()
     golden_path = args.golden
-    baseline_path = args.baseline or (VERDICT_BASELINE_PATH if golden_path == GOLDEN_PATH else None)
+    baseline_path = args.baseline or (
+        VERDICT_BASELINE_PATH if golden_path.resolve() == GOLDEN_PATH.resolve() else None
+    )
     if not golden_path.exists():
         raise SystemExit(f"Golden set not found at {golden_path}")
     golden = load_golden(golden_path)
@@ -300,7 +305,7 @@ def main() -> None:
         action="store_true",
         help="Per-claim sync calls instead of the Batch API (full price, immediate)",
     )
-    verify.add_argument("-k", type=int, default=8, help="Evidence chunks per claim")
+    verify.add_argument("-k", type=int, default=EVIDENCE_K, help="Evidence chunks per claim")
     verify.set_defaults(func=cmd_verify)
 
     eval_verdict = subparsers.add_parser(

@@ -213,8 +213,8 @@ def test_batch_failed_item_is_retried_sync_once(monkeypatch):
     )
     retried = []
 
-    def fake_parse(*, model, system, prompt, output_type, max_tokens, images=None):
-        retried.append({"prompt": prompt, "max_tokens": max_tokens})
+    def fake_parse(*, model, system, prompt, output_type, max_tokens, images=None, timeout=None):
+        retried.append({"prompt": prompt, "max_tokens": max_tokens, "timeout": timeout})
         return _verdict(verdict="UNVERIFIABLE", quote=None, evidence_index=None)
 
     monkeypatch.setattr(client, "parse", fake_parse)
@@ -224,7 +224,11 @@ def test_batch_failed_item_is_retried_sync_once(monkeypatch):
     assert results["bad"].verdict == "UNVERIFIABLE"
     [retry] = retried
     assert retry["prompt"] == "p2"
-    assert retry["max_tokens"] == 16000  # capped for sync — SDK non-streaming ceiling
+    # Full batch headroom — a capped retry would re-truncate the exact
+    # thinking-heavy items the retry exists for. The explicit timeout lifts
+    # the SDK's non-streaming guard.
+    assert retry["max_tokens"] == 32000
+    assert retry["timeout"] == 600.0
 
 
 def test_batch_item_failing_twice_raises_listing_it(monkeypatch):
@@ -317,8 +321,11 @@ def test_verify_run_never_shows_report_chunks_to_the_judge(conn, verified_run):
 
 
 def test_verify_run_guards(conn):
-    run_id = dbmod.create_run(conn)
     embedder = FakeEmbedder(dim=DIM)
+    with pytest.raises(ValueError, match="Unknown run"):
+        verify_run(conn, embedder, FakeLLM(), "no-such-run", model="m")
+
+    run_id = dbmod.create_run(conn)
     with pytest.raises(ValueError, match="no claims"):
         verify_run(conn, embedder, FakeLLM(), run_id, model="m")
 
@@ -326,6 +333,15 @@ def test_verify_run_guards(conn):
     dbmod.add_claims(conn, run_id, report, [{"text": "A claim."}])
     with pytest.raises(ValueError, match="no SOURCE"):
         verify_run(conn, embedder, FakeLLM(), run_id, model="m")
+
+    # A SOURCE document with no chunks is still no evidence — the guard must
+    # count source CONTENT, not source documents.
+    dbmod.add_document(conn, run_id, "SOURCE")
+    with pytest.raises(ValueError, match="no SOURCE content"):
+        verify_run(conn, embedder, FakeLLM(), run_id, model="m")
+
+    with pytest.raises(ValueError, match="k must be >= 1"):
+        verify_run(conn, embedder, FakeLLM(), run_id, model="m", k=0)
 
 
 def test_figure_evidence_attaches_image(conn, tmp_path):

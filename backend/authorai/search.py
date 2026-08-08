@@ -17,6 +17,7 @@ from authorai.embeddings import normalize
 
 RRF_K = 60  # standard damping constant: score = sum(1 / (RRF_K + rank))
 CHANNEL_K = 20  # candidates fetched per channel before fusion
+MAX_KNN_K = 4096  # sqlite-vec vec0 hard cap on k — exceeding it errors the query
 
 
 @dataclass
@@ -74,7 +75,11 @@ def vector_search(
             """,
             (run_id, doc_kind),
         ).fetchone()[0]
-        knn_k = k + excluded
+        # Cap at sqlite-vec's hard limit: beyond it the query errors outright.
+        # On a run with >4096 excluded chunks the widening guarantee weakens
+        # (the filtered channel may return fewer than k) — the keyword channel
+        # still contributes, and RRF tolerates a thin channel.
+        knn_k = min(k + excluded, MAX_KNN_K)
     rows = conn.execute(
         """
         SELECT chunk_id FROM chunks_vec

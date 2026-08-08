@@ -231,15 +231,28 @@ def verify_run(
     batch: bool = True,
 ) -> dict:
     """Verify every claim in a run; stores verdicts (replacing) and returns a summary."""
+    if k < 1:
+        raise ValueError(
+            f"k must be >= 1, got {k} — zero evidence would silently "
+            "replace every verdict with UNVERIFIABLE"
+        )
+    if dbmod.get_run(conn, run_id) is None:
+        raise ValueError(f"Unknown run {run_id!r}")
     claims = dbmod.list_claims(conn, run_id)
     if not claims:
         raise ValueError(f"Run {run_id!r} has no claims — run `extract` first")
-    sources = conn.execute(
-        "SELECT count(*) FROM documents WHERE run_id = ? AND kind = 'SOURCE'", (run_id,)
+    # Chunks of SOURCE docs, not SOURCE docs: a chunk-less source would pass a
+    # document count and still make every verdict vacuously UNVERIFIABLE.
+    source_chunks = conn.execute(
+        """
+        SELECT count(*) FROM chunks c JOIN documents d ON d.id = c.doc_id
+        WHERE c.run_id = ? AND d.kind = 'SOURCE'
+        """,
+        (run_id,),
     ).fetchone()[0]
-    if not sources:
+    if not source_chunks:
         raise ValueError(
-            f"Run {run_id!r} has no SOURCE documents — every verdict would be "
+            f"Run {run_id!r} has no SOURCE content — every verdict would be "
             "vacuously UNVERIFIABLE; ingest sources first"
         )
 
@@ -283,6 +296,9 @@ def verify_run(
         if batch:
             results = llm.parse_batch(model=model, items=items, max_tokens=BATCH_MAX_TOKENS)
         else:
+            # Deliberate divergence: sync is the debug path and stays at the
+            # non-streaming ceiling (PARSE_MAX_TOKENS); a thinking-heavy claim
+            # that truncates here fails loudly — rerun with batch.
             results = {
                 item.custom_id: llm.parse(
                     model=model,
@@ -302,7 +318,9 @@ def verify_run(
 
     return {
         "counts": {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICTS},
-        "downgraded": sum(1 for r in rows if r["quote_verified"] == 0),
+        # raw != final is the downgrade; quote_verified==0 alone also counts
+        # raw-UNVERIFIABLE verdicts whose volunteered quote failed.
+        "downgraded": sum(1 for r in rows if r["raw_verdict"] != r["verdict"]),
         "year_flagged": sum(1 for r in rows if r["year_flag"] == 1),
         "no_evidence": sum(1 for r in rows if not r["evidence_chunk_ids"]),
         "total": len(rows),
