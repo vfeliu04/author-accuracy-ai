@@ -22,5 +22,5 @@
     "noise_floor": "rubric component noise \u00b12-3 pts over 3 same-code runs (34.6/39.2/35.1); treat small deltas as noise",
     "note": "Low score is plausibly CORRECT for the fake report \u2014 it is deliberately self-contradicting with no methodology section."
   },
-  "note": "Reference snapshot, not a golden eval \u2014 there is no labeled truth for these scores. Exists so future scoring changes have a comparison point."
+  "note": "Reference snapshot, not a golden eval \u2014 there is no labeled truth for these scores. Exists so future scoring changes have a comparison point. Re-verified 2026-08-12 after the phase-end review's credibility hardening (Crossref retry-then-raise, DOI cleaning, phrase publisher matching, corroboration changes): accuracy and credibility byte-identical, validity 42.5 (within the \u00b12-3 rubric noise)."
 }
