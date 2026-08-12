@@ -49,16 +49,23 @@ def new_id() -> str:
     return uuid.uuid4().hex
 
 
-def connect(db_path: Path | str, embedding_dim: int) -> sqlite3.Connection:
+def connect(
+    db_path: Path | str, embedding_dim: int, *, check_same_thread: bool = True
+) -> sqlite3.Connection:
     """Open (creating/migrating if needed) the database.
 
     Fails loudly if the database was created with a different embedding
     dimension than the one configured — a dimension mismatch would otherwise
     corrupt every similarity search silently.
+
+    `check_same_thread=False` is for the API's per-request connections only:
+    FastAPI runs a request's dependencies and its endpoint on different
+    threadpool threads, but strictly one at a time, so cross-thread use is
+    sequential and safe. Everything else keeps the thread guard.
     """
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -548,6 +555,28 @@ def list_verdicts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         """
         SELECT v.*, c.text, c.value, c.unit, c.year, c.page
         FROM verdicts v JOIN claims c ON c.id = v.claim_id
+        WHERE v.run_id = ? ORDER BY c.page, c.id
+        """,
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_verdicts_with_evidence(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """list_verdicts plus where each quoted evidence chunk came from.
+
+    LEFT JOINs (a verdict may cite no chunk) resolve quoted_chunk_id to its
+    source document and page, so the report endpoint can show the reader which
+    source backs each verdict without a second round of queries.
+    """
+    rows = conn.execute(
+        """
+        SELECT v.*, c.text, c.value, c.unit, c.year, c.page,
+               ch.page AS evidence_page, d.id AS evidence_doc_id, d.title AS evidence_doc_title
+        FROM verdicts v
+        JOIN claims c ON c.id = v.claim_id
+        LEFT JOIN chunks ch ON ch.id = v.quoted_chunk_id
+        LEFT JOIN documents d ON d.id = ch.doc_id
         WHERE v.run_id = ? ORDER BY c.page, c.id
         """,
         (run_id,),

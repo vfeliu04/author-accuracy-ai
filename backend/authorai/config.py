@@ -46,3 +46,9 @@ class Settings(BaseSettings):
     authority_tier2: str = "Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier"
     crossref_mailto: str | None = None
     job_poll_seconds: float = 2.0
+    # HTTP layer. api_key unset means the app REFUSES to start (fail-closed —
+    # v1 served everything openly when its key env var was missing).
+    api_key: str | None = None
+    uploads_dir: Path = Path("data/uploads")
+    max_upload_bytes: int = 50_000_000
+    cors_origins: str = "http://localhost:5173"
