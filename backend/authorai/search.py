@@ -17,7 +17,6 @@ from authorai.embeddings import normalize
 
 RRF_K = 60  # standard damping constant: score = sum(1 / (RRF_K + rank))
 CHANNEL_K = 20  # candidates fetched per channel before fusion
-MAX_KNN_K = 4096  # sqlite-vec vec0 hard cap on k — exceeding it errors the query
 
 
 @dataclass
@@ -33,24 +32,6 @@ class Hit:
     figure_id: str | None = None
 
 
-def _allowed_chunk_ids(
-    conn: sqlite3.Connection, run_id: str, chunk_ids: list[int], doc_kind: str
-) -> set[int]:
-    """The subset of `chunk_ids` whose document has the given kind."""
-    if not chunk_ids:
-        return set()
-    placeholders = ", ".join("?" for _ in chunk_ids)
-    rows = conn.execute(
-        f"""
-        SELECT c.id FROM chunks c
-        JOIN documents d ON d.id = c.doc_id
-        WHERE c.run_id = ? AND d.kind = ? AND c.id IN ({placeholders})
-        """,
-        (run_id, doc_kind, *chunk_ids),
-    ).fetchall()
-    return {row["id"] for row in rows}
-
-
 def vector_search(
     conn: sqlite3.Connection,
     run_id: str,
@@ -60,39 +41,23 @@ def vector_search(
 ) -> list[int]:
     """Chunk ids by ascending vector distance, scoped to one run.
 
-    With `doc_kind`, only chunks from documents of that kind are returned.
-    chunks_vec has no doc column, so the KNN k is widened by the exact number
-    of other-kind chunks in the run before filtering — filtering the top k
-    post-hoc would silently starve the channel when the excluded document
-    dominates the neighborhood (a claim's own report always does).
+    `doc_kind` is a PARTITION KEY on chunks_vec (like run_id), so the filter
+    is index-native and exact — no over-fetching, no post-filter, and no k cap
+    to starve the channel when the excluded document dominates the neighborhood.
     """
-    knn_k = k
+    kind_filter = "" if doc_kind is None else "AND doc_kind = ?"
+    params: tuple = (serialize_float32(normalize(query_embedding)), k, run_id)
     if doc_kind is not None:
-        excluded = conn.execute(
-            """
-            SELECT count(*) FROM chunks c JOIN documents d ON d.id = c.doc_id
-            WHERE c.run_id = ? AND d.kind != ?
-            """,
-            (run_id, doc_kind),
-        ).fetchone()[0]
-        # Cap at sqlite-vec's hard limit: beyond it the query errors outright.
-        # On a run with >4096 excluded chunks the widening guarantee weakens
-        # (the filtered channel may return fewer than k) — the keyword channel
-        # still contributes, and RRF tolerates a thin channel.
-        knn_k = min(k + excluded, MAX_KNN_K)
+        params = (*params, doc_kind)
     rows = conn.execute(
-        """
+        f"""
         SELECT chunk_id FROM chunks_vec
-        WHERE embedding MATCH ? AND k = ? AND run_id = ?
+        WHERE embedding MATCH ? AND k = ? AND run_id = ? {kind_filter}
         ORDER BY distance
         """,
-        (serialize_float32(normalize(query_embedding)), knn_k, run_id),
+        params,
     ).fetchall()
-    ordered = [row["chunk_id"] for row in rows]
-    if doc_kind is None:
-        return ordered
-    allowed = _allowed_chunk_ids(conn, run_id, ordered, doc_kind)
-    return [chunk_id for chunk_id in ordered if chunk_id in allowed][:k]
+    return [row["chunk_id"] for row in rows]
 
 
 def keyword_search(

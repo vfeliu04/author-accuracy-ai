@@ -156,6 +156,56 @@ def test_migration_4_to_5_adds_prompt_hash(tmp_path):
     conn.close()
 
 
+def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
+    path = tmp_path / "db.sqlite"
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    run_id = dbmod.create_run(conn)
+    source = dbmod.add_document(conn, run_id, "SOURCE")
+    report = dbmod.add_document(conn, run_id, "REPORT")
+    embedder = FakeEmbedder(dim=DIM)
+    [source_chunk] = dbmod.add_chunks(
+        conn, run_id, source, [{"text": "source text"}], embedder.embed(["source text"])
+    )
+    [report_chunk] = dbmod.add_chunks(
+        conn, run_id, report, [{"text": "report text"}], embedder.embed(["report text"])
+    )
+
+    # Rewind to the v5 single-partition schema, preserving the vectors.
+    conn.executescript(
+        f"""
+        CREATE TEMP TABLE b AS SELECT chunk_id, run_id, embedding FROM chunks_vec;
+        DROP TABLE chunks_vec;
+        CREATE VIRTUAL TABLE chunks_vec USING vec0(
+          chunk_id INTEGER PRIMARY KEY, run_id TEXT PARTITION KEY, embedding FLOAT[{DIM}]
+        );
+        INSERT INTO chunks_vec(chunk_id, run_id, embedding) SELECT * FROM b;
+        DROP TABLE b;
+        PRAGMA user_version = 5;
+        """
+    )
+    conn.close()
+
+    conn = dbmod.connect(path, embedding_dim=DIM)  # migration 6 runs here
+    rows = conn.execute("SELECT chunk_id, doc_kind FROM chunks_vec ORDER BY chunk_id").fetchall()
+    assert [(r["chunk_id"], r["doc_kind"]) for r in rows] == [
+        (source_chunk, "SOURCE"),
+        (report_chunk, "REPORT"),
+    ]
+    # The rebuilt index still answers filtered KNN queries.
+    from authorai.search import vector_search
+
+    assert vector_search(conn, run_id, [1.0] + [0.0] * (DIM - 1), k=5, doc_kind="SOURCE") == [
+        source_chunk
+    ]
+    conn.close()
+
+
+def test_add_chunks_rejects_unknown_document(conn):
+    run_id = dbmod.create_run(conn)
+    with pytest.raises(ValueError, match="Unknown document"):
+        dbmod.add_chunks(conn, run_id, "no-such-doc", [{"text": "x"}], _EMBEDDER.embed(["x"]))
+
+
 def test_migration_3_to_4_adds_verdicts(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)

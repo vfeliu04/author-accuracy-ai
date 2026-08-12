@@ -137,8 +137,8 @@ def test_doc_kind_filter_excludes_top_ranked_report_chunk(conn, mixed_kind_corpu
     run = mixed_kind_corpus["run"]
     # The report chunk is the closest vector AND a keyword match — with the
     # filter it must appear in neither channel, and the SOURCE chunks must
-    # still fill the results (over-fetch: filtering the top k post-hoc would
-    # starve the vector channel instead).
+    # still fill the results (the partition key makes the filter index-native,
+    # so the excluded document can never starve the channel).
     vector_hits = vector_search(conn, run, _vec(1.0), k=2, doc_kind="SOURCE")
     assert vector_hits == mixed_kind_corpus["source"]
 
@@ -155,6 +155,43 @@ def test_doc_kind_none_is_unfiltered(conn, mixed_kind_corpus):
     run = mixed_kind_corpus["run"]
     hits = hybrid_search(conn, run, "hunger 735 million", _vec(1.0))
     assert hits[0].chunk_id == mixed_kind_corpus["report"][0]
+
+
+def test_native_filter_matches_overfetch_oracle(conn):
+    """The old over-fetch mechanism, kept here as an oracle: widen KNN by the
+    excluded-chunk count, then post-filter by document kind. The new
+    partition-key filter must return the identical ordered ids on a corpus
+    where source and report chunks interleave in the ranking."""
+    run_id = dbmod.create_run(conn)
+    source = dbmod.add_document(conn, run_id, "SOURCE")
+    report = dbmod.add_document(conn, run_id, "REPORT")
+    texts, mapping, ids_by_kind = [], {}, {"SOURCE": [], "REPORT": []}
+    for i in range(12):
+        kind = "SOURCE" if i % 2 else "REPORT"
+        text = f"{kind.lower()} text number {i}"
+        texts.append((kind, text))
+        mapping[text] = _vec(1.0 - i * 0.05, i * 0.01)
+    embedder = FakeEmbedder(dim=DIM, mapping=mapping)
+    for kind, text in texts:
+        doc = source if kind == "SOURCE" else report
+        [chunk_id] = dbmod.add_chunks(conn, run_id, doc, [{"text": text}], embedder.embed([text]))
+        ids_by_kind[kind].append(chunk_id)
+
+    query = _vec(1.0)
+    k = 4
+
+    # Oracle: the pre-migration algorithm.
+    excluded = conn.execute(
+        "SELECT count(*) FROM chunks c JOIN documents d ON d.id = c.doc_id"
+        " WHERE c.run_id = ? AND d.kind != 'SOURCE'",
+        (run_id,),
+    ).fetchone()[0]
+    wide = vector_search(conn, run_id, query, k=k + excluded)
+    oracle = [cid for cid in wide if cid in set(ids_by_kind["SOURCE"])][:k]
+
+    native = vector_search(conn, run_id, query, k=k, doc_kind="SOURCE")
+    assert native == oracle
+    assert len(native) == k
 
 
 def test_hit_carries_figure_id(conn):

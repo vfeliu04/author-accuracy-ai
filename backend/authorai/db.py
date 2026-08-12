@@ -17,7 +17,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
@@ -251,6 +251,45 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 6:
+        # Rebuild chunks_vec with doc_kind as a second PARTITION KEY so
+        # verification's SOURCE-only retrieval is index-native instead of the
+        # over-fetch workaround (which capped at sqlite-vec's k=4096 and could
+        # starve the vector channel on large runs). Data-preserving: vec0
+        # embeddings SELECT out as bytes and re-insert cleanly.
+        # The dim MUST come from meta — _migrate runs before the embedding-dim
+        # check, and using the connect() parameter here would rebuild the table
+        # at a mismatched dimension before that check could refuse it.
+        dim = int(conn.execute("SELECT value FROM meta WHERE key = 'embedding_dim'").fetchone()[0])
+        conn.executescript(
+            f"""
+            BEGIN;
+
+            CREATE TEMP TABLE vec_backup AS
+              SELECT v.chunk_id, v.run_id, d.kind AS doc_kind, v.embedding
+              FROM chunks_vec v
+              JOIN chunks c ON c.id = v.chunk_id
+              JOIN documents d ON d.id = c.doc_id;
+
+            DROP TABLE chunks_vec;
+
+            CREATE VIRTUAL TABLE chunks_vec USING vec0(
+              chunk_id INTEGER PRIMARY KEY,
+              run_id TEXT PARTITION KEY,
+              doc_kind TEXT PARTITION KEY,
+              embedding FLOAT[{dim}]
+            );
+
+            INSERT INTO chunks_vec(chunk_id, run_id, doc_kind, embedding)
+              SELECT chunk_id, run_id, doc_kind, embedding FROM vec_backup;
+
+            DROP TABLE vec_backup;
+
+            PRAGMA user_version = 6;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -475,6 +514,10 @@ def add_chunks(
             f"{len(chunks)} chunks but {len(embeddings)} embeddings — "
             "every chunk needs exactly one embedding"
         )
+    doc = conn.execute("SELECT kind FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if doc is None:
+        raise ValueError(f"Unknown document {doc_id!r} — add the document before its chunks")
+    doc_kind = doc["kind"]
     chunk_ids: list[int] = []
     with conn:
         for chunk, embedding in zip(chunks, embeddings, strict=True):
@@ -493,8 +536,8 @@ def add_chunks(
             )
             chunk_id = cursor.lastrowid
             conn.execute(
-                "INSERT INTO chunks_vec(chunk_id, run_id, embedding) VALUES (?, ?, ?)",
-                (chunk_id, run_id, serialize_float32(normalize(embedding))),
+                "INSERT INTO chunks_vec(chunk_id, run_id, doc_kind, embedding) VALUES (?, ?, ?, ?)",
+                (chunk_id, run_id, doc_kind, serialize_float32(normalize(embedding))),
             )
             chunk_ids.append(chunk_id)
     return chunk_ids
