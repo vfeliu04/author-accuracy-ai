@@ -135,6 +135,27 @@ def test_reextract_after_verify_cascades_verdicts(conn):
     assert dbmod.list_verdicts(conn, run_id) == []
 
 
+def test_verdict_rows_carry_prompt_hash(conn):
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "REPORT")
+    claim_id = _claim(conn, run_id, doc_id)
+    dbmod.add_verdicts(conn, run_id, [_verdict_row(claim_id, prompt_hash="abc123")])
+    [row] = dbmod.list_verdicts(conn, run_id)
+    assert row["prompt_hash"] == "abc123"
+
+
+def test_migration_4_to_5_adds_prompt_hash(tmp_path):
+    path = tmp_path / "db.sqlite"
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    # Rewind: drop the column the way a v4 database lacks it.
+    conn.executescript("ALTER TABLE verdicts DROP COLUMN prompt_hash; PRAGMA user_version = 4;")
+    conn.close()
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] >= 5
+    conn.execute("SELECT prompt_hash FROM verdicts")  # column exists again
+    conn.close()
+
+
 def test_migration_3_to_4_adds_verdicts(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
@@ -142,8 +163,8 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     conn.executescript("DROP TABLE verdicts; PRAGMA user_version = 3;")
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
-    conn.execute("SELECT id FROM verdicts")  # table exists again
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+    conn.execute("SELECT id, prompt_hash FROM verdicts")  # table exists, later ALTERs applied
     conn.close()
 
 

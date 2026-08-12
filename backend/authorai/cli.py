@@ -18,7 +18,7 @@ from authorai.evals import load_golden, score_extraction, score_verdicts
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
 from authorai.llm import AnthropicClient
 from authorai.search import hybrid_search
-from authorai.verification import EVIDENCE_K, verify_run
+from authorai.verification import EVIDENCE_K, VERDICT_PROMPT_HASH, verify_run
 
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
@@ -228,12 +228,37 @@ def cmd_verify(args: argparse.Namespace) -> None:
     )
 
 
+def _assert_verdicts_fresh(verdict_rows: list[dict], allow_stale: bool) -> None:
+    """Refuse to score verdicts produced by a different judge prompt.
+
+    Scoring stale verdicts as if they were fresh already produced one wrong
+    conclusion (MISTAKES.md 2026-08-08) — this makes that class of error
+    impossible instead of relying on operator memory.
+    """
+    stale = [r for r in verdict_rows if r.get("prompt_hash") != VERDICT_PROMPT_HASH]
+    if not stale:
+        return
+    models = sorted({r["model"] for r in stale})
+    message = (
+        f"{len(stale)}/{len(verdict_rows)} verdicts were produced by a DIFFERENT judge "
+        f"prompt than the current one (models: {', '.join(models)}). The score would say "
+        "nothing about the current prompt — rerun `verify` first."
+    )
+    if allow_stale:
+        print(f"WARNING (--allow-stale): {message}")
+        return
+    raise SystemExit(message + " (or pass --allow-stale to score them anyway)")
+
+
 def cmd_eval_verdict(args: argparse.Namespace) -> None:
     _, conn = _setup()
     golden = _load_golden_or_exit(args.golden)
     verdict_rows = dbmod.list_verdicts(conn, args.run_id)
     if not verdict_rows:
         raise SystemExit(f"Run {args.run_id!r} has no verdicts — run `verify` first")
+    _assert_verdicts_fresh(verdict_rows, args.allow_stale)
+    models = sorted({r["model"] for r in verdict_rows})
+    print(f"judge model(s): {', '.join(models)}")
     score = score_verdicts(verdict_rows, golden)
     print(score.summary())
     for expected, predicted_counts in score.confusion.items():
@@ -319,6 +344,11 @@ def main() -> None:
         "eval-verdict", help="Score stored verdicts against the golden set"
     )
     _add_eval_args(eval_verdict)
+    eval_verdict.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Score verdicts even if they were produced by an older judge prompt",
+    )
     eval_verdict.set_defaults(func=cmd_eval_verdict)
 
     search = subparsers.add_parser("search", help="Hybrid-search a run")

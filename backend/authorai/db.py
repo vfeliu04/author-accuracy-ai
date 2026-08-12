@@ -17,7 +17,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
@@ -234,6 +234,23 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 5:
+        conn.executescript(
+            """
+            BEGIN;
+
+            -- Which VERDICT_SYSTEM produced each row. eval-verdict refuses to
+            -- score rows whose hash differs from the current prompt: scoring
+            -- stale verdicts as if they were fresh already caused one wrong
+            -- conclusion (MISTAKES.md 2026-08-08). NULL (pre-migration rows)
+            -- counts as stale.
+            ALTER TABLE verdicts ADD COLUMN prompt_hash TEXT;
+
+            PRAGMA user_version = 5;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -395,7 +412,8 @@ def add_verdicts(
             conn.execute(
                 "INSERT INTO verdicts(id, run_id, claim_id, verdict, raw_verdict, quote,"
                 " quote_verified, quoted_chunk_id, evidence_chunk_ids, year_flag, rationale,"
-                " model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " model, prompt_hash, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     verdict_id,
                     run_id,
@@ -409,6 +427,7 @@ def add_verdicts(
                     verdict.get("year_flag"),
                     verdict["rationale"],
                     verdict["model"],
+                    verdict.get("prompt_hash"),
                     now_iso(),
                 ),
             )

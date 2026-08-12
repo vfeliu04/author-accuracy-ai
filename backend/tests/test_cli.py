@@ -34,6 +34,27 @@ def test_run_ingest_prints_run_first_and_survives_a_bad_pdf(conn, tmp_path, monk
     assert [d["title"] for d in docs] == ["good"]
 
 
+def test_stale_verdicts_are_refused(capsys):
+    import pytest
+
+    from authorai.verification import VERDICT_PROMPT_HASH
+
+    fresh = {"model": "m", "prompt_hash": VERDICT_PROMPT_HASH}
+    stale = {"model": "old-model", "prompt_hash": "not-the-current-hash"}
+    unstamped = {"model": "older-model", "prompt_hash": None}  # pre-migration row
+
+    cli._assert_verdicts_fresh([fresh], allow_stale=False)  # fresh rows pass silently
+
+    with pytest.raises(SystemExit, match="DIFFERENT judge prompt"):
+        cli._assert_verdicts_fresh([fresh, stale], allow_stale=False)
+    with pytest.raises(SystemExit, match="DIFFERENT judge prompt"):
+        cli._assert_verdicts_fresh([unstamped], allow_stale=False)
+
+    # --allow-stale converts the refusal into a loud warning.
+    cli._assert_verdicts_fresh([stale], allow_stale=True)
+    assert "WARNING (--allow-stale)" in capsys.readouterr().out
+
+
 def test_run_ingest_rejects_unknown_run(conn, tmp_path):
     import pytest
 

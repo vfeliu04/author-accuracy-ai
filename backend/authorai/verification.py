@@ -10,6 +10,7 @@ never count in the headline number. The model's original verdict is preserved
 in `raw_verdict` so the downgrade rate stays measurable.
 """
 
+import hashlib
 import re
 import sqlite3
 from pathlib import Path
@@ -61,6 +62,12 @@ For SUPPORTED and CONTRADICTED you MUST provide:
 For UNVERIFIABLE, quote and evidence_index may be null.
 `rationale` is one or two sentences explaining the decision.
 """
+
+
+# Stamped on every stored verdict; eval-verdict refuses rows whose hash is not
+# the CURRENT prompt's — verdicts from an older judge must never be scored as
+# if they were fresh. Guards prompt drift only (model is stored per row too).
+VERDICT_PROMPT_HASH = hashlib.sha256(VERDICT_SYSTEM.encode()).hexdigest()
 
 
 class Verdict(BaseModel):
@@ -321,6 +328,7 @@ def verify_run(
 
     for row in rows:
         row["model"] = model
+        row["prompt_hash"] = VERDICT_PROMPT_HASH
     dbmod.add_verdicts(conn, run_id, rows, replace=True)
 
     return {
