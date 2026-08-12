@@ -276,8 +276,12 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
 
 def cmd_score(args: argparse.Namespace) -> None:
     settings, conn = _setup()
+    # Validate the run BEFORE building the client — otherwise a typo'd id (or a
+    # missing key) fails with an unrelated message instead of "unknown run".
+    if dbmod.get_run(conn, args.run_id) is None:
+        raise SystemExit(f"Unknown run {args.run_id!r}")
     llm = AnthropicClient(settings.anthropic_api_key)
-    result = score_run(conn, llm, args.run_id, settings)
+    result = score_run(conn, llm, args.run_id, settings, allow_stale=args.allow_stale)
     accuracy = result["accuracy"]
     print(
         f"accuracy: {accuracy['accuracy']} "
@@ -374,6 +378,11 @@ def main() -> None:
 
     score = subparsers.add_parser("score", help="Compute accuracy/credibility/validity for a run")
     score.add_argument("run_id")
+    score.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Score even if the verdicts came from an older judge prompt",
+    )
     score.set_defaults(func=cmd_score)
 
     search = subparsers.add_parser("search", help="Hybrid-search a run")

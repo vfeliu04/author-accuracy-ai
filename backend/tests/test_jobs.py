@@ -149,9 +149,9 @@ def test_torn_ingest_is_deleted_and_reingested(conn, tmp_path, monkeypatch):
     context = PipelineContext(conn, settings)
     _reconcile_upload(context, run_id, upload_id)
 
-    # fallback_title carries the ORIGINAL file name — the disk path is a
-    # generated hex name, so untitled documents would otherwise show as ids.
-    assert ingested == [(str(pdf), "SOURCE", upload_id, "source.pdf")]
+    # fallback_title carries the original file name's STEM — the disk path is a
+    # generated hex name, and this matches the CLI's path.stem convention.
+    assert ingested == [(str(pdf), "SOURCE", upload_id, "source")]
     assert (
         conn.execute("SELECT count(*) FROM documents WHERE id = ?", (torn_doc,)).fetchone()[0] == 0
     )

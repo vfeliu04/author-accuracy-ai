@@ -16,6 +16,7 @@ from authorai.scoring import (
     recency_score,
     score_run,
 )
+from authorai.verification import VERDICT_PROMPT_HASH
 from tests.conftest import DIM, FakeLLM
 
 
@@ -268,10 +269,11 @@ def scored_run(conn):
                 "evidence_chunk_ids": [chunk_id],
                 "rationale": "r",
                 "model": "m",
+                "prompt_hash": VERDICT_PROMPT_HASH,
             }
         ],
     )
-    return {"run": run_id, "source": source}
+    return {"run": run_id, "source": source, "claim": claim_id}
 
 
 def test_score_run_persists_all_three_scores(conn, scored_run):
@@ -307,3 +309,35 @@ def test_score_run_requires_verdicts(conn):
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     with pytest.raises(ValueError, match="no verdicts"):
         score_run(conn, FakeLLM(), run_id, settings, crossref=_NoNetworkCrossref())
+
+
+def test_score_run_unknown_run_is_named_correctly(conn):
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    with pytest.raises(ValueError, match="Unknown run"):
+        score_run(conn, FakeLLM(), "no-such-run", settings, crossref=_NoNetworkCrossref())
+
+
+def test_score_run_refuses_stale_verdicts(conn, scored_run):
+    """The persisted+served accuracy must never be computed from verdicts of a
+    different judge prompt — unless explicitly allowed."""
+    conn.execute(
+        "UPDATE verdicts SET prompt_hash = 'OLD' WHERE claim_id = ?", (scored_run["claim"],)
+    )
+    conn.commit()
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    with pytest.raises(ValueError, match="different judge prompt"):
+        score_run(conn, FakeLLM(), scored_run["run"], settings, crossref=_NoNetworkCrossref())
+    # A failed guard persists nothing.
+    assert dbmod.get_run_scores(conn, scored_run["run"]) is None
+
+    # allow_stale scores them anyway.
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    score_run(
+        conn, llm, scored_run["run"], settings, crossref=_NoNetworkCrossref(), allow_stale=True
+    )
+    assert dbmod.get_run_scores(conn, scored_run["run"]) is not None

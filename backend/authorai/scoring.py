@@ -32,7 +32,7 @@ from authorai.credibility import (
 )
 from authorai.llm import LLM
 from authorai.log import setup_logger
-from authorai.verification import normalize_quote
+from authorai.verification import VERDICT_PROMPT_HASH, normalize_quote
 
 logger = setup_logger(__name__)
 
@@ -269,11 +269,28 @@ def score_run(
     run_id: str,
     settings: Settings,
     crossref: CrossrefClient | None = None,
+    allow_stale: bool = False,
 ) -> dict:
-    """Compute and persist all three scores for a run. Verdicts must exist."""
+    """Compute and persist all three scores for a run. Verdicts must exist.
+
+    Nothing is persisted until every score (including the validity LLM call)
+    is computed — a mid-way failure leaves the run's PRIOR score set intact
+    and internally consistent, rather than a fresh source_credibility next to
+    a stale run_scores.
+    """
+    if dbmod.get_run(conn, run_id) is None:
+        raise ValueError(f"Unknown run {run_id!r}")
     verdict_rows = dbmod.list_verdicts(conn, run_id)
     if not verdict_rows:
         raise ValueError(f"Run {run_id!r} has no verdicts — run `verify` first")
+    # The score is PERSISTED and served by the API, so scoring stale verdicts
+    # is worse than the eval case the guard was built for — refuse by default.
+    stale = [r for r in verdict_rows if r.get("prompt_hash") != VERDICT_PROMPT_HASH]
+    if stale and not allow_stale:
+        raise ValueError(
+            f"{len(stale)}/{len(verdict_rows)} verdicts were produced by a different "
+            "judge prompt — re-run `verify` (or score with allow_stale=True)"
+        )
     accuracy = accuracy_scores(verdict_rows)
 
     sources = conn.execute(
@@ -319,9 +336,10 @@ def score_run(
     finally:
         if owns_crossref:
             crossref.close()
-    dbmod.save_source_credibility(conn, run_id, per_source)
     credibility = aggregate_credibility(per_source, evidence_usage(conn, run_id))
 
+    # The last failure-prone step (a network LLM call), computed BEFORE any
+    # write so a failure here persists nothing and the prior scores stand.
     validity = assess_validity(
         llm,
         settings.validity_model,
@@ -331,6 +349,8 @@ def score_run(
         current_year=current_year,
     )
 
+    # Both writes at the end, adjacent, with no fallible work between them.
+    dbmod.save_source_credibility(conn, run_id, per_source)
     dbmod.save_run_scores(
         conn, run_id, accuracy=accuracy, credibility=credibility, validity=validity
     )

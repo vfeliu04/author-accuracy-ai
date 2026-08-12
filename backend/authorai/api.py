@@ -1,38 +1,86 @@
 """Authenticated HTTP API.
 
-Auth is structural: every route on this router inherits `require_api_key`
-through the router's dependencies, so a new endpoint cannot forget it (v1
-authenticated per-route with decorators and missed some). The dependency
-fails CLOSED — no configured key means 401, never open access.
+Auth is enforced by a pure-ASGI middleware (`ApiGuardMiddleware`) that runs
+BEFORE the request body is parsed: it rejects any `/api` request without the
+key and any request whose declared Content-Length exceeds the cap. Doing this
+in the route dependency (as v1-style per-route auth would) is too late —
+FastAPI parses the whole multipart body first, so an unauthenticated client
+could push gigabytes before the 401. The middleware guards the `/api` prefix
+as a whole, so a new endpoint cannot forget it, and it fails CLOSED (no
+configured key ⇒ 401).
 """
 
+import json
 import secrets
+import shutil
 import sqlite3
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Security, UploadFile
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
 from authorai import db as dbmod
+from authorai.config import Settings
 from authorai.log import setup_logger
 
 logger = setup_logger(__name__)
 
-_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+API_PREFIX = "/api"
 
 
-def require_api_key(request: Request, provided: str | None = Security(_api_key_header)) -> None:
-    expected = request.app.state.settings.api_key
-    if not expected or provided is None or not secrets.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+def _key_ok(provided: bytes | None, expected: str | None) -> bool:
+    """Constant-time key check on RAW BYTES — comparing decoded strings raises
+    TypeError on any non-ASCII header value, turning a bad key into a 500."""
+    if not expected or provided is None:
+        return False
+    return secrets.compare_digest(provided, expected.encode("utf-8"))
+
+
+class ApiGuardMiddleware:
+    """Enforces auth and the request-size cap before the body is read."""
+
+    def __init__(self, app, settings: Settings):
+        self.app = app
+        self.settings = settings
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        if path == API_PREFIX or path.startswith(API_PREFIX + "/"):
+            headers = dict(scope["headers"])  # lowercased byte keys
+            if not _key_ok(headers.get(b"x-api-key"), self.settings.api_key):
+                logger.warning("unauthorized %s %s", scope.get("method"), path)
+                await self._reject(send, 401, "Invalid or missing API key")
+                return
+            length = headers.get(b"content-length")
+            if length and length.isdigit() and int(length) > self.settings.max_request_bytes:
+                await self._reject(send, 413, "Request body exceeds the size limit")
+                return
+        await self.app(scope, receive, send)
+
+    async def _reject(self, send, status: int, detail: str) -> None:
+        body = json.dumps({"detail": detail}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 def get_conn(request: Request):
     """One connection per request, never shared between concurrent requests.
 
     check_same_thread is off because FastAPI runs this dependency and the
-    endpoint on different threadpool threads — sequentially, one at a time,
-    which is the one arrangement where crossing threads is safe.
+    endpoint on the threadpool — sequentially, one at a time, which is the one
+    arrangement where crossing threads is safe.
     """
     settings = request.app.state.settings
     conn = dbmod.connect(settings.db_path, settings.embedding_dim, check_same_thread=False)
@@ -42,24 +90,34 @@ def get_conn(request: Request):
         conn.close()
 
 
-router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix=API_PREFIX)
 
 Conn = Annotated[sqlite3.Connection, Depends(get_conn)]
 
 
-def _validate_pdf(file_name: str | None, data: bytes, max_bytes: int) -> None:
-    if not file_name or not file_name.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail=f"{file_name!r} is not a .pdf file")
-    if len(data) > max_bytes:
+def _validate_pdf(upload: UploadFile, max_bytes: int) -> None:
+    """Extension, size, and magic — WITHOUT reading the file into memory.
+
+    `.size` comes from the already-spooled part, and the magic check reads
+    only the first 5 bytes; the full bytes are never materialized (v1's cap
+    fired only after the whole file was resident, so the cap was decorative).
+    """
+    name = upload.filename
+    if not name or not name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail=f"{name!r} is not a .pdf file")
+    if upload.size is not None and upload.size > max_bytes:
         raise HTTPException(
-            status_code=413, detail=f"{file_name!r} exceeds the {max_bytes} byte upload limit"
+            status_code=413, detail=f"{name!r} exceeds the {max_bytes} byte per-file limit"
         )
-    if not data.startswith(b"%PDF-"):
-        raise HTTPException(status_code=400, detail=f"{file_name!r} is not PDF content")
+    upload.file.seek(0)
+    head = upload.file.read(5)
+    upload.file.seek(0)
+    if head != b"%PDF-":
+        raise HTTPException(status_code=400, detail=f"{name!r} is not PDF content")
 
 
 @router.post("/runs", status_code=202)
-async def create_run(
+def create_run(
     request: Request,
     report: Annotated[UploadFile, File()],
     sources: Annotated[list[UploadFile], File()],
@@ -67,30 +125,39 @@ async def create_run(
 ) -> dict:
     """Accept a report + its sources and queue the full pipeline.
 
-    EVERY file is validated before ANY row is written — v1 inserted the queue
-    row first and stranded it when a later file failed validation.
+    A sync endpoint (runs on the threadpool, so its blocking file/DB writes
+    never freeze the event loop). EVERY file is validated before ANY file is
+    written, and the run/uploads/job rows all commit in ONE transaction — a
+    failure anywhere leaves nothing behind (v1 stranded rows and blobs).
     """
-    settings = request.app.state.settings
-    validated: list[tuple[str, str, bytes]] = []
-    for kind, upload in [("REPORT", report)] + [("SOURCE", s) for s in sources]:
-        data = await upload.read()
-        _validate_pdf(upload.filename, data, settings.max_upload_bytes)
-        validated.append((kind, upload.filename, data))
+    settings: Settings = request.app.state.settings
+    if len(sources) > settings.max_source_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many source files ({len(sources)} > {settings.max_source_files})",
+        )
+    uploads = [("REPORT", report)] + [("SOURCE", s) for s in sources]
+    for _kind, upload in uploads:
+        _validate_pdf(upload, settings.max_upload_bytes)
 
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
-    upload_ids: dict[str, list[str]] = {"REPORT": [], "SOURCE": []}
-    for kind, file_name, data in validated:
-        # Server-generated disk names: client filenames never touch the path.
-        path = settings.uploads_dir / f"{dbmod.new_id()}.pdf"
-        path.write_bytes(data)
-        upload_ids[kind].append(dbmod.add_upload(conn, kind, file_name, str(path)))
-
-    run_id = dbmod.create_run(conn)
-    job_id = dbmod.create_job(
-        conn,
-        run_id,
-        {"report_upload_id": upload_ids["REPORT"][0], "source_upload_ids": upload_ids["SOURCE"]},
-    )
+    written: list[Path] = []
+    try:
+        rows: list[tuple[str, str, str]] = []
+        for kind, upload in uploads:
+            # Server-generated disk name: the client filename never touches the
+            # path (kept only as the uploads.file_name column for display).
+            path = settings.uploads_dir / f"{dbmod.new_id()}.pdf"
+            upload.file.seek(0)
+            with path.open("wb") as handle:
+                shutil.copyfileobj(upload.file, handle, length=1024 * 1024)
+            written.append(path)
+            rows.append((kind, upload.filename, str(path)))
+        run_id, job_id = dbmod.create_run_with_uploads_and_job(conn, rows)
+    except Exception:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
     return {"run_id": run_id, "job_id": job_id}
 
 
@@ -122,11 +189,21 @@ def _fraction(score: float | None) -> float | None:
 
 @router.get("/runs/{run_id}/report")
 def get_report(run_id: str, conn: Conn) -> dict:
-    run = dbmod.get_run(conn, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"Unknown run {run_id!r}")
+    # One read transaction so the verdicts, scores, and per-source rows are a
+    # consistent snapshot — the worker may be committing all three while the
+    # frontend polls, and separate autocommit reads can straddle that write.
+    conn.execute("BEGIN")
+    try:
+        run = dbmod.get_run(conn, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Unknown run {run_id!r}")
 
-    verdict_rows = dbmod.list_verdicts_with_evidence(conn, run_id)
+        verdict_rows = dbmod.list_verdicts_with_evidence(conn, run_id)
+        stored = dbmod.get_run_scores(conn, run_id)
+        source_rows = dbmod.list_source_credibility(conn, run_id)
+    finally:
+        conn.rollback()  # read-only; release the snapshot
+
     stats = {
         "claims_total": len(verdict_rows),
         "claims_supported": sum(1 for r in verdict_rows if r["verdict"] == "SUPPORTED"),
@@ -134,7 +211,6 @@ def get_report(run_id: str, conn: Conn) -> dict:
         "claims_unverifiable": sum(1 for r in verdict_rows if r["verdict"] == "UNVERIFIABLE"),
     }
 
-    stored = dbmod.get_run_scores(conn, run_id)
     scores = None
     if stored is not None:
         scores = {
@@ -179,7 +255,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
             "tier": row["tier"],
             "components": row["components"],
         }
-        for row in dbmod.list_source_credibility(conn, run_id)
+        for row in source_rows
     ]
 
     return {

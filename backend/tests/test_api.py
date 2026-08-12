@@ -6,13 +6,18 @@ against an app that can't actually start.
 """
 
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 
 from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.jobs import Worker
 from authorai.main import create_app
 from tests.conftest import DIM
+
+# Routes that are intentionally open (no API key). Everything else must 401.
+OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
 
 KEY = "test-key"
 AUTH = {"X-API-Key": KEY}
@@ -72,22 +77,59 @@ def test_startup_fails_closed_without_api_key(tmp_path):
 
 
 def test_every_api_route_requires_the_key(tmp_path):
-    """Structural regression test for v1's per-route auth: EVERY route under
-    /api must 401 without a key and with a wrong key — a new endpoint that
-    forgets auth fails here automatically. Routes are enumerated from the
-    OpenAPI schema, which lists everything the app actually serves."""
+    """Every route on the /api router must 401 without a key and with a wrong
+    key — a new endpoint that forgets auth fails here (auth is enforced by the
+    middleware over the whole /api prefix, so this covers new routes for free)."""
+    from authorai.api import router as api_router
+
     app = create_app(_settings(tmp_path), worker=_NoopWorker())
-    api_paths = {
-        path: ops for path, ops in app.openapi()["paths"].items() if path.startswith("/api")
-    }
-    assert len(api_paths) >= 4  # sanity: the router is actually mounted
+    guarded = 0
     with TestClient(app) as client:
-        for path, ops in api_paths.items():
-            url = path.replace("{run_id}", "x").replace("{job_id}", "x")
-            for method in ops:
+        for route in api_router.routes:
+            url = route.path.replace("{run_id}", "x").replace("{job_id}", "x")
+            for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
                 assert client.request(method, url).status_code == 401, f"{method} {url}"
                 wrong = client.request(method, url, headers={"X-API-Key": "wrong"})
                 assert wrong.status_code == 401, f"{method} {url} with wrong key"
+                guarded += 1
+    assert guarded >= 5  # sanity: the router is actually mounted
+
+
+def test_nothing_sensitive_is_mounted_outside_the_api_prefix(tmp_path):
+    """The middleware guards the /api prefix; a route mounted on the app
+    directly would bypass it. Every top-level app route must therefore be a
+    /api route or explicitly open-listed."""
+    app = create_app(_settings(tmp_path), worker=_NoopWorker())
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if isinstance(route, APIRoute | Route) and not path.startswith("/api"):
+            assert path in OPEN_PATHS, f"{path} is mounted outside /api and not open-listed"
+
+
+def test_valid_key_reaches_the_route(client):
+    # A regression that rejected EVERY key (not just wrong ones) must be caught.
+    assert client.get("/api/runs", headers=AUTH).status_code == 200
+
+
+def test_key_check_handles_non_ascii_without_crashing():
+    """Finding: comparing a decoded non-ASCII header raises TypeError → 500.
+    The byte-level comparison must return a clean False instead."""
+    from authorai.api import _key_ok
+
+    assert _key_ok("café".encode(), "test-key") is False
+    assert _key_ok(b"test-key", "test-key") is True
+    assert _key_ok(b"anything", None) is False  # fail closed when unset
+
+
+def test_oversize_content_length_is_rejected_before_the_body(tmp_path):
+    settings = _settings(tmp_path, max_request_bytes=1000)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        response = client.post(
+            "/api/runs",
+            headers={**AUTH, "Content-Length": "5000"},
+            content=b"x" * 5000,
+        )
+        assert response.status_code == 413
 
 
 def test_startup_requeues_running_jobs(tmp_path):
@@ -162,6 +204,20 @@ def test_bad_uploads_are_rejected_before_any_rows(tmp_path, file_name, content, 
     conn = dbmod.connect(settings.db_path, settings.embedding_dim)
     assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
     assert conn.execute("SELECT count(*) FROM uploads").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
+    conn.close()
+    # No orphaned blob on disk either — validation happens before any write.
+    assert not any((settings.uploads_dir).glob("*.pdf")) if settings.uploads_dir.exists() else True
+
+
+def test_too_many_sources_is_rejected(tmp_path):
+    settings = _settings(tmp_path, max_source_files=2)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        assert (
+            client.post("/api/runs", headers=AUTH, files=_upload_files(source_count=3)).status_code
+            == 400
+        )
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
     assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
     conn.close()
 

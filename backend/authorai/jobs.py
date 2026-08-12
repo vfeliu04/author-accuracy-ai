@@ -125,7 +125,9 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         figures_dir=settings.figures_dir,
         upload_id=upload_id,
         describe=describe,
-        fallback_title=upload["file_name"],
+        # Stem, not the raw name — so an API upload titles the same as the CLI
+        # path (path.stem), not "report.pdf" vs "report".
+        fallback_title=Path(upload["file_name"]).stem,
     )
 
 

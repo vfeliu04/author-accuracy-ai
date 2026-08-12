@@ -70,11 +70,12 @@ def connect(
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
+    # busy_timeout FIRST: the WAL switch and the first-open migration both need
+    # an exclusive lock, so the timeout must already be in force or a racing
+    # opener throws SQLITE_BUSY instantly instead of waiting the 5 s.
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
-    # The API thread and the job worker contend for the WAL writer lock —
-    # wait rather than throwing SQLITE_BUSY at the first overlap.
-    conn.execute("PRAGMA busy_timeout = 5000")
     _migrate(conn, embedding_dim)
     _check_embedding_dim(conn, embedding_dim)
     return conn
@@ -82,7 +83,16 @@ def connect(
 
 def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version >= SCHEMA_VERSION:
+    if version > SCHEMA_VERSION:
+        # A database written by a NEWER build. Returning silently would let an
+        # old checkout write through a schema it doesn't understand — e.g. the
+        # pre-partition add_chunks stores doc_kind=NULL into the two-key
+        # chunks_vec, and every SOURCE-filtered search then silently misses it.
+        raise RuntimeError(
+            f"Database schema version {version} is newer than this build supports "
+            f"({SCHEMA_VERSION}) — refusing to open it with an older Author AI."
+        )
+    if version == SCHEMA_VERSION:
         return
     if version < 1:
         # The whole migration — DDL, meta row, and version bump — runs in ONE
@@ -597,6 +607,44 @@ def create_job(
     return job_id
 
 
+def create_run_with_uploads_and_job(
+    conn: sqlite3.Connection, uploads: list[tuple[str, str, str]]
+) -> tuple[str, str]:
+    """Create a run, its upload rows, and its pipeline job in ONE transaction.
+
+    `uploads` is a list of (kind, file_name, path); exactly one must be REPORT.
+    All-or-nothing so a failure part-way never strands a run with no job, or
+    uploads with no run (the API's atomicity guarantee — v1 committed each
+    separately and left orphans on the first failure).
+    """
+    report_upload_id: str | None = None
+    source_upload_ids: list[str] = []
+    now = now_iso()
+    run_id = new_id()
+    with conn:
+        conn.execute("INSERT INTO runs(id, created_at) VALUES (?, ?)", (run_id, now))
+        for kind, file_name, path in uploads:
+            upload_id = new_id()
+            conn.execute(
+                "INSERT INTO uploads(id, kind, file_name, path, created_at) VALUES (?, ?, ?, ?, ?)",
+                (upload_id, kind, file_name, path, now),
+            )
+            if kind == "REPORT":
+                report_upload_id = upload_id
+            else:
+                source_upload_ids.append(upload_id)
+        if report_upload_id is None:
+            raise ValueError("create_run_with_uploads_and_job needs exactly one REPORT upload")
+        job_id = new_id()
+        payload = {"report_upload_id": report_upload_id, "source_upload_ids": source_upload_ids}
+        conn.execute(
+            "INSERT INTO jobs(id, run_id, kind, payload, created_at, updated_at)"
+            " VALUES (?, ?, 'full_pipeline', ?, ?, ?)",
+            (job_id, run_id, json.dumps(payload), now, now),
+        )
+    return run_id, job_id
+
+
 def _job_row(row: sqlite3.Row) -> dict:
     job = dict(row)
     job["payload"] = json.loads(job["payload"])
@@ -633,8 +681,16 @@ def claim_next_job(conn: sqlite3.Connection) -> dict | None:
 def push_job_progress(
     conn: sqlite3.Connection, job_id: str, step: str, label: str, status: str = "done"
 ) -> None:
-    """Upsert one step entry in the job's progress array (keyed by step name)."""
-    with conn:
+    """Upsert one step entry in the job's progress array (keyed by step name).
+
+    This is a read-modify-write of the whole JSON array, so it takes the write
+    lock with BEGIN IMMEDIATE BEFORE the SELECT — two writers reading the same
+    array and both appending would otherwise silently lose an entry (and a lost
+    'done' entry would make a completed step re-run on resume, re-billing an
+    LLM batch). Callers never hold an open transaction here.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
         row = conn.execute("SELECT progress FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             raise ValueError(f"Unknown job {job_id!r}")
@@ -650,6 +706,10 @@ def push_job_progress(
             "UPDATE jobs SET progress = ?, updated_at = ? WHERE id = ?",
             (json.dumps(progress), now_iso(), job_id),
         )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def finish_job_and_run(

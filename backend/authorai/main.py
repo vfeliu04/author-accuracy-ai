@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from authorai import __version__
 from authorai import db as dbmod
+from authorai.api import ApiGuardMiddleware
 from authorai.api import router as api_router
 from authorai.config import Settings
 from authorai.jobs import Worker
@@ -44,12 +45,26 @@ def create_app(settings: Settings | None = None, worker: Worker | None = None) -
         finally:
             active_worker.stop()
 
-    app = FastAPI(title="Author AI", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="Author AI",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url="/docs" if settings.docs_enabled else None,
+        redoc_url="/redoc" if settings.docs_enabled else None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
+    )
     app.state.settings = settings
+    # The auth/size guard is added FIRST so it is INNERMOST — CORS (added last,
+    # outermost) still answers preflight and stamps headers onto the 401s the
+    # guard returns, so a browser can read them.
+    app.add_middleware(ApiGuardMiddleware, settings=settings)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
-        allow_credentials=True,
+        # Auth is a custom header, not a cookie, so credentials mode buys
+        # nothing — and leaving it off means an accidental "*" origin can never
+        # become per-request reflection.
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

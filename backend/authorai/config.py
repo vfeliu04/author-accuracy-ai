@@ -50,5 +50,12 @@ class Settings(BaseSettings):
     # v1 served everything openly when its key env var was missing).
     api_key: str | None = None
     uploads_dir: Path = Path("data/uploads")
-    max_upload_bytes: int = 50_000_000
+    max_upload_bytes: int = 50_000_000  # per file
+    # Whole-request ceiling, checked against Content-Length BEFORE the body is
+    # read, so an unauthenticated attacker cannot push gigabytes at us.
+    max_request_bytes: int = 220_000_000
+    max_source_files: int = 20
     cors_origins: str = "http://localhost:5173"
+    # Swagger/ReDoc/OpenAPI expose the full route surface; keep them for local
+    # dev, disable for an exposed deployment.
+    docs_enabled: bool = True
