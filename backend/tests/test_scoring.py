@@ -166,6 +166,42 @@ def test_validity_missing_recency_renormalizes_weights():
     assert result["components"]["recency"]["score"] is None
 
 
+def test_opening_text_includes_section_headings_and_respects_the_page_window(conn):
+    """Real chunks carry sections and pages (the tested fixture previously had
+    neither, leaving the heading block and page filter dead under test).
+    Docling puts titles and DOI-bearing header lines in SECTION names — the
+    exact fields metadata extraction exists to find."""
+    from authorai import db as dbmod
+    from authorai.embeddings import FakeEmbedder
+    from authorai.scoring import _opening_text
+
+    run_id = dbmod.create_run(conn)
+    doc = dbmod.add_document(conn, run_id, "SOURCE")
+    embedder = FakeEmbedder(dim=8)
+    chunks = [
+        {"text": "First page body\nwith a line break.", "page": 1, "section": "The Real Title"},
+        {"text": "Second page body.", "page": 2, "section": "The Real Title"},
+        {"text": "Deep-page body that must NOT appear.", "page": 9, "section": "Conclusion"},
+    ]
+    dbmod.add_chunks(conn, run_id, doc, chunks, embedder.embed([c["text"] for c in chunks]))
+
+    text = _opening_text(conn, doc)
+    assert "## The Real Title" in text  # heading included, once
+    assert text.count("## The Real Title") == 1
+    assert "First page body" in text and "Second page body." in text
+    assert "must NOT appear" not in text  # page window is page <= 2
+
+
+def test_opening_text_is_loud_for_a_document_with_no_text(conn):
+    from authorai import db as dbmod
+    from authorai.scoring import _opening_text
+
+    run_id = dbmod.create_run(conn)
+    doc = dbmod.add_document(conn, run_id, "SOURCE")
+    with pytest.raises(ValueError, match="no text chunks"):
+        _opening_text(conn, doc)
+
+
 def test_validity_requires_sections():
     with pytest.raises(ValueError, match="No report sections"):
         assess_validity(

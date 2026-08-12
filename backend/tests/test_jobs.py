@@ -1,10 +1,21 @@
 """Job worker tests: claiming, resume, failure, and torn-ingest recovery."""
 
+import inspect
+import time
+
 import pytest
 
 from authorai import db as dbmod
 from authorai.config import Settings
-from authorai.jobs import PipelineContext, Worker, _reconcile_upload, run_job
+from authorai.ingest import ingest_pdf
+from authorai.jobs import (
+    PIPELINE_STEPS,
+    REAL_STEPS,
+    PipelineContext,
+    Worker,
+    _reconcile_upload,
+    run_job,
+)
 from tests.conftest import DIM
 
 SETTINGS = Settings(anthropic_api_key="x", openai_api_key="x")
@@ -118,6 +129,19 @@ def test_torn_ingest_is_deleted_and_reingested(conn, tmp_path, monkeypatch):
     def fake_ingest_pdf(
         conn_, embedder, run_id_, path, *, kind, figures_dir, upload_id, describe, fallback_title
     ):
+        # The fake must not drift from the real contract: a renamed real
+        # parameter would otherwise pass here and TypeError in production.
+        inspect.signature(ingest_pdf).bind(
+            conn_,
+            embedder,
+            run_id_,
+            path,
+            kind=kind,
+            figures_dir=figures_dir,
+            upload_id=upload_id,
+            describe=describe,
+            fallback_title=fallback_title,
+        )
         ingested.append((str(path), kind, upload_id, fallback_title))
         return "new-doc-id"
 
@@ -193,6 +217,81 @@ def test_failure_handler_failing_does_not_propagate(conn):
     job["run_id"] = "no-such-run"  # set_run_status raises, then so does the handler
     run_job(conn, SETTINGS, job, steps=_fake_steps([]))  # must not raise
     assert dbmod.get_job(conn, job_id)["status"] == "RUNNING"
+
+
+def test_real_step_registry_matches_the_pipeline_and_signature():
+    """A typo'd key or drifted step signature in REAL_STEPS would only ever
+    surface on the first production job — every other test injects fakes."""
+    assert set(REAL_STEPS) == set(PIPELINE_STEPS)
+    for step in REAL_STEPS.values():
+        inspect.signature(step).bind("context", "run_id", "payload")
+
+
+def test_done_write_failure_leaves_job_running_not_failed(conn, monkeypatch):
+    """The documented invariant: a bookkeeping failure AFTER all steps
+    succeeded must never rewrite the run as FAILED — the job stays RUNNING
+    (its steps recorded done) for startup recovery to re-finish."""
+    from authorai import jobs as jobsmod
+
+    run_id, job_id = _job(conn)
+    job = dbmod.claim_next_job(conn)
+    real_finish = dbmod.finish_job_and_run
+
+    def flaky_finish(conn_, job_id_, run_id_, status, error=None):
+        raise RuntimeError("lock timeout on the final write")
+
+    monkeypatch.setattr(jobsmod.dbmod, "finish_job_and_run", flaky_finish)
+    with pytest.raises(RuntimeError, match="lock timeout"):
+        run_job(conn, SETTINGS, job, steps=_fake_steps([]))
+
+    stranded = dbmod.get_job(conn, job_id)
+    assert stranded["status"] == "RUNNING"  # never FAILED — all steps succeeded
+    assert all(p["status"] == "done" for p in stranded["progress"])
+
+    # Startup recovery then completes it without re-running any step.
+    monkeypatch.setattr(jobsmod.dbmod, "finish_job_and_run", real_finish)
+    assert dbmod.requeue_running_jobs(conn) == [job_id]
+    record: list[str] = []
+    Worker(SETTINGS, steps=_fake_steps(record)).run_pending(conn)
+    assert record == []  # nothing re-ran; only the finish was repeated
+    assert dbmod.get_job(conn, job_id)["status"] == "DONE"
+    assert dbmod.get_run(conn, run_id)["status"] == "DONE"
+
+
+def _poll(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_worker_thread_completes_jobs_and_survives_step_failures(tmp_path):
+    """The REAL thread loop, not the synchronous drain: it must claim queued
+    jobs, and a failing job must not kill the only worker thread."""
+    settings = Settings(
+        anthropic_api_key="x",
+        openai_api_key="x",
+        db_path=tmp_path / "w.db",
+        embedding_dim=DIM,
+        job_poll_seconds=0.01,
+    )
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    _, failing = _job(conn)
+    record: list[str] = []
+    worker = Worker(settings, steps=_fake_steps(record, fail_at="verify"))
+    worker.start()
+    try:
+        assert _poll(lambda: dbmod.get_job(conn, failing)["status"] == "FAILED")
+        assert worker._thread.is_alive()  # the failure did not kill the loop
+        # Hand it a clean job AFTER the failure — the same thread must run it.
+        worker._steps = _fake_steps(record)
+        _, ok_job = _job(conn)
+        assert _poll(lambda: dbmod.get_job(conn, ok_job)["status"] == "DONE")
+    finally:
+        worker.stop()
+    conn.close()
 
 
 def test_worker_start_twice_is_loud_and_restart_after_stop_works(conn, tmp_path):

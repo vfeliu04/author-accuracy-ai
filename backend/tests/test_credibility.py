@@ -11,6 +11,7 @@ from authorai.credibility import (
     _publisher_authority,
     _title_match,
     aggregate_credibility,
+    evidence_usage,
     merge_record,
     resolve_tier,
     score_source,
@@ -203,6 +204,53 @@ def test_merge_record_fills_gaps_but_never_overrides():
 
 
 # --- component scoring -----------------------------------------------------
+
+
+def test_evidence_usage_counts_supported_and_contradicted_from_the_db(conn):
+    """Executes the real SQL: a contradicting source is doing its job and must
+    carry weight (v1 counted only SUPPORTED). Quote-less verdicts count nothing."""
+    from authorai import db as dbmod
+    from authorai.embeddings import FakeEmbedder
+
+    run_id = dbmod.create_run(conn)
+    report = dbmod.add_document(conn, run_id, "REPORT")
+    source_a = dbmod.add_document(conn, run_id, "SOURCE")
+    source_b = dbmod.add_document(conn, run_id, "SOURCE")
+    embedder = FakeEmbedder(dim=8)
+    [chunk_a] = dbmod.add_chunks(conn, run_id, source_a, [{"text": "aa"}], embedder.embed(["aa"]))
+    [chunk_b] = dbmod.add_chunks(conn, run_id, source_b, [{"text": "bb"}], embedder.embed(["bb"]))
+    claims = dbmod.add_claims(conn, run_id, report, [{"text": f"c{i}"} for i in range(3)])
+    dbmod.add_verdicts(
+        conn,
+        run_id,
+        [
+            {
+                "claim_id": claims[0],
+                "verdict": "SUPPORTED",
+                "raw_verdict": "SUPPORTED",
+                "quoted_chunk_id": chunk_a,
+                "rationale": "r",
+                "model": "m",
+            },
+            {
+                "claim_id": claims[1],
+                "verdict": "CONTRADICTED",
+                "raw_verdict": "CONTRADICTED",
+                "quoted_chunk_id": chunk_b,
+                "rationale": "r",
+                "model": "m",
+            },
+            {
+                "claim_id": claims[2],
+                "verdict": "UNVERIFIABLE",
+                "raw_verdict": "UNVERIFIABLE",
+                "quoted_chunk_id": None,
+                "rationale": "r",
+                "model": "m",
+            },
+        ],
+    )
+    assert evidence_usage(conn, run_id) == {source_a: 1, source_b: 1}
 
 
 def test_publisher_matching_is_word_boundary_not_substring():

@@ -260,7 +260,13 @@ class Worker:
 
     def _loop(self) -> None:
         # The worker owns its connection — sqlite3 objects are thread-bound.
-        conn = dbmod.connect(self._settings.db_path, self._settings.embedding_dim)
+        try:
+            conn = dbmod.connect(self._settings.db_path, self._settings.embedding_dim)
+        except Exception:
+            # This thread is the only thing that runs jobs; dying silently at
+            # startup would leave every job QUEUED while /health reports ok.
+            logger.critical("worker could not open the database — NO jobs will run", exc_info=True)
+            raise
         try:
             while not self._stop.is_set():
                 try:
