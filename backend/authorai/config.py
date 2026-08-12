@@ -45,3 +45,4 @@ class Settings(BaseSettings):
     authority_tier1: str = "FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe"
     authority_tier2: str = "Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier"
     crossref_mailto: str | None = None
+    job_poll_seconds: float = 2.0

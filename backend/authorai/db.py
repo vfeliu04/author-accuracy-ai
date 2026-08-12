@@ -17,7 +17,9 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "FAILED")
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
@@ -63,6 +65,9 @@ def connect(db_path: Path | str, embedding_dim: int) -> sqlite3.Connection:
     conn.enable_load_extension(False)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    # The API thread and the job worker contend for the WAL writer lock —
+    # wait rather than throwing SQLITE_BUSY at the first overlap.
+    conn.execute("PRAGMA busy_timeout = 5000")
     _migrate(conn, embedding_dim)
     _check_embedding_dim(conn, embedding_dim)
     return conn
@@ -325,6 +330,34 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 8:
+        status_check = "('" + "', '".join(JOB_STATUSES) + "')"
+        conn.executescript(
+            f"""
+            BEGIN;
+
+            -- Background pipeline jobs. `payload` carries the work order
+            -- (upload ids) so recovery never has to guess what a run was
+            -- meant to contain; `progress` is a JSON array of
+            -- {{step,label,status,ts}} entries upserted by step name.
+            CREATE TABLE jobs(
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              kind TEXT NOT NULL DEFAULT 'full_pipeline',
+              status TEXT NOT NULL DEFAULT 'QUEUED' CHECK(status IN {status_check}),
+              payload TEXT NOT NULL,
+              progress TEXT NOT NULL DEFAULT '[]',
+              error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_jobs_run ON jobs(run_id);
+
+            PRAGMA user_version = 8;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -520,6 +553,102 @@ def list_verdicts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         (run_id,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_job(
+    conn: sqlite3.Connection, run_id: str, payload: dict, kind: str = "full_pipeline"
+) -> str:
+    job_id = new_id()
+    with conn:
+        conn.execute(
+            "INSERT INTO jobs(id, run_id, kind, payload, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, run_id, kind, json.dumps(payload), now_iso(), now_iso()),
+        )
+    return job_id
+
+
+def _job_row(row: sqlite3.Row) -> dict:
+    job = dict(row)
+    job["payload"] = json.loads(job["payload"])
+    job["progress"] = json.loads(job["progress"])
+    return job
+
+
+def get_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return _job_row(row) if row else None
+
+
+def get_run_job(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE run_id = ? ORDER BY created_at DESC LIMIT 1", (run_id,)
+    ).fetchone()
+    return _job_row(row) if row else None
+
+
+def claim_next_job(conn: sqlite3.Connection) -> dict | None:
+    """Atomically claim the oldest QUEUED job (compare-and-set via one UPDATE)."""
+    with conn:
+        row = conn.execute(
+            """
+            UPDATE jobs SET status = 'RUNNING', updated_at = ?
+            WHERE id = (SELECT id FROM jobs WHERE status = 'QUEUED' ORDER BY created_at LIMIT 1)
+            RETURNING *
+            """,
+            (now_iso(),),
+        ).fetchone()
+    return _job_row(row) if row else None
+
+
+def push_job_progress(
+    conn: sqlite3.Connection, job_id: str, step: str, label: str, status: str = "done"
+) -> None:
+    """Upsert one step entry in the job's progress array (keyed by step name)."""
+    with conn:
+        row = conn.execute("SELECT progress FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown job {job_id!r}")
+        progress = json.loads(row["progress"])
+        entry = {"step": step, "label": label, "status": status, "ts": now_iso()}
+        for i, existing in enumerate(progress):
+            if existing["step"] == step:
+                progress[i] = entry
+                break
+        else:
+            progress.append(entry)
+        conn.execute(
+            "UPDATE jobs SET progress = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(progress), now_iso(), job_id),
+        )
+
+
+def finish_job(
+    conn: sqlite3.Connection, job_id: str, status: str, error: str | None = None
+) -> None:
+    if status not in ("DONE", "FAILED"):
+        raise ValueError(f"finish_job only accepts DONE/FAILED, got {status!r}")
+    with conn:
+        conn.execute(
+            "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+            (status, error, now_iso(), job_id),
+        )
+
+
+def requeue_running_jobs(conn: sqlite3.Connection) -> list[str]:
+    """Startup recovery: a RUNNING job after a restart is an interrupted job —
+    re-queue it (steps are idempotent / reconciled) instead of stranding it
+    RUNNING forever, which is what v1 did."""
+    with conn:
+        rows = conn.execute(
+            "UPDATE jobs SET status = 'QUEUED', updated_at = ? WHERE status = 'RUNNING'"
+            " RETURNING id",
+            (now_iso(),),
+        ).fetchall()
+    job_ids = [row["id"] for row in rows]
+    for job_id in job_ids:
+        push_job_progress(conn, job_id, "recovered", "Re-queued after restart", status="done")
+    return job_ids
 
 
 def save_run_scores(
