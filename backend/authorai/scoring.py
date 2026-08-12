@@ -12,6 +12,7 @@ code checks against the report text. Weights are configured, parsed loudly,
 and there are NO floors (v1's floors made a total failure score ~51/100).
 """
 
+import math
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -106,10 +107,17 @@ def parse_weights(spec: str) -> dict[str, float]:
         name = name.strip()
         if name not in known:
             raise ValueError(f"Unknown validity component {name!r} in weights {spec!r}")
+        if name in weights:
+            raise ValueError(f"Duplicate validity component {name!r} in weights {spec!r}")
         try:
-            weights[name] = float(value)
+            weight = float(value)
         except ValueError as exc:
             raise ValueError(f"Malformed weight {entry!r} in {spec!r}") from exc
+        # NaN slips through a `abs(sum - 1) > 0.001` check (every NaN
+        # comparison is False) and would surface as a NaN score in the API.
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"Weight {entry!r} must be a finite non-negative number ({spec!r})")
+        weights[name] = weight
     if abs(sum(weights.values()) - 1.0) > 0.001:
         raise ValueError(f"Validity weights must sum to 1, got {sum(weights.values())} ({spec!r})")
     return weights
@@ -154,7 +162,6 @@ def assess_validity(
     components: dict[str, dict] = {}
     for name in RUBRIC_COMPONENTS:
         part: ComponentAssessment = getattr(assessment, name)
-        quote_verified = None
         if part.quote:
             quote_verified = 1 if normalize_quote(part.quote) in normalized_body else 0
             if not quote_verified:
@@ -162,6 +169,11 @@ def assess_validity(
                 # the score — a deliberate, documented deviation from the
                 # verdict downgrade rule.
                 logger.warning("validity %s quote not found in report text", name)
+        else:
+            # The rubric mandates a quote; omitting one must not look MORE
+            # trustworthy than providing a wrong one.
+            quote_verified = 0
+            logger.warning("validity %s returned no quote — unverifiable against the text", name)
         components[name] = {
             "score": float(part.score),
             "justification": part.justification,
@@ -183,6 +195,11 @@ def assess_validity(
 
     present = {name: w for name, w in weights.items() if components[name]["score"] is not None}
     weight_sum = sum(present.values())
+    if weight_sum <= 0:
+        raise ValueError(
+            "No weighted validity component has a score — with these weights nothing "
+            f"can be assessed ({weights!r})"
+        )
     total = sum(components[name]["score"] * w for name, w in present.items()) / weight_sum
     return {
         "score": round(total, 1),
@@ -262,38 +279,46 @@ def score_run(
     sources = conn.execute(
         "SELECT * FROM documents WHERE run_id = ? AND kind = 'SOURCE'", (run_id,)
     ).fetchall()
-    crossref = crossref or CrossrefClient(settings.crossref_mailto)
     tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
     tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
     current_year = datetime.now(UTC).year
 
+    # Built only when sources exist, closed only if built here — a caller's
+    # injected client stays theirs to manage.
+    owns_crossref = crossref is None and bool(sources)
+    if owns_crossref:
+        crossref = CrossrefClient(settings.crossref_mailto)
     per_source: list[dict] = []
     source_years: list[int] = []
-    for document in sources:
-        metadata = extract_metadata(
-            llm, settings.metadata_model, _opening_text(conn, document["id"])
-        )
-        tier, record = resolve_tier(metadata, crossref)
-        merged = merge_record(metadata, record)
-        scored = score_source(
-            merged,
-            tier,
-            tier1_publishers=tier1,
-            tier2_publishers=tier2,
-            current_year=current_year,
-        )
-        year_match = re.search(r"\b(19|20)\d{2}\b", merged.publication_date or "")
-        if year_match:
-            source_years.append(int(year_match.group()))
-        per_source.append(
-            {
-                "doc_id": document["id"],
-                "metadata": merged.model_dump(),
-                "components": scored["components"],
-                "total": scored["total"],
-                "tier": tier,
-            }
-        )
+    try:
+        for document in sources:
+            metadata = extract_metadata(
+                llm, settings.metadata_model, _opening_text(conn, document["id"])
+            )
+            tier, record = resolve_tier(metadata, crossref)
+            merged = merge_record(metadata, record)
+            scored = score_source(
+                merged,
+                tier,
+                tier1_publishers=tier1,
+                tier2_publishers=tier2,
+                current_year=current_year,
+            )
+            year_match = re.search(r"\b(19|20)\d{2}\b", merged.publication_date or "")
+            if year_match:
+                source_years.append(int(year_match.group()))
+            per_source.append(
+                {
+                    "doc_id": document["id"],
+                    "metadata": merged.model_dump(),
+                    "components": scored["components"],
+                    "total": scored["total"],
+                    "tier": tier,
+                }
+            )
+    finally:
+        if owns_crossref:
+            crossref.close()
     dbmod.save_source_credibility(conn, run_id, per_source)
     credibility = aggregate_credibility(per_source, evidence_usage(conn, run_id))
 

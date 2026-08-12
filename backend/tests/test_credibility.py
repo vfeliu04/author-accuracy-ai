@@ -57,6 +57,9 @@ def test_unresolvable_doi_falls_through_to_title_search():
                         {
                             "title": ["Global Hunger Index 2025"],
                             "published": {"date-parts": [[2025, 10]]},
+                            # The title embeds its year, so the year cannot
+                            # corroborate — the publisher does.
+                            "publisher": "Welthungerhilfe e.V.",
                         }
                     ]
                 }
@@ -100,14 +103,94 @@ def test_title_match_normalizes_markup_and_accepts_author_corroboration():
 
 
 @respx.mock
-def test_crossref_timeout_retries_then_gives_up_loudly():
-    route = respx.get(f"{CROSSREF_BASE}/works/10.1/slow")
+def test_crossref_timeout_retries_then_raises_loudly(monkeypatch):
+    """An unreachable Crossref is an outage, not 'not found' — silently
+    downgrading tiers would make credibility scores non-reproducible."""
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    route = respx.get(f"{CROSSREF_BASE}/works/10.1000/slow")
     route.side_effect = httpx.ConnectTimeout("slow")
-    metadata = SourceMetadata(doi="10.1/slow", title=None)
-    tier, record = resolve_tier(metadata, _client())
-    assert record is None
-    assert tier == "METADATA_ONLY"  # doi present but unverifiable -> metadata only
+    metadata = SourceMetadata(doi="10.1000/slow", title=None)
+    with pytest.raises(RuntimeError, match="no answer after 3 attempts"):
+        resolve_tier(metadata, _client())
     assert route.call_count == 3  # initial + 2 retries
+
+
+@respx.mock
+def test_crossref_throttling_retries_then_succeeds(monkeypatch):
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    route = respx.get(f"{CROSSREF_BASE}/works/10.1000/busy")
+    route.side_effect = [
+        httpx.Response(429),
+        httpx.Response(200, json={"message": {"title": ["Anything"]}}),
+    ]
+    metadata = SourceMetadata(doi="10.1000/busy", title=None)
+    tier, record = resolve_tier(metadata, _client())
+    assert tier == "VERIFIED_DOI"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_crossref_server_errors_raise_after_retries(monkeypatch):
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    route = respx.get(f"{CROSSREF_BASE}/works/10.1000/down")
+    route.mock(return_value=httpx.Response(503))
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        resolve_tier(SourceMetadata(doi="10.1000/down", title=None), _client())
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_malformed_doi_is_skipped_without_a_request():
+    # No route mocked: any HTTP call would make respx raise. The URL-prefixed
+    # and shapeless forms both fall through to METADATA_ONLY with a warning.
+    for bad in ("https://doi.org/nope", "not-a-doi", "10.1/x"):
+        tier, record = resolve_tier(SourceMetadata(doi=bad, title=None), _client())
+        assert (tier, record) == ("METADATA_ONLY", None)
+
+
+@respx.mock
+def test_url_prefixed_doi_is_cleaned_before_lookup():
+    route = respx.get(f"{CROSSREF_BASE}/works/10.1000/xyz").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
+    )
+    metadata = SourceMetadata(doi="https://doi.org/10.1000/xyz", title=None)
+    tier, _ = resolve_tier(metadata, _client())
+    assert tier == "VERIFIED_DOI"
+    assert route.call_count == 1
+
+
+def test_year_bearing_title_cannot_corroborate_by_year_alone():
+    """Finding: 'Annual Report 2023' from a DIFFERENT organization trivially
+    agrees on the year — the corroboration must come from an independent field."""
+    record = {
+        "title": ["Global Hunger Index 2025"],
+        "published": {"date-parts": [[2025]]},  # matches META's year exactly
+    }
+    assert not _title_match(META, record)  # no author, no publisher -> rejected
+    assert _title_match(META, {**record, "publisher": "Welthungerhilfe e.V."})
+
+
+def test_family_names_handle_inverted_and_suffixed_authors():
+    def match(printed):
+        metadata = META.model_copy(update={"authors": [printed], "publication_date": None})
+        record = {"title": ["Global Hunger Index 2025"], "author": [{"family": "Smith"}]}
+        return _title_match(metadata, record)
+
+    assert match("John Smith")
+    assert match("Smith, John")  # family name printed BEFORE the comma
+    assert match("John Smith Jr.")  # suffix is not a family name
+    assert match("John Smith, PhD")  # degree is not a family name
+    assert not match("John Watson")
+
+
+def test_title_normalization_handles_xml_entities_and_non_latin():
+    metadata = META.model_copy(update={"title": "Health & Safety Report"})
+    record = {"title": ["Health &amp; Safety Report"], "author": [{"family": "Author"}]}
+    assert _title_match(metadata, record)
+    # A non-Latin title must not normalize to '' (which would match nothing).
+    chinese = META.model_copy(update={"title": "中国农业发展报告"})
+    record = {"title": ["中国农业发展报告"], "author": [{"family": "Author"}]}
+    assert _title_match(chinese, record)
 
 
 def test_merge_record_fills_gaps_but_never_overrides():
@@ -129,6 +212,15 @@ def test_publisher_matching_is_word_boundary_not_substring():
     assert _publisher_authority("UN World Food Programme", tier1, []) == 30.0
     assert _publisher_authority("FAO", tier1, []) == 30.0
     assert _publisher_authority(None, tier1, []) == 0.0  # no floor points
+
+
+def test_publisher_matching_requires_adjacent_in_order_phrase():
+    tier1 = ["World Bank", "UN"]
+    # Both words present but scattered must NOT match the phrase.
+    assert _publisher_authority("International Bank for Reconstruction, World", tier1, []) == 15.0
+    assert _publisher_authority("The World Bank Group", tier1, []) == 30.0
+    # Dotted initialisms are the same word: 'U.N.' == 'UN'.
+    assert _publisher_authority("U.N. Development Programme", tier1, []) == 30.0
 
 
 def test_score_source_no_floors_for_unknowns():

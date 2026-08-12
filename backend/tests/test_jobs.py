@@ -96,15 +96,21 @@ def test_claim_next_job_is_fifo_and_exhausts(conn):
 
 def test_torn_ingest_is_deleted_and_reingested(conn, tmp_path, monkeypatch):
     """A document row with zero chunks is a torn ingest — recovery must delete
-    it (figures included) and ingest fresh, not skip it."""
+    it (figures included, ON DISK too) and ingest fresh, not skip it."""
     from authorai import jobs as jobsmod
 
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", figures_dir=tmp_path / "figures")
     run_id = dbmod.create_run(conn)
     pdf = tmp_path / "source.pdf"
     pdf.write_bytes(b"%PDF-fake")
     upload_id = dbmod.add_upload(conn, "SOURCE", "source.pdf", str(pdf))
     torn_doc = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)
-    dbmod.add_figure(conn, run_id, torn_doc, image_path="/tmp/x.png", page=1)
+    # The torn attempt's PNG landed on disk BEFORE the crash; re-ingest gets a
+    # fresh doc_id, so this file would be unreferenced garbage if left behind.
+    png = tmp_path / "figures" / run_id / torn_doc / "fig-1.png"
+    png.parent.mkdir(parents=True)
+    png.write_bytes(b"fake png")
+    dbmod.add_figure(conn, run_id, torn_doc, image_path=str(png), page=1)
     # No chunks for torn_doc — the torn state.
 
     ingested: list[tuple] = []
@@ -116,7 +122,7 @@ def test_torn_ingest_is_deleted_and_reingested(conn, tmp_path, monkeypatch):
         return "new-doc-id"
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", fake_ingest_pdf)
-    context = PipelineContext(conn, SETTINGS)
+    context = PipelineContext(conn, settings)
     _reconcile_upload(context, run_id, upload_id)
 
     # fallback_title carries the ORIGINAL file name — the disk path is a
@@ -129,6 +135,7 @@ def test_torn_ingest_is_deleted_and_reingested(conn, tmp_path, monkeypatch):
         conn.execute("SELECT count(*) FROM figures WHERE doc_id = ?", (torn_doc,)).fetchone()[0]
         == 0
     )
+    assert not png.parent.exists()  # the orphaned figure directory is gone
 
 
 def test_completed_ingest_is_skipped(conn, tmp_path, monkeypatch):
@@ -162,3 +169,48 @@ def test_run_job_directly_without_worker(conn):
     record: list[str] = []
     run_job(conn, SETTINGS, job, steps=_fake_steps(record))
     assert dbmod.get_job(conn, job_id)["status"] == "DONE"
+
+
+def test_zero_claim_extraction_fails_the_extract_step(conn, monkeypatch):
+    """An empty extraction recorded as a green step would push the failure to
+    verify, whose 'run extract first' message would point at a step that
+    looks successful."""
+    from authorai import jobs as jobsmod
+    from authorai.jobs import step_extract
+
+    run_id = dbmod.create_run(conn)
+    dbmod.add_document(conn, run_id, "REPORT", metadata='{"sections": [{"text": "x"}]}')
+    monkeypatch.setattr(jobsmod, "extract_claims", lambda *a, **k: [])
+    with pytest.raises(ValueError, match="0 claims"):
+        step_extract(PipelineContext(conn, SETTINGS), run_id, {})
+
+
+def test_failure_handler_failing_does_not_propagate(conn):
+    """If even recording the failure fails, run_job must swallow it (the
+    worker thread survives) and leave the job RUNNING for startup recovery."""
+    run_id, job_id = _job(conn)
+    job = dbmod.claim_next_job(conn)
+    job["run_id"] = "no-such-run"  # set_run_status raises, then so does the handler
+    run_job(conn, SETTINGS, job, steps=_fake_steps([]))  # must not raise
+    assert dbmod.get_job(conn, job_id)["status"] == "RUNNING"
+
+
+def test_worker_start_twice_is_loud_and_restart_after_stop_works(conn, tmp_path):
+    settings = Settings(
+        anthropic_api_key="x",
+        openai_api_key="x",
+        db_path=tmp_path / "w.db",
+        embedding_dim=8,
+        job_poll_seconds=0.01,
+    )
+    worker = Worker(settings, steps=_fake_steps([]))
+    worker.start()
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            worker.start()
+    finally:
+        worker.stop()
+    # stop() sets the event; start() must clear it or the new thread is a no-op.
+    worker.start()
+    assert not worker._stop.is_set()
+    worker.stop()

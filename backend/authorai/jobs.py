@@ -11,11 +11,15 @@ Design constraints, each the negation of a v1 defect:
   reconciles per upload — a document with chunks is done; a document without
   chunks is a torn ingest (ingest_pdf's writes span transactions) and is
   deleted and re-ingested; a missing document is ingested fresh.
-- The worker is single: a long verify (batch poll) blocks the queue behind it.
-  Acceptable for a single-user tool; the jobs table makes a second worker a
-  drop-in change later.
+- The worker is single, and so is the PROCESS: startup recovery re-queues
+  every RUNNING job unconditionally, which is only correct when no other
+  process can be mid-job (never run uvicorn --workers N>1 against one
+  database). A long verify (batch poll) blocks the queue behind it —
+  acceptable for a single-user tool; the jobs table makes a second worker a
+  drop-in change later, but it would need a lease column first.
 """
 
+import shutil
 import sqlite3
 import threading
 import traceback
@@ -90,15 +94,20 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
     document = conn.execute(
         "SELECT * FROM documents WHERE run_id = ? AND upload_id = ?", (run_id, upload_id)
     ).fetchone()
+    settings = context.settings
     if document is not None:
         if _chunk_count(conn, document["id"]):
             return  # completed on a previous attempt
         logger.warning("torn ingest for upload %s — re-ingesting", upload_id)
+        # The figure PNGs land on disk BEFORE any DB write and re-ingest gets
+        # a fresh doc_id, so the old directory would be unreferenced garbage.
+        figure_dir = Path(settings.figures_dir) / run_id / document["id"]
+        if figure_dir.exists():
+            shutil.rmtree(figure_dir)
         with conn:
             conn.execute("DELETE FROM figures WHERE doc_id = ?", (document["id"],))
             conn.execute("DELETE FROM documents WHERE id = ?", (document["id"],))
 
-    settings = context.settings
     llm = context.llm
     caption_model = settings.caption_model
 
@@ -139,6 +148,11 @@ def step_extract(context: PipelineContext, run_id: str, payload: dict) -> str:
     sections = _json.loads(report["metadata"]).get("sections", [])
     tables = dbmod.list_chunks_by_kind(conn, report["id"], "table")
     claims = extract_claims(context.llm, sections, context.settings.extraction_model, tables=tables)
+    if not claims:
+        # Recording an empty extraction as a green step would push the
+        # failure to `verify`, whose "no claims — run extract first" message
+        # would then point at a step that looks successful.
+        raise ValueError(f"Extraction produced 0 claims for run {run_id!r}")
     dbmod.add_claims(
         conn, run_id, report["id"], [claim.model_dump() for claim in claims], replace=True
     )
@@ -185,33 +199,46 @@ def run_job(
     job: dict,
     steps: dict[str, Callable] | None = None,
 ) -> None:
-    """Execute one claimed job, resuming from its first incomplete step."""
+    """Execute one claimed job, resuming from its first incomplete step.
+
+    Terminal writes are atomic over (job, run) and the DONE write happens
+    OUTSIDE the failure handler: if that last write itself fails, the job
+    stays RUNNING for startup recovery to re-queue — every step is already
+    recorded done, so the retry only repeats the finish. A successful run is
+    never rewritten as FAILED by a bookkeeping failure.
+    """
     steps = steps if steps is not None else REAL_STEPS
     context = PipelineContext(conn, settings)
     run_id = job["run_id"]
-    completed = {p["step"] for p in job["progress"] if p["status"] == "done"}
-    dbmod.set_run_status(conn, run_id, "RUNNING")
     try:
+        completed = {p["step"] for p in job["progress"] if p["status"] == "done"}
+        dbmod.set_run_status(conn, run_id, "RUNNING")
         for name in PIPELINE_STEPS:
             if name in completed:
                 continue
             dbmod.push_job_progress(conn, job["id"], name, _STEP_LABELS[name], status="running")
             label = steps[name](context, run_id, job["payload"])
             dbmod.push_job_progress(conn, job["id"], name, label, status="done")
-        dbmod.finish_job(conn, job["id"], "DONE")
-        dbmod.set_run_status(conn, run_id, "DONE")
     except Exception as exc:  # noqa: BLE001 - recorded on the job, run marked FAILED
         logger.exception("job %s failed", job["id"])
         error = f"{type(exc).__name__}: {exc}"
-        # Flip the in-flight step to failed so the progress feed shows where.
-        for entry in dbmod.get_job(conn, job["id"])["progress"]:
-            if entry["status"] == "running":
-                dbmod.push_job_progress(
-                    conn, job["id"], entry["step"], entry["label"], status="failed"
-                )
-        dbmod.finish_job(conn, job["id"], "FAILED", error=error)
-        dbmod.set_run_status(conn, run_id, "FAILED", error=error)
+        try:
+            # Flip the in-flight step to failed so the progress feed shows where.
+            for entry in dbmod.get_job(conn, job["id"])["progress"]:
+                if entry["status"] == "running":
+                    dbmod.push_job_progress(
+                        conn, job["id"], entry["step"], entry["label"], status="failed"
+                    )
+            dbmod.finish_job_and_run(conn, job["id"], run_id, "FAILED", error=error)
+        except Exception:  # noqa: BLE001
+            # The handler failing must not kill the worker; the job stays
+            # RUNNING and startup recovery re-queues it.
+            logger.critical(
+                "job %s: recording the failure (%s) itself failed", job["id"], error, exc_info=True
+            )
         logger.debug("traceback:\n%s", traceback.format_exc())
+        return
+    dbmod.finish_job_and_run(conn, job["id"], run_id, "DONE")
 
 
 class Worker:
@@ -236,12 +263,24 @@ class Worker:
         conn = dbmod.connect(self._settings.db_path, self._settings.embedding_dim)
         try:
             while not self._stop.is_set():
-                if not self.run_pending(conn):
+                try:
+                    ran = self.run_pending(conn)
+                except Exception:  # noqa: BLE001
+                    # The ONLY worker thread must survive anything run_job
+                    # lets escape (e.g. a lock timeout on the final DONE
+                    # write) — a dead thread would leave every future job
+                    # QUEUED forever while /health still reports ok.
+                    logger.critical("worker loop error — worker still alive", exc_info=True)
+                    ran = 0
+                if not ran:
                     self._stop.wait(self._settings.job_poll_seconds)
         finally:
             conn.close()
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("worker is already running")
+        self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="authorai-worker", daemon=True)
         self._thread.start()
 

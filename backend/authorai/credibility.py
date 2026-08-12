@@ -18,10 +18,12 @@ matching used naive substrings ("un" matched "University"); the title-match
 tier was designed but never built; unknown values got floor points.
 """
 
+import html
 import re
 import sqlite3
 import time
 from typing import Literal
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, Field
@@ -69,13 +71,31 @@ def extract_metadata(llm: LLM, model: str, opening_text: str) -> SourceMetadata:
     )
 
 
+_DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:)\s*", re.IGNORECASE)
+_DOI_SHAPE = re.compile(r"^10\.\d{4,9}/\S+$")
+
+
+def clean_doi(doi: str) -> str | None:
+    """Strip the URL/`doi:` prefixes the extractor is told not to emit but
+    sometimes does, and reject anything that is not DOI-shaped — an
+    unvalidated string in the request path would silently look up a
+    DIFFERENT DOI (fragments are dropped, `?` starts a query string)."""
+    candidate = _DOI_PREFIX.sub("", doi.strip())
+    if not _DOI_SHAPE.match(candidate):
+        logger.warning("Malformed DOI %r — skipping DOI lookup", doi)
+        return None
+    return candidate
+
+
 class CrossrefClient:
     """Thin Crossref client: DOI resolution and bibliographic title search.
 
-    Retries only transport failures (timeout/connect); a non-200 is an answer
-    ("not found" / rejected), not an outage, and is returned as None with a
-    log line. A missing mailto is allowed but logged loudly — Crossref's
-    anonymous pool is slower and they ask for contact info.
+    404/4xx is an ANSWER ("not found" / rejected) and returns None. 429/5xx
+    and transport failures are retried with backoff and then RAISE — treating
+    a throttled or down Crossref as "not found" would silently downgrade
+    verification tiers and make credibility scores non-reproducible between
+    runs of identical inputs. A missing mailto is allowed but logged loudly —
+    Crossref's anonymous pool is slower and they ask for contact info.
     """
 
     def __init__(self, mailto: str | None, timeout: float = CROSSREF_TIMEOUT):
@@ -89,24 +109,36 @@ class CrossrefClient:
             base_url=CROSSREF_BASE, timeout=timeout, headers={"User-Agent": agent}
         )
 
+    def close(self) -> None:
+        self._client.close()
+
     def _get(self, path: str, params: dict | None = None) -> dict | None:
+        failure = ""
         for attempt in range(CROSSREF_RETRIES + 1):
             try:
                 response = self._client.get(path, params=params)
-            except (httpx.TimeoutException, httpx.ConnectError) as exc:
-                if attempt == CROSSREF_RETRIES:
-                    logger.warning("Crossref unreachable after retries (%s): %s", path, exc)
+            except httpx.TransportError as exc:
+                failure = f"{type(exc).__name__}: {exc}"
+            else:
+                if response.status_code == 200:
+                    return response.json().get("message")
+                if response.status_code != 429 and response.status_code < 500:
+                    logger.info(
+                        "Crossref %s -> %s (an answer: not found)", path, response.status_code
+                    )
                     return None
-                time.sleep(1.0)
-                continue
-            if response.status_code != 200:
-                logger.info("Crossref %s -> %s", path, response.status_code)
-                return None
-            return response.json().get("message")
-        return None
+                failure = f"HTTP {response.status_code}"
+            if attempt < CROSSREF_RETRIES:
+                time.sleep(1.0 * (attempt + 1))
+        raise RuntimeError(
+            f"Crossref gave no answer after {CROSSREF_RETRIES + 1} attempts ({path}): {failure}"
+        )
 
     def by_doi(self, doi: str) -> dict | None:
-        return self._get(f"/works/{doi}")
+        cleaned = clean_doi(doi)
+        if cleaned is None:
+            return None
+        return self._get(f"/works/{quote(cleaned, safe='/')}")
 
     def by_title(self, title: str, rows: int = 5) -> list[dict]:
         message = self._get("/works", params={"query.bibliographic": title, "rows": rows})
@@ -117,10 +149,13 @@ _TAGS = re.compile(r"<[^>]+>")
 
 
 def _normalize_title(title: str) -> str:
-    """Crossref titles carry markup (<i>…</i>) and typographic noise; claims of
-    'exact match' are made on this normalized form (the Phase 3 lesson: collapse
-    non-alphanumerics to spaces, never delete them)."""
-    return re.sub(r"[^a-z0-9]+", " ", _TAGS.sub(" ", title.lower())).strip()
+    """Crossref titles carry markup (<i>…</i>) and XML entities (&amp;);
+    claims of 'exact match' are made on this normalized form (the Phase 3
+    lesson: collapse non-alphanumerics to spaces, never delete them).
+    `\\w` keeps the comparison Unicode-aware — an ASCII-only class would
+    normalize every non-Latin-script title to '' and make VERIFIED_TITLE
+    unreachable for such sources."""
+    return re.sub(r"[\W_]+", " ", _TAGS.sub(" ", html.unescape(title).lower())).strip()
 
 
 def _year_of(date_string: str | None) -> int | None:
@@ -147,32 +182,67 @@ def _record_titles(record: dict) -> list[str]:
     return combined
 
 
+# Trailing tokens that are never family names ("John Smith Jr.", "Jane Doe, PhD").
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "phd", "md", "esq"}
+
+
 def _family_names(metadata: SourceMetadata) -> set[str]:
+    """Best-effort family names from authors "as printed".
+
+    Academic front matter prints both "Jane Doe" and "Doe, Jane" — for the
+    inverted form the family name is BEFORE the comma, so taking the last
+    token of the whole string would corroborate against given names.
+    Conveniently, "Jane Doe, PhD" resolves correctly under the same rule
+    (last non-suffix token of the pre-comma segment)."""
     names = set()
     for author in metadata.authors:
-        tokens = re.findall(r"[A-Za-z][A-Za-z'-]+", author)
+        segment = author.split(",")[0] if "," in author else author
+        tokens = [t.lower() for t in re.findall(r"[A-Za-z][A-Za-z'-]+", segment)]
+        while tokens and tokens[-1] in _NAME_SUFFIXES:
+            tokens.pop()
         if tokens:
-            names.add(tokens[-1].lower())  # last printed token ≈ family name
+            names.add(tokens[-1])
     return names
+
+
+def _publishers_agree(ours: str | None, theirs: str | None) -> bool:
+    """Phrase containment either way — 'Welthungerhilfe' ≡ 'Welthungerhilfe e.V.'."""
+    our_tokens, their_tokens = _phrase_tokens(ours or ""), _phrase_tokens(theirs or "")
+    if not our_tokens or not their_tokens:
+        return False
+    a, b = f" {' '.join(our_tokens)} ", f" {' '.join(their_tokens)} "
+    return a in b or b in a
 
 
 def _title_match(metadata: SourceMetadata, record: dict) -> bool:
     """Normalized-exact title match PLUS one corroborating field.
 
     A title match alone is not identity — 'Annual Report 2023' matches
-    thousands of works. Corroboration: publication year within ±1, or the
-    record's first-author family name appearing among our extracted authors.
+    thousands of works. Corroboration: publication year within ±1, author
+    family names intersecting, or publisher agreement. When the title itself
+    contains a year, every same-titled work trivially agrees on it, so year
+    corroboration is vacuous for exactly the generic-title class it exists to
+    reject — those titles must corroborate via authors or publisher (NGO
+    reports with year-bearing titles usually print no personal authors).
     """
     ours = _normalize_title(metadata.title or "")
     if not ours or ours not in {_normalize_title(t) for t in _record_titles(record)}:
         return False
+    year_in_title = re.search(r"\b(19|20)\d{2}\b", ours)
     our_year, record_year = _year_of(metadata.publication_date), _record_year(record)
-    if our_year is not None and record_year is not None and abs(our_year - record_year) <= 1:
+    if (
+        not year_in_title
+        and our_year is not None
+        and record_year is not None
+        and abs(our_year - record_year) <= 1
+    ):
         return True
     record_families = {
         (a.get("family") or "").lower() for a in record.get("author") or [] if a.get("family")
     }
-    return bool(record_families & _family_names(metadata))
+    if record_families & _family_names(metadata):
+        return True
+    return _publishers_agree(metadata.publisher, record.get("publisher"))
 
 
 def resolve_tier(metadata: SourceMetadata, crossref: CrossrefClient) -> tuple[Tier, dict | None]:
@@ -207,14 +277,41 @@ def merge_record(metadata: SourceMetadata, record: dict | None) -> SourceMetadat
 _TIER_POINTS = {"VERIFIED_DOI": 20.0, "VERIFIED_TITLE": 15.0, "METADATA_ONLY": 5.0, "NONE": 0.0}
 
 
+def _phrase_tokens(text: str) -> list[str]:
+    """Word tokens with runs of single letters fused, so 'U.N.' ≡ 'UN'."""
+    fused: list[str] = []
+    run = ""
+    for token in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(token) == 1:
+            run += token
+            continue
+        if run:
+            fused.append(run)
+            run = ""
+        fused.append(token)
+    if run:
+        fused.append(run)
+    return fused
+
+
 def _publisher_authority(publisher: str | None, tier1: list[str], tier2: list[str]) -> float:
-    """Word-boundary matching — 'un' must match 'UN' but never 'University'."""
+    """Consecutive word-boundary phrase matching.
+
+    'un' must match 'UN' or 'U.N.' but never 'University', and a multi-word
+    needle must appear as an adjacent in-order phrase — a subset-of-words
+    check would give 'World Bank' authority to any publisher containing both
+    words anywhere. Caveat that stays with the CONFIG: a single generic word
+    as a needle ('Science', 'Nature') matches every publisher containing that
+    word; keep configured needles as specific as the real names allow.
+    """
     if not publisher:
         return 0.0
-    words = set(re.findall(r"[a-z0-9]+", publisher.lower()))
+    haystack = " " + " ".join(_phrase_tokens(publisher)) + " "
 
     def hits(needles: list[str]) -> bool:
-        return any(set(needle.lower().split()) <= words for needle in needles if needle)
+        return any(
+            f" {' '.join(_phrase_tokens(needle))} " in haystack for needle in needles if needle
+        )
 
     if hits(tier1):
         return 30.0

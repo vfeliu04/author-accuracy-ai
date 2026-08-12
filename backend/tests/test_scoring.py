@@ -62,6 +62,14 @@ def test_parse_weights_is_loud_about_garbage():
         parse_weights("coverage:lots")
     with pytest.raises(ValueError, match="must sum to 1"):
         parse_weights("coverage:0.9,consistency:0.9")
+    # NaN passes an `abs(sum - 1) > 0.001` check (NaN comparisons are False)
+    # and would surface as a NaN score serialized into the API.
+    with pytest.raises(ValueError, match="finite"):
+        parse_weights("coverage:nan,consistency:0.5,methodology:0.5")
+    with pytest.raises(ValueError, match="finite"):
+        parse_weights("coverage:-0.5,consistency:1.5")
+    with pytest.raises(ValueError, match="Duplicate"):
+        parse_weights("coverage:0.5,coverage:0.5")
 
 
 def test_recency_from_real_years_and_none_when_unknown():
@@ -111,6 +119,36 @@ def test_validity_unfindable_quote_flags_but_does_not_zero():
     )
     assert result["components"]["coverage"]["quote_verified"] == 0
     assert result["components"]["coverage"]["score"] == 80.0  # flagged, not punished
+
+
+def test_validity_missing_quote_is_flagged_not_trusted():
+    """Omitting the mandated quote must not look MORE trustworthy than
+    providing a wrong one."""
+    llm = FakeLLM(parse_results={ValidityAssessment: _assessment(quote=None)})
+    result = assess_validity(
+        llm,
+        "model-m",
+        SECTIONS,
+        weights=parse_weights("coverage:1.0"),
+        source_years=[],
+        current_year=2026,
+    )
+    assert result["components"]["coverage"]["quote_verified"] == 0
+    assert result["components"]["coverage"]["score"] == 80.0  # flagged, not punished
+
+
+def test_validity_no_scorable_component_is_loud():
+    # recency carries all weight but no source has a date -> nothing to weigh.
+    llm = FakeLLM(parse_results={ValidityAssessment: _assessment()})
+    with pytest.raises(ValueError, match="No weighted validity component"):
+        assess_validity(
+            llm,
+            "model-m",
+            SECTIONS,
+            weights=parse_weights("recency:1.0"),
+            source_years=[],
+            current_year=2026,
+        )
 
 
 def test_validity_missing_recency_renormalizes_weights():

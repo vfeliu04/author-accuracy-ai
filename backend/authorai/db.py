@@ -652,16 +652,27 @@ def push_job_progress(
         )
 
 
-def finish_job(
-    conn: sqlite3.Connection, job_id: str, status: str, error: str | None = None
+def finish_job_and_run(
+    conn: sqlite3.Connection, job_id: str, run_id: str, status: str, error: str | None = None
 ) -> None:
+    """Terminal state for a job AND its run in ONE transaction.
+
+    Two separate writes would leave a crash window where the job reads DONE
+    but the run stays RUNNING forever — startup recovery keys off RUNNING
+    jobs, so nothing would ever repair the divergence.
+    """
     if status not in ("DONE", "FAILED"):
-        raise ValueError(f"finish_job only accepts DONE/FAILED, got {status!r}")
+        raise ValueError(f"finish_job_and_run only accepts DONE/FAILED, got {status!r}")
     with conn:
-        conn.execute(
+        job_cursor = conn.execute(
             "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
             (status, error, now_iso(), job_id),
         )
+        run_cursor = conn.execute(
+            "UPDATE runs SET status = ?, error = ? WHERE id = ?", (status, error, run_id)
+        )
+        if job_cursor.rowcount == 0 or run_cursor.rowcount == 0:
+            raise ValueError(f"Unknown job {job_id!r} or run {run_id!r}")
 
 
 def requeue_running_jobs(conn: sqlite3.Connection) -> list[str]:
