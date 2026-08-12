@@ -116,6 +116,7 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         figures_dir=settings.figures_dir,
         upload_id=upload_id,
         describe=describe,
+        fallback_title=upload["file_name"],
     )
 
 

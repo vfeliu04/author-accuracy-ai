@@ -12,6 +12,6 @@
   "downgraded": 0,
   "model": "claude-opus-5",
   "run_id": "3eb1a2435c3b477f958095fd11934438",
-  "recorded": "2026-08-08",
-  "note": "CORRECTED holdout verdict reference (judge prompt v1). The first recording (0.89) was corrupted by a scorer bug found in the phase-end review: value-only matching cross-paired the two value=12 claims ('fewer than a dozen' vs 'floating farm corridor'), charging the pipeline with two errors it never made; the note's Iceland miss never happened. With best-fit pairing: every bare fabrication correctly CONTRADICTED (8/8), SUPPORTED 15/15, and the single true miss is the deliberately borderline Protein Accord (UNVERIFIABLE judged CONTRADICTED). Dev numbers were never affected \u2014 its golden values are collision-free. Policy: phase boundaries only, never tune against."
+  "recorded": "2026-08-12",
+  "note": "Holdout verdict reference at the Phase 5 close, re-recorded on claims extracted with the embedded-assertion rule (Step A1) and verdicts stamped with the current judge prompt hash (stale-verdict guard active). Identical to the corrected Phase 4 reference: 0.963, coverage 1.00, zero downgrades, and the single miss is still the deliberately borderline Protein Accord (UNVERIFIABLE judged CONTRADICTED). Dev verdict accuracy rose 0.78→0.84–0.86 over the same interval while this held — the overfitting guard passes. Prior history: the first recording (0.89, 2026-08-08) was corrupted by the scorer's value-only cross-pairing bug, fixed with best-fit pairing. Policy: phase boundaries only, never tune against."
 }

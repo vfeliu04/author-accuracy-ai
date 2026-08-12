@@ -154,6 +154,7 @@ def ingest_pdf(
     figures_dir: Path | str,
     upload_id: str | None = None,
     describe: "Callable[[Image], str] | None" = None,
+    fallback_title: str | None = None,
 ) -> str:
     """Ingest one PDF into a run: upload + document rows, chunks, figures.
 
@@ -225,7 +226,9 @@ def ingest_pdf(
         run_id,
         kind,
         upload_id=upload_id,
-        title=parsed.title or path.stem,
+        # API uploads live on disk under generated names — their real name is
+        # the fallback, so untitled documents don't display as hex ids.
+        title=parsed.title or fallback_title or path.stem,
         metadata=json.dumps({"sections": [asdict(section) for section in parsed.sections]}),
         doc_id=doc_id,
     )

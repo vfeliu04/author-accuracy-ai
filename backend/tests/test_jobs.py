@@ -109,15 +109,19 @@ def test_torn_ingest_is_deleted_and_reingested(conn, tmp_path, monkeypatch):
 
     ingested: list[tuple] = []
 
-    def fake_ingest_pdf(conn_, embedder, run_id_, path, *, kind, figures_dir, upload_id, describe):
-        ingested.append((str(path), kind, upload_id))
+    def fake_ingest_pdf(
+        conn_, embedder, run_id_, path, *, kind, figures_dir, upload_id, describe, fallback_title
+    ):
+        ingested.append((str(path), kind, upload_id, fallback_title))
         return "new-doc-id"
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", fake_ingest_pdf)
     context = PipelineContext(conn, SETTINGS)
     _reconcile_upload(context, run_id, upload_id)
 
-    assert ingested == [(str(pdf), "SOURCE", upload_id)]
+    # fallback_title carries the ORIGINAL file name — the disk path is a
+    # generated hex name, so untitled documents would otherwise show as ids.
+    assert ingested == [(str(pdf), "SOURCE", upload_id, "source.pdf")]
     assert (
         conn.execute("SELECT count(*) FROM documents WHERE id = ?", (torn_doc,)).fetchone()[0] == 0
     )

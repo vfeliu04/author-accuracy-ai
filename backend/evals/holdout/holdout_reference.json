@@ -6,10 +6,10 @@
   "extracted_total": 31,
   "model": "claude-opus-5",
   "run_id": "3eb1a2435c3b477f958095fd11934438",
-  "recorded": "2026-08-07",
+  "recorded": "2026-08-12",
   "recorded_at_dev_baseline": {
-    "recall": 0.973,
-    "precision": 0.973
+    "recall": 1.0,
+    "precision": 0.974
   },
-  "note": "Holdout reference at the Phase 3 close. All 27 labels found, including every unflagged fabrication and all table rows. The 4 precision-count misses are duplicate coverage (same fact extracted from both prose and the table), not spurious claims. Labels adversarially audited (27/27 confirmed) before first scoring. Policy: score at phase boundaries only; never tune against this set."
+  "note": "Holdout reference at the Phase 5 close, re-recorded after the embedded-assertion extraction rule (Step A1) changed the prompt. Byte-identical scores to the Phase 3 reference: recall 1.00, precision 0.87, same 31 extracted claims profile — the rule that lifted dev verdict accuracy 0.78→0.84–0.86 did not shift holdout extraction at all, so it generalized rather than fit the dev report. The 4 precision-count misses remain duplicate coverage (same fact in prose and table), not spurious claims. Policy: score at phase boundaries only; never tune against this set."
 }
