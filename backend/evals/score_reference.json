@@ -1,0 +1,26 @@
+{
+  "run_id": "6fc062e08aa4492ab138182a5c53f184",
+  "recorded": "2026-08-12",
+  "accuracy": {
+    "accuracy": 0.6,
+    "coverage": 0.5263,
+    "supported": 12,
+    "contradicted": 8,
+    "unverifiable": 18,
+    "note": "Golden labels imply true decided ratio 14/25=0.56 \u2014 consistent."
+  },
+  "credibility": {
+    "score": 50.9,
+    "method": "usage_weighted_mean",
+    "sources": {
+      "GHI synopsis": "37.0 METADATA_ONLY (DOI-less brochure \u2014 honest)",
+      "Heliyon review": "92.5 VERIFIED_DOI (live Crossref resolution)"
+    }
+  },
+  "validity": {
+    "score": 42.0,
+    "noise_floor": "rubric component noise \u00b12-3 pts over 3 same-code runs (34.6/39.2/35.1); treat small deltas as noise",
+    "note": "Low score is plausibly CORRECT for the fake report \u2014 it is deliberately self-contradicting with no methodology section."
+  },
+  "note": "Reference snapshot, not a golden eval \u2014 there is no labeled truth for these scores. Exists so future scoring changes have a comparison point."
+}

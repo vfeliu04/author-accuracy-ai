@@ -17,6 +17,7 @@ from authorai.embeddings import OpenAIEmbedder
 from authorai.evals import load_golden, score_extraction, score_verdicts
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
 from authorai.llm import AnthropicClient
+from authorai.scoring import score_run
 from authorai.search import hybrid_search
 from authorai.verification import EVIDENCE_K, VERDICT_PROMPT_HASH, verify_run
 
@@ -273,6 +274,26 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_score(args: argparse.Namespace) -> None:
+    settings, conn = _setup()
+    llm = AnthropicClient(settings.anthropic_api_key)
+    result = score_run(conn, llm, args.run_id, settings)
+    accuracy = result["accuracy"]
+    print(
+        f"accuracy: {accuracy['accuracy']} "
+        f"(supported {accuracy['supported']}, contradicted {accuracy['contradicted']}, "
+        f"unverifiable {accuracy['unverifiable']}; coverage {accuracy['coverage']})"
+    )
+    credibility = result["credibility"]
+    print(f"credibility: {credibility['score']} ({credibility['method']})")
+    for source in credibility["sources"]:
+        print(
+            f"  - {source['doc_id'][:8]}: {source['total']} "
+            f"[{source['tier']}] usage {source['usage']}"
+        )
+    print(f"validity: {result['validity']['score']}")
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     settings, conn = _setup()
     embedder = _embedder(settings)
@@ -350,6 +371,10 @@ def main() -> None:
         help="Score verdicts even if they were produced by an older judge prompt",
     )
     eval_verdict.set_defaults(func=cmd_eval_verdict)
+
+    score = subparsers.add_parser("score", help="Compute accuracy/credibility/validity for a run")
+    score.add_argument("run_id")
+    score.set_defaults(func=cmd_score)
 
     search = subparsers.add_parser("search", help="Hybrid-search a run")
     search.add_argument("run_id")

@@ -17,7 +17,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
@@ -290,6 +290,41 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 7:
+        conn.executescript(
+            """
+            BEGIN;
+
+            -- Derived scores, persisted so the API serves them without
+            -- recomputing (and so score history survives — run-scoped, never
+            -- reset). The three run-level scores are only ever fetched whole,
+            -- so JSON columns; per-source credibility gets real rows because
+            -- the UI drills into individual sources.
+            CREATE TABLE run_scores(
+              run_id TEXT PRIMARY KEY REFERENCES runs(id),
+              accuracy TEXT NOT NULL,
+              credibility TEXT NOT NULL,
+              validity TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE source_credibility(
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              doc_id TEXT NOT NULL UNIQUE REFERENCES documents(id),
+              metadata TEXT NOT NULL,
+              components TEXT NOT NULL,
+              total REAL NOT NULL,
+              tier TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_source_credibility_run ON source_credibility(run_id);
+
+            PRAGMA user_version = 7;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -485,6 +520,81 @@ def list_verdicts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         (run_id,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def save_run_scores(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    accuracy: dict,
+    credibility: dict,
+    validity: dict,
+) -> None:
+    """Persist a run's three scores, replacing any prior row atomically."""
+    with conn:
+        conn.execute("DELETE FROM run_scores WHERE run_id = ?", (run_id,))
+        conn.execute(
+            "INSERT INTO run_scores(run_id, accuracy, credibility, validity, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                run_id,
+                json.dumps(accuracy),
+                json.dumps(credibility),
+                json.dumps(validity),
+                now_iso(),
+            ),
+        )
+
+
+def get_run_scores(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM run_scores WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    return {
+        "accuracy": json.loads(row["accuracy"]),
+        "credibility": json.loads(row["credibility"]),
+        "validity": json.loads(row["validity"]),
+        "created_at": row["created_at"],
+    }
+
+
+def save_source_credibility(conn: sqlite3.Connection, run_id: str, rows: list[dict]) -> None:
+    """Persist per-source credibility rows, replacing the run's prior set atomically."""
+    with conn:
+        conn.execute("DELETE FROM source_credibility WHERE run_id = ?", (run_id,))
+        for row in rows:
+            conn.execute(
+                "INSERT INTO source_credibility(id, run_id, doc_id, metadata, components,"
+                " total, tier, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id(),
+                    run_id,
+                    row["doc_id"],
+                    json.dumps(row["metadata"]),
+                    json.dumps(row["components"]),
+                    row["total"],
+                    row["tier"],
+                    now_iso(),
+                ),
+            )
+
+
+def list_source_credibility(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT s.*, d.title AS doc_title
+        FROM source_credibility s JOIN documents d ON d.id = s.doc_id
+        WHERE s.run_id = ? ORDER BY s.total DESC
+        """,
+        (run_id,),
+    ).fetchall()
+    out = []
+    for row in rows:
+        record = dict(row)
+        record["metadata"] = json.loads(record["metadata"])
+        record["components"] = json.loads(record["components"])
+        out.append(record)
+    return out
 
 
 def list_claims(conn: sqlite3.Connection, run_id: str) -> list[dict]:

@@ -36,3 +36,12 @@ class Settings(BaseSettings):
     caption_model: str = "claude-haiku-4-5"
     # Verdicts are the product's core judgment — frontier model, like extraction.
     verdict_model: str = "claude-opus-5"
+    # Bibliographic metadata extraction is a cheap bounded task, like captions.
+    metadata_model: str = "claude-haiku-4-5"
+    # The validity rubric is a quality judgment over the whole report.
+    validity_model: str = "claude-opus-5"
+    validity_weights: str = "coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1"
+    # Word-boundary matched against source publishers (see credibility.py).
+    authority_tier1: str = "FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe"
+    authority_tier2: str = "Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier"
+    crossref_mailto: str | None = None

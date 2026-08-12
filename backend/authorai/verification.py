@@ -130,7 +130,7 @@ _QUOTE_TRANSLATION = str.maketrans(
 )
 
 
-def _normalize_quote(text: str) -> str:
+def normalize_quote(text: str) -> str:
     """Case-fold and neutralize the artifacts PDF text carries (curly quotes,
     unicode dashes, non-breaking and doubled spaces, line breaks) so a
     faithfully-copied quote is not rejected over typography."""
@@ -151,14 +151,14 @@ def check_verdict(claim: dict, verdict: Verdict, hits: list[Hit]) -> dict:
     quote_verified: int | None = None
     quoted_hit: Hit | None = None
 
-    normalized = _normalize_quote(verdict.quote or "")
+    normalized = normalize_quote(verdict.quote or "")
     if len(normalized) >= MIN_QUOTE_CHARS:
         candidates: list[Hit] = []
         if verdict.evidence_index is not None and 1 <= verdict.evidence_index <= len(hits):
             candidates.append(hits[verdict.evidence_index - 1])
         candidates.extend(h for h in hits if h not in candidates)
         for hit in candidates:
-            if normalized in _normalize_quote(hit.text):
+            if normalized in normalize_quote(hit.text):
                 quote_verified = 1
                 quoted_hit = hit
                 break

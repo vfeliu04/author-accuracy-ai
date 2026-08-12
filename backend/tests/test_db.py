@@ -148,7 +148,10 @@ def test_migration_4_to_5_adds_prompt_hash(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: drop the column the way a v4 database lacks it.
-    conn.executescript("ALTER TABLE verdicts DROP COLUMN prompt_hash; PRAGMA user_version = 4;")
+    conn.executescript(
+        "DROP TABLE run_scores; DROP TABLE source_credibility;"
+        " ALTER TABLE verdicts DROP COLUMN prompt_hash; PRAGMA user_version = 4;"
+    )
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] >= 5
@@ -180,6 +183,8 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
         );
         INSERT INTO chunks_vec(chunk_id, run_id, embedding) SELECT * FROM b;
         DROP TABLE b;
+        DROP TABLE run_scores;
+        DROP TABLE source_credibility;
         PRAGMA user_version = 5;
         """
     )
@@ -210,7 +215,10 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind to a v3 state and reconnect — the v4 block must re-run cleanly.
-    conn.executescript("DROP TABLE verdicts; PRAGMA user_version = 3;")
+    conn.executescript(
+        "DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
+        " PRAGMA user_version = 3;"
+    )
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
