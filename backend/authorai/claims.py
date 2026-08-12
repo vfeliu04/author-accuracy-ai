@@ -19,6 +19,13 @@ Rules:
   descriptions of the report itself ("this report covers..."), or vague
   statements with no checkable content.
 - `text` must be the claim VERBATIM from the report — never paraphrase.
+- Reports sometimes present a claim as something OTHERS say: "some analyses
+  claim X", "a fabricated report asserts X", "contrary coverage has claimed X".
+  The checkable claim is X ITSELF — the embedded assertion. Take `text` from
+  the embedded clause, verbatim from inside the frame, dropping the reporting
+  frame ("some analyses claim that...") and any editorial verdict the report
+  attaches ("...an event that never occurred"). The frame's existence is not a
+  checkable claim; X is.
 - `subject` is a short noun phrase naming what the claim is about.
 - `value` is the main number in the claim as a plain float (735 million -> 735000000,
   23.5% -> 23.5). Null when the claim has no central number.

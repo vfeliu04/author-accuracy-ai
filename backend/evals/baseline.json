@@ -1,12 +1,12 @@
 {
-  "recall": 0.973,
-  "precision": 0.973,
-  "matched": 36,
+  "recall": 1.0,
+  "precision": 0.974,
+  "matched": 37,
   "golden_total": 37,
-  "extracted_total": 37,
+  "extracted_total": 38,
   "model": "claude-opus-5",
   "run_id": "6fc062e08aa4492ab138182a5c53f184",
-  "recorded": "2026-08-07",
-  "noise_floor": "\u00b11 matched claim run-to-run (~\u00b10.03 recall), measured over 4 repeat extractions",
-  "note": "Prompt-fix baseline: exhaustive-extraction instruction recovered all 6 prose claims the table addition had displaced (each 0/4 in repeat runs before, all found after). Only remaining miss is the embedded 'potatoes' appositive. Independently confirmed on the holdout at the same commit."
+  "recorded": "2026-08-12",
+  "noise_floor": "recall 1.00 precision 0.97 on ALL of 3 repeat runs (38 claims each) \u2014 fully stable",
+  "note": "Embedded-assertion extraction rule: reported-speech frames ('some analyses claim X') now yield X itself, verbatim from inside the frame. Recall 0.973 -> 1.00 (the embedded 'potatoes' appositive was the last miss); precision steady. Supersedes the 2026-08-07 baseline."
 }
