@@ -22,13 +22,19 @@ dependencies = [
     "torch==2.13.0",
     "torchvision==0.28.0",
     "pillow==12.0.0",
+    # Crossref lookups (credibility scoring) — production code, not just tests.
+    "httpx==0.28.1",
+    # FastAPI hard-requires this for multipart form parsing; without it every
+    # upload endpoint 500s at request time.
+    "python-multipart==0.0.22",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
-    "httpx==0.28.1",
     "ruff==0.16.1",
+    # Records/replays httpx traffic so Crossref tests run offline.
+    "respx==0.22.0",
 ]
 
 [tool.setuptools]
