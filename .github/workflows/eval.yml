@@ -1,0 +1,100 @@
+# Golden-eval pipeline run: ingest the pinned source pair + dev report, then
+# extract → eval-extract → verify → eval-verdict → score, with every number in
+# the job summary. Manual dispatch only: fork PRs have no secrets, and each run
+# costs real API money (~$0.5), so a human presses the button and reads the
+# deltas against evals/baseline.json / verdict_baseline.json — there is no
+# hard fail-gate.
+#
+# Requires repo secrets: ANTHROPIC_API_KEY, OPENAI_API_KEY
+# (optional: AUTHORAI_CROSSREF_MAILTO for polite Crossref access).
+#
+# NOTE: GitHub lists dispatchable workflows from the DEFAULT branch only —
+# this file cannot be dispatched from v2 until it lands on main.
+name: Eval
+
+on:
+  workflow_dispatch:
+
+jobs:
+  golden-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        # `shell: bash` (unlike the implicit default) runs with -o pipefail,
+        # so a failing CLI step is not masked by the `tee` behind it.
+        shell: bash
+        working-directory: backend
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AUTHORAI_CROSSREF_MAILTO: ${{ secrets.AUTHORAI_CROSSREF_MAILTO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      # Docling pulls GB-class layout models on first use; the pip cache does
+      # not cover them. Keyed on pyproject so a docling upgrade re-downloads.
+      - name: Cache Docling/HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/docling
+          key: docling-models-${{ runner.os }}-${{ hashFiles('backend/pyproject.toml') }}
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      # Captions stay ON (the baselines were recorded with figure descriptions
+      # baked into the chunks; --no-describe-figures would change verify's
+      # evidence pool and break comparability).
+      - name: Ingest pinned sources
+        run: |
+          python -m authorai.cli ingest \
+            ../example_sources/2025_world_hunger.pdf \
+            ../example_sources/disruptions_in_the_food_supply_chain.pdf \
+            | tee ingest.log
+          RUN_ID=$(grep -m1 '^run: ' ingest.log | cut -d' ' -f2)
+          test -n "$RUN_ID"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+
+      - name: Ingest dev report
+        run: |
+          python -m authorai.cli ingest ../example_sources/World_Hunger_Fake.pdf \
+            --run "$RUN_ID" --kind REPORT
+
+      - name: Extract claims
+        run: python -m authorai.cli extract "$RUN_ID" | tail -3
+
+      - name: Score extraction vs golden
+        run: |
+          python -m authorai.cli eval-extract "$RUN_ID" | tee eval-extract.log
+          { echo '## Extraction'; echo '```'; cat eval-extract.log; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # Batch API: half price, minutes-scale latency — well inside the job
+      # timeout.
+      - name: Verify claims
+        run: python -m authorai.cli verify "$RUN_ID" | tee verify.log
+
+      - name: Score verdicts vs golden
+        run: |
+          python -m authorai.cli eval-verdict "$RUN_ID" | tee eval-verdict.log
+          { echo '## Verdicts'; echo '```'; cat verify.log eval-verdict.log; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # Reference number only (compare to evals/score_reference.json by hand):
+      # live Crossref + the validity rubric make this the flakiest step, so it
+      # must not fail the whole eval above it.
+      - name: Score the run
+        continue-on-error: true
+        run: |
+          python -m authorai.cli score "$RUN_ID" | tee score.log
+          { echo '## Run scores'; echo '```'; cat score.log; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
