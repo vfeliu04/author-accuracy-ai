@@ -37,11 +37,14 @@ def test_run_ingest_prints_run_first_and_survives_a_bad_pdf(conn, tmp_path, monk
 def test_stale_verdicts_are_refused(capsys):
     import pytest
 
-    from authorai.verification import VERDICT_PROMPT_HASH
+    from authorai.verification import verdict_stamp
 
-    fresh = {"model": "m", "prompt_hash": VERDICT_PROMPT_HASH}
+    fresh = {"model": "m", "prompt_hash": verdict_stamp()}
     stale = {"model": "old-model", "prompt_hash": "not-the-current-hash"}
     unstamped = {"model": "older-model", "prompt_hash": None}  # pre-migration row
+    # Same prompt but judged over a different evidence-k: a different judge
+    # configuration, so it must be flagged like any other stale row.
+    other_k = {"model": "m", "prompt_hash": verdict_stamp(k=4)}
 
     cli._assert_verdicts_fresh([fresh], allow_stale=False)  # fresh rows pass silently
 
@@ -49,9 +52,31 @@ def test_stale_verdicts_are_refused(capsys):
         cli._assert_verdicts_fresh([fresh, stale], allow_stale=False)
     with pytest.raises(SystemExit, match="DIFFERENT judge prompt"):
         cli._assert_verdicts_fresh([unstamped], allow_stale=False)
+    with pytest.raises(SystemExit, match="DIFFERENT judge prompt"):
+        cli._assert_verdicts_fresh([other_k], allow_stale=False)
 
     # --allow-stale converts the refusal into a loud warning.
     cli._assert_verdicts_fresh([stale], allow_stale=True)
+    assert "WARNING (--allow-stale)" in capsys.readouterr().out
+
+
+def test_stale_claims_are_refused(capsys):
+    import pytest
+
+    from authorai.claims import EXTRACTION_PROMPT_HASH
+
+    fresh = {"extraction_prompt_hash": EXTRACTION_PROMPT_HASH}
+    stale = {"extraction_prompt_hash": "not-the-current-hash"}
+    unstamped = {"extraction_prompt_hash": None}  # pre-guard row
+
+    cli._assert_claims_fresh([fresh], allow_stale=False)  # fresh rows pass silently
+
+    with pytest.raises(SystemExit, match="DIFFERENT extraction prompt"):
+        cli._assert_claims_fresh([fresh, stale], allow_stale=False)
+    with pytest.raises(SystemExit, match="DIFFERENT extraction prompt"):
+        cli._assert_claims_fresh([unstamped], allow_stale=False)
+
+    cli._assert_claims_fresh([stale], allow_stale=True)
     assert "WARNING (--allow-stale)" in capsys.readouterr().out
 
 

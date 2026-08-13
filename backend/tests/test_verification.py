@@ -10,6 +10,7 @@ from authorai.verification import (
     build_evidence_query,
     build_verdict_prompt,
     check_verdict,
+    verdict_stamp,
     verify_run,
 )
 from tests.conftest import DIM, FakeLLM
@@ -300,6 +301,19 @@ def test_verify_run_stores_verdicts_and_summarizes(conn, verified_run):
     supported = next(v for v in verdicts if v["verdict"] == "SUPPORTED")
     assert supported["quote_verified"] == 1
     assert supported["model"] == "m"
+    assert supported["prompt_hash"] == verdict_stamp()
+
+
+def test_verify_run_stamps_the_actual_k(conn, verified_run):
+    # A -k override is a different judge configuration; the stamp must carry
+    # the real k so the freshness guards flag those rows against the default.
+    llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
+    verify_run(
+        conn, verified_run["embedder"], llm, verified_run["run"], model="m", batch=False, k=3
+    )
+    for row in dbmod.list_verdicts(conn, verified_run["run"]):
+        assert row["prompt_hash"] == verdict_stamp(k=3)
+        assert row["prompt_hash"] != verdict_stamp()
 
 
 def test_verify_run_batch_matches_sync(conn, verified_run):

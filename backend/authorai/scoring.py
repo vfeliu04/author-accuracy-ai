@@ -32,7 +32,7 @@ from authorai.credibility import (
 )
 from authorai.llm import LLM
 from authorai.log import setup_logger
-from authorai.verification import VERDICT_PROMPT_HASH, normalize_quote
+from authorai.verification import normalize_quote, verdict_stamp
 
 logger = setup_logger(__name__)
 
@@ -300,7 +300,7 @@ def score_run(
         raise ValueError(f"Run {run_id!r} has no verdicts — run `verify` first")
     # The score is PERSISTED and served by the API, so scoring stale verdicts
     # is worse than the eval case the guard was built for — refuse by default.
-    stale = [r for r in verdict_rows if r.get("prompt_hash") != VERDICT_PROMPT_HASH]
+    stale = [r for r in verdict_rows if r.get("prompt_hash") != verdict_stamp()]
     if stale and not allow_stale:
         raise ValueError(
             f"{len(stale)}/{len(verdict_rows)} verdicts were produced by a different "

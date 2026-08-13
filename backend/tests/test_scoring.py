@@ -16,7 +16,7 @@ from authorai.scoring import (
     recency_score,
     score_run,
 )
-from authorai.verification import VERDICT_PROMPT_HASH
+from authorai.verification import verdict_stamp
 from tests.conftest import DIM, FakeLLM
 
 
@@ -302,7 +302,7 @@ def scored_run(conn):
                 "evidence_chunk_ids": [chunk_id],
                 "rationale": "r",
                 "model": "m",
-                "prompt_hash": VERDICT_PROMPT_HASH,
+                "prompt_hash": verdict_stamp(),
             }
         ],
     )

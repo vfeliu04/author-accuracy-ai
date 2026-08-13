@@ -10,7 +10,6 @@ never count in the headline number. The model's original verdict is preserved
 in `raw_verdict` so the downgrade rate stays measurable.
 """
 
-import hashlib
 import re
 import sqlite3
 from pathlib import Path
@@ -20,7 +19,7 @@ from pydantic import BaseModel, Field
 from authorai import db as dbmod
 from authorai.db import VERDICTS, VerdictLiteral
 from authorai.embeddings import Embedder
-from authorai.llm import LLM, ParseItem
+from authorai.llm import LLM, ParseItem, prompt_fingerprint
 from authorai.log import setup_logger
 from authorai.search import Hit, hybrid_search
 
@@ -62,12 +61,6 @@ For SUPPORTED and CONTRADICTED you MUST provide:
 For UNVERIFIABLE, quote and evidence_index may be null.
 `rationale` is one or two sentences explaining the decision.
 """
-
-
-# Stamped on every stored verdict; eval-verdict refuses rows whose hash is not
-# the CURRENT prompt's — verdicts from an older judge must never be scored as
-# if they were fresh. Guards prompt drift only (model is stored per row too).
-VERDICT_PROMPT_HASH = hashlib.sha256(VERDICT_SYSTEM.encode()).hexdigest()
 
 
 class Verdict(BaseModel):
@@ -115,6 +108,38 @@ def build_verdict_prompt(claim: dict, hits: list[Hit]) -> str:
         page = f" p.{hit.page}" if hit.page is not None else ""
         parts.append(f"[{index}] ({hit.kind}{page})\n{hit.text}")
     return "\n\n".join(parts)
+
+
+# Canonical hash of the judge's prompt contract; see prompt_fingerprint for why
+# it hashes the RENDERED prompt over frozen inputs, not the template constant.
+VERDICT_PROMPT_HASH = prompt_fingerprint(
+    VERDICT_SYSTEM,
+    build_verdict_prompt(
+        {"text": "Frozen claim.", "value": 1.0, "unit": "percent", "year": 2020},
+        [
+            Hit(
+                chunk_id=1,
+                doc_id="frozen",
+                page=1,
+                section=None,
+                kind="text",
+                text="Frozen evidence.",
+                score=1.0,
+                channels=("vector",),
+            )
+        ],
+    ),
+    output_type=Verdict,
+)
+
+
+def verdict_stamp(k: int = EVIDENCE_K) -> str:
+    """The prompt_hash written on stored verdicts — the canonical prompt hash
+    plus the evidence-k actually used. k is NOT baked into the hash constant
+    because `verify -k` overrides it per run; stamping the real k means a
+    non-default-k run is correctly flagged as a different judge configuration
+    when the guards compare against the default form."""
+    return f"{VERDICT_PROMPT_HASH}:k={k}"
 
 
 _QUOTE_TRANSLATION = str.maketrans(
@@ -328,7 +353,7 @@ def verify_run(
 
     for row in rows:
         row["model"] = model
-        row["prompt_hash"] = VERDICT_PROMPT_HASH
+        row["prompt_hash"] = verdict_stamp(k)
     dbmod.add_verdicts(conn, run_id, rows, replace=True)
 
     return {

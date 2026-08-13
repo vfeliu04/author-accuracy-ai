@@ -27,7 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from authorai import db as dbmod
-from authorai.claims import extract_claims
+from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
@@ -155,9 +155,7 @@ def step_extract(context: PipelineContext, run_id: str, payload: dict) -> str:
         # failure to `verify`, whose "no claims — run extract first" message
         # would then point at a step that looks successful.
         raise ValueError(f"Extraction produced 0 claims for run {run_id!r}")
-    dbmod.add_claims(
-        conn, run_id, report["id"], [claim.model_dump() for claim in claims], replace=True
-    )
+    dbmod.add_claims(conn, run_id, report["id"], claims_as_rows(claims), replace=True)
     return f"Extracted {len(claims)} claims"
 
 

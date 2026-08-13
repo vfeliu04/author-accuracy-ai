@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from authorai.llm import LLM
+from authorai.llm import LLM, prompt_fingerprint
 
 EXTRACTION_SYSTEM = """\
 You extract checkable factual claims from a report so they can be verified
@@ -94,6 +94,28 @@ def build_extraction_prompt(sections: list[dict], tables: list[dict] | None = No
     for table in tables or []:
         parts.append(f"{_page_marker(table)} ## TABLE\n{table['text']}")
     return "\n\n".join(parts)
+
+
+# Stamped on every stored claim; eval-extract refuses rows whose hash is not
+# the CURRENT prompt's — recall/precision measured on claims from an older
+# extractor say nothing about the prompt being tuned (same rationale as
+# verification's VERDICT_PROMPT_HASH).
+EXTRACTION_PROMPT_HASH = prompt_fingerprint(
+    EXTRACTION_SYSTEM,
+    build_extraction_prompt(
+        [{"title": "Frozen Section", "text": "Frozen section text.", "page": 1}],
+        [{"text": "frozen | table | row", "page": 2}],
+    ),
+    output_type=ExtractedClaim,
+)
+
+
+def claims_as_rows(claims: list[ExtractedClaim]) -> list[dict]:
+    """Storage rows for add_claims — the ONE place the hash stamp is applied,
+    so the CLI and the jobs worker cannot drift apart on it."""
+    return [
+        {**claim.model_dump(), "extraction_prompt_hash": EXTRACTION_PROMPT_HASH} for claim in claims
+    ]
 
 
 def extract_claims(

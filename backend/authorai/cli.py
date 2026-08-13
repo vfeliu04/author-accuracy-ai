@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from authorai import db as dbmod
-from authorai.claims import extract_claims
+from authorai.claims import EXTRACTION_PROMPT_HASH, claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
 from authorai.evals import load_golden, score_extraction, score_verdicts
@@ -19,7 +19,7 @@ from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
 from authorai.llm import AnthropicClient
 from authorai.scoring import score_run
 from authorai.search import hybrid_search
-from authorai.verification import EVIDENCE_K, VERDICT_PROMPT_HASH, verify_run
+from authorai.verification import EVIDENCE_K, verdict_stamp, verify_run
 
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
@@ -139,13 +139,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
     claims = extract_claims(llm, sections, settings.extraction_model, tables=tables)
 
     # Re-extraction replaces the document's previous claims — deterministic reruns.
-    dbmod.add_claims(
-        conn,
-        args.run_id,
-        document["id"],
-        [claim.model_dump() for claim in claims],
-        replace=True,
-    )
+    dbmod.add_claims(conn, args.run_id, document["id"], claims_as_rows(claims), replace=True)
 
     for claim in claims:
         details = ", ".join(
@@ -187,12 +181,34 @@ def _print_baseline_delta(baseline_path: Path | None, delta_line) -> None:
         print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
 
 
+def _assert_claims_fresh(claim_rows: list[dict], allow_stale: bool) -> None:
+    """Refuse to score claims produced by a different extraction prompt.
+
+    The extraction twin of _assert_verdicts_fresh: recall/precision measured
+    on stale claims say nothing about the prompt being tuned. NULL
+    (pre-guard rows) counts as stale.
+    """
+    stale = [r for r in claim_rows if r.get("extraction_prompt_hash") != EXTRACTION_PROMPT_HASH]
+    if not stale:
+        return
+    message = (
+        f"{len(stale)}/{len(claim_rows)} claims were produced by a DIFFERENT extraction "
+        "prompt than the current one. The score would say nothing about the current "
+        "prompt — rerun `extract` first."
+    )
+    if allow_stale:
+        print(f"WARNING (--allow-stale): {message}")
+        return
+    raise SystemExit(message + " (or pass --allow-stale to score them anyway)")
+
+
 def cmd_eval_extract(args: argparse.Namespace) -> None:
     _, conn = _setup()
     golden = _load_golden_or_exit(args.golden)
     extracted = dbmod.list_claims(conn, args.run_id)
     if not extracted:
         raise SystemExit(f"Run {args.run_id!r} has no claims — run `extract` first")
+    _assert_claims_fresh(extracted, args.allow_stale)
     score = score_extraction(extracted, golden)
     print(score.summary())
     for text in score.missed:
@@ -236,7 +252,7 @@ def _assert_verdicts_fresh(verdict_rows: list[dict], allow_stale: bool) -> None:
     conclusion (MISTAKES.md 2026-08-08) — this makes that class of error
     impossible instead of relying on operator memory.
     """
-    stale = [r for r in verdict_rows if r.get("prompt_hash") != VERDICT_PROMPT_HASH]
+    stale = [r for r in verdict_rows if r.get("prompt_hash") != verdict_stamp()]
     if not stale:
         return
     models = sorted({r["model"] for r in stale})
@@ -329,6 +345,11 @@ def _add_eval_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Baseline JSON for the delta line (default: the dev baseline, dev golden only)",
     )
+    parser.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Score rows even if they were produced by an older prompt",
+    )
 
 
 def main() -> None:
@@ -371,11 +392,6 @@ def main() -> None:
         "eval-verdict", help="Score stored verdicts against the golden set"
     )
     _add_eval_args(eval_verdict)
-    eval_verdict.add_argument(
-        "--allow-stale",
-        action="store_true",
-        help="Score verdicts even if they were produced by an older judge prompt",
-    )
     eval_verdict.set_defaults(func=cmd_eval_verdict)
 
     score = subparsers.add_parser("score", help="Compute accuracy/credibility/validity for a run")

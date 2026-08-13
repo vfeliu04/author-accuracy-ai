@@ -7,6 +7,7 @@ cost stays visible. Retries are the SDK's built-in ones — no hand-rolled loop.
 """
 
 import base64
+import hashlib
 import io
 import time
 from dataclasses import dataclass
@@ -23,6 +24,19 @@ if TYPE_CHECKING:
 logger = setup_logger(__name__)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def prompt_fingerprint(*parts: str, output_type: type[BaseModel]) -> str:
+    """Canonical hash of a prompt CONTRACT: rendered text + output field specs.
+
+    Callers pass the system prompt plus a prompt RENDERED from frozen synthetic
+    inputs, so the hash moves exactly when the model would see a different
+    prompt shape — including builder formatting changes a bare template
+    constant would miss. The output type's (name, description) pairs are
+    hashed too: a field description IS prompt text under structured outputs.
+    """
+    fields = repr(sorted((name, f.description) for name, f in output_type.model_fields.items()))
+    return hashlib.sha256("\x1e".join([*parts, fields]).encode()).hexdigest()
 
 
 # Claude Opus 5 thinks by default, and thinking shares this budget with the
