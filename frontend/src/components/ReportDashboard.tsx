@@ -128,6 +128,24 @@ const ReportDashboard = () => {
           ) : null}
         </div>
         <div className="dashboard__meta">
+          {done ? (
+            <>
+              <button
+                type="button"
+                className="dashboard__refresh-button"
+                onClick={() => navigate(`/runs/${runId}/workspace`)}
+              >
+                Claims workspace
+              </button>
+              <button
+                type="button"
+                className="dashboard__refresh-button"
+                onClick={() => navigate(`/runs/${runId}/report`)}
+              >
+                Report PDF
+              </button>
+            </>
+          ) : null}
           <button type="button" className="dashboard__refresh-button" onClick={() => navigate("/runs")}>
             ← All runs
           </button>
@@ -170,7 +188,7 @@ const ReportDashboard = () => {
                     key={source.doc_id}
                     type="button"
                     className="upload__item upload__item--with-actions"
-                    onClick={() => navigate(`/dashboard/sources/${source.doc_id}`)}
+                    onClick={() => navigate(`/runs/${runId}/sources/${source.doc_id}`)}
                   >
                     <span className="upload__item-name">{source.title ?? source.doc_id.slice(0, 8)}</span>
                     <span className="source-pill__badge">{source.tier}</span>
