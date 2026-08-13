@@ -11,6 +11,7 @@ env/
 venv/
 .venv/
 backend/env/
+*.egg-info/
 
 # --- Node / frontend build artifacts ---
 node_modules/

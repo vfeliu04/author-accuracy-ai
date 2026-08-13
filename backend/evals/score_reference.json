@@ -1,26 +1,30 @@
 {
   "run_id": "6fc062e08aa4492ab138182a5c53f184",
-  "recorded": "2026-08-12",
+  "recorded": "2026-08-13",
   "accuracy": {
-    "accuracy": 0.6,
-    "coverage": 0.5263,
+    "accuracy": 0.9524,
+    "coverage": 0.5526,
+    "correct": 20,
+    "incorrect": 1,
     "supported": 12,
-    "contradicted": 8,
-    "unverifiable": 18,
-    "note": "Golden labels imply true decided ratio 14/25=0.56 \u2014 consistent."
+    "contradicted": 9,
+    "unverifiable": 17,
+    "disavowed": 14,
+    "note": "STANCE-AWARE (Phase 7): accuracy is report-position agreement, so the 0.6 -> 0.95 jump vs the 2026-08-12 reference is the semantics change working as designed — this report LABELS its fabrications, and debunking a falsehood now counts for the author, not against. The 1 incorrect is the 'supply chain disruptions improve food security' claim: the report's weakest falsity marker ('unsupported analyses'), extracted as asserted and judged CONTRADICTED — the designed conservative failure direction. 6 disavowed claims sit UNVERIFIABLE in the coverage bucket (their fabrications reference things the sources never discuss)."
   },
   "credibility": {
-    "score": 50.9,
+    "score": 50.2,
     "method": "usage_weighted_mean",
     "sources": {
-      "GHI synopsis": "37.0 METADATA_ONLY (DOI-less brochure \u2014 honest)",
+      "GHI synopsis": "37.0 METADATA_ONLY (DOI-less brochure — honest)",
       "Heliyon review": "92.5 VERIFIED_DOI (live Crossref resolution)"
-    }
+    },
+    "note": "50.2 vs prior 50.9: usage weights shifted with the re-verified verdict set (evidence citations moved between sources); method and tiers identical."
   },
   "validity": {
-    "score": 42.0,
-    "noise_floor": "rubric component noise \u00b12-3 pts over 3 same-code runs (34.6/39.2/35.1); treat small deltas as noise",
-    "note": "Low score is plausibly CORRECT for the fake report \u2014 it is deliberately self-contradicting with no methodology section."
+    "score": 42.8,
+    "noise_floor": "rubric component noise ±2-3 pts over 3 same-code runs (34.6/39.2/35.1); treat small deltas as noise",
+    "note": "Within rubric noise of the prior 42.0/42.5 readings. Low score is plausibly CORRECT for the fake report — deliberately self-contradicting, no methodology section."
   },
-  "note": "Reference snapshot, not a golden eval \u2014 there is no labeled truth for these scores. Exists so future scoring changes have a comparison point. Re-verified 2026-08-12 after the phase-end review's credibility hardening (Crossref retry-then-raise, DOI cleaning, phrase publisher matching, corroboration changes): accuracy and credibility byte-identical, validity 42.5 (within the \u00b12-3 rubric noise)."
+  "note": "Reference snapshot, not a golden eval — there is no labeled truth for these scores. Exists so future scoring changes have a comparison point. Companion verdict eval on the same run: accuracy 0.86 (32/37), coverage 1.00, within noise of the 0.838 verdict baseline (which was deliberately NOT re-recorded — verdict semantics are untouched by the stance change)."
 }
