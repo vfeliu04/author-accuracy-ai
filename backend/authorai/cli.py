@@ -181,6 +181,18 @@ def _print_baseline_delta(baseline_path: Path | None, delta_line) -> None:
         print(f"no baseline yet — to accept this as baseline, write {baseline_path}")
 
 
+def _refuse_stale(message: str, allow_stale: bool) -> None:
+    """The one refusal policy both freshness guards share: refuse loudly, or
+    convert to a loud warning under --allow-stale. Scoring stale rows as if
+    they were fresh already produced one wrong conclusion (MISTAKES.md
+    2026-08-08) — the policy living here once keeps the two guards identical.
+    """
+    if allow_stale:
+        print(f"WARNING (--allow-stale): {message}")
+        return
+    raise SystemExit(message + " (or pass --allow-stale to score them anyway)")
+
+
 def _assert_claims_fresh(claim_rows: list[dict], allow_stale: bool) -> None:
     """Refuse to score claims produced by a different extraction prompt.
 
@@ -191,15 +203,12 @@ def _assert_claims_fresh(claim_rows: list[dict], allow_stale: bool) -> None:
     stale = [r for r in claim_rows if r.get("extraction_prompt_hash") != EXTRACTION_PROMPT_HASH]
     if not stale:
         return
-    message = (
+    _refuse_stale(
         f"{len(stale)}/{len(claim_rows)} claims were produced by a DIFFERENT extraction "
         "prompt than the current one. The score would say nothing about the current "
-        "prompt — rerun `extract` first."
+        "prompt — rerun `extract` first.",
+        allow_stale,
     )
-    if allow_stale:
-        print(f"WARNING (--allow-stale): {message}")
-        return
-    raise SystemExit(message + " (or pass --allow-stale to score them anyway)")
 
 
 def cmd_eval_extract(args: argparse.Namespace) -> None:
@@ -257,25 +266,18 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
 
 def _assert_verdicts_fresh(verdict_rows: list[dict], allow_stale: bool) -> None:
-    """Refuse to score verdicts produced by a different judge prompt.
-
-    Scoring stale verdicts as if they were fresh already produced one wrong
-    conclusion (MISTAKES.md 2026-08-08) — this makes that class of error
-    impossible instead of relying on operator memory.
-    """
+    """Refuse to score verdicts produced by a different judge configuration
+    (prompt or evidence-k). NULL (pre-guard rows) counts as stale."""
     stale = [r for r in verdict_rows if r.get("prompt_hash") != verdict_stamp()]
     if not stale:
         return
     models = sorted({r["model"] for r in stale})
-    message = (
+    _refuse_stale(
         f"{len(stale)}/{len(verdict_rows)} verdicts were produced by a DIFFERENT judge "
         f"prompt than the current one (models: {', '.join(models)}). The score would say "
-        "nothing about the current prompt — rerun `verify` first."
+        "nothing about the current prompt — rerun `verify` first.",
+        allow_stale,
     )
-    if allow_stale:
-        print(f"WARNING (--allow-stale): {message}")
-        return
-    raise SystemExit(message + " (or pass --allow-stale to score them anyway)")
 
 
 def cmd_eval_verdict(args: argparse.Namespace) -> None:
