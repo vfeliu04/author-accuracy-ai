@@ -15,13 +15,16 @@ import secrets
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
+from authorai import chat as chatmod
 from authorai import db as dbmod
 from authorai.config import Settings
+from authorai.llm import AnthropicClient
 from authorai.log import setup_logger
 
 logger = setup_logger(__name__)
@@ -207,6 +210,41 @@ def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) ->
         filename=file_name,
         content_disposition_type="inline",
     )
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    question: str
+    history: list[ChatTurn] = []
+    mode: Literal["evidence", "guidance", "creative"] = "evidence"
+
+
+@router.post("/runs/{run_id}/chat")
+def chat(run_id: str, body: ChatRequest, request: Request, conn: Conn) -> dict:
+    """Answer a question grounded in a DONE run's analysis (prompt-cached)."""
+    run = dbmod.get_run(conn, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run {run_id!r}")
+    if run["status"] != "DONE":
+        raise HTTPException(
+            status_code=409, detail="The run is not scored yet — chat is available once it is DONE"
+        )
+    settings: Settings = request.app.state.settings
+    llm = AnthropicClient(settings.anthropic_api_key)
+    reply = chatmod.answer(
+        conn,
+        llm,
+        run_id,
+        body.question,
+        [turn.model_dump() for turn in body.history],
+        body.mode,
+        settings,
+    )
+    return {"answer": reply, "mode": body.mode}
 
 
 def _fraction(score: float | None) -> float | None:

@@ -59,3 +59,8 @@ class Settings(BaseSettings):
     # Swagger/ReDoc/OpenAPI expose the full route surface; keep them for local
     # dev, disable for an exposed deployment.
     docs_enabled: bool = True
+    # Chat: a Sonnet-class model with prompt caching over the static per-run
+    # context. Cheaper than the Opus judgments; the answer is grounded Q&A.
+    chat_model: str = "claude-sonnet-5"
+    chat_max_tokens: int = 2048
+    chat_history_turns: int = 12

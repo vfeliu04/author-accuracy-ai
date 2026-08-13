@@ -418,3 +418,42 @@ def test_report_before_scoring_returns_null_scores(tmp_path):
     assert report["scores"] is None
     assert report["stats"]["claims_total"] == 0
     assert report["claims"] == []
+
+
+def test_chat_unknown_run_404(client):
+    assert (
+        client.post("/api/runs/nope/chat", headers=AUTH, json={"question": "hi"}).status_code == 404
+    )
+
+
+def test_chat_rejects_a_run_that_is_not_done(tmp_path):
+    """The seeded run is CREATED (not scored); chat must 409, not answer."""
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(f"/api/runs/{run_id}/chat", headers=AUTH, json={"question": "hi"})
+    assert resp.status_code == 409
+
+
+def test_chat_answers_a_done_run(tmp_path, monkeypatch):
+    from authorai import api as apimod
+    from tests.conftest import FakeLLM
+
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    dbmod.set_run_status(conn, run_id, "DONE")
+    conn.close()
+
+    fake = FakeLLM(chat_answer="One claim is unverifiable.")
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            f"/api/runs/{run_id}/chat",
+            headers=AUTH,
+            json={"question": "summary?", "mode": "evidence"},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"answer": "One claim is unverifiable.", "mode": "evidence"}
+    # The endpoint actually built the context and called chat with the cache block.
+    assert fake.chat_calls[0]["system_blocks"][0]["cache_control"] == {"type": "ephemeral"}

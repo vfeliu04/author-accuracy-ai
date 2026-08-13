@@ -27,11 +27,14 @@ class FakeLLM:
         self,
         parse_results: dict[type, BaseModel | list[BaseModel]] | None = None,
         image_description: str = "A fake description.",
+        chat_answer: str = "A fake answer.",
     ):
         self._parse_results = parse_results or {}
         self._image_description = image_description
+        self._chat_answer = chat_answer
         self.parse_calls: list[dict] = []
         self.image_calls: int = 0
+        self.chat_calls: list[dict] = []
 
     def parse(
         self, *, model, system, prompt, output_type, max_tokens=PARSE_MAX_TOKENS, images=None
@@ -67,3 +70,13 @@ class FakeLLM:
     def describe_image(self, *, model, image, prompt, max_tokens=512):
         self.image_calls += 1
         return self._image_description
+
+    def chat(self, *, model, system_blocks, messages, max_tokens=2048):
+        self.chat_calls.append(
+            {
+                "model": model,
+                "system_blocks": system_blocks,
+                "messages": messages,
+            }
+        )
+        return self._chat_answer

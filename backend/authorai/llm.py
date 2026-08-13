@@ -39,6 +39,11 @@ BATCH_MAX_TOKENS = 32000
 BATCH_POLL_SECONDS = 10
 BATCH_TIMEOUT_SECONDS = 3600
 
+# Chat answers are grounded Q&A over a cached run context — a bounded,
+# non-reasoning task, so thinking is disabled to keep the whole budget for the
+# visible answer and responses fast and direct.
+CHAT_MAX_TOKENS = 2048
+
 
 @dataclass
 class ParseItem:
@@ -74,6 +79,15 @@ class LLM(Protocol):
 
     def describe_image(
         self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512
+    ) -> str: ...
+
+    def chat(
+        self,
+        *,
+        model: str,
+        system_blocks: list[dict],
+        messages: list[dict],
+        max_tokens: int = CHAT_MAX_TOKENS,
     ) -> str: ...
 
 
@@ -291,11 +305,38 @@ class AnthropicClient:
             )
         return text.strip()
 
+    def chat(
+        self,
+        *,
+        model: str,
+        system_blocks: list[dict],
+        messages: list[dict],
+        max_tokens: int = CHAT_MAX_TOKENS,
+    ) -> str:
+        """One grounded chat answer. `system_blocks` is a list so a block can
+        carry cache_control — the large static run context is cached and the
+        per-turn question is the only uncached input, so repeat turns for the
+        same run reuse the cached prefix (see _log_usage's cache-token line)."""
+        response = self._client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_blocks,
+            messages=messages,
+            thinking={"type": "disabled"},
+        )
+        self._log_usage(model, response)
+        text = _first_text(response) or ""
+        if not text.strip():
+            raise RuntimeError(f"Chat call returned no text (stop_reason={response.stop_reason!r})")
+        return text.strip()
+
     def _log_usage(self, model: str, response) -> None:
         usage = response.usage
         logger.info(
-            "llm call model=%s input_tokens=%s output_tokens=%s",
+            "llm call model=%s input_tokens=%s output_tokens=%s cache_write=%s cache_read=%s",
             model,
             usage.input_tokens,
             usage.output_tokens,
+            getattr(usage, "cache_creation_input_tokens", 0),
+            getattr(usage, "cache_read_input_tokens", 0),
         )
