@@ -17,7 +17,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "FAILED")
 
@@ -375,6 +375,28 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 9:
+        conn.executescript(
+            """
+            BEGIN;
+
+            -- The report's own position on each claim: 'disavowed' means the
+            -- report itself marks the claim false (accuracy then scores
+            -- report-position agreement, not raw verdict counts). Kept a
+            -- COLUMN constraint so the rewind tests can DROP COLUMN it.
+            ALTER TABLE claims ADD COLUMN stance TEXT NOT NULL DEFAULT 'asserted'
+              CHECK(stance IN ('asserted', 'disavowed'));
+
+            -- Which EXTRACTION_SYSTEM produced each claim, mirroring
+            -- verdicts.prompt_hash (named differently so the v.* joins never
+            -- shadow it). eval-extract refuses to score stale claims.
+            ALTER TABLE claims ADD COLUMN extraction_prompt_hash TEXT;
+
+            PRAGMA user_version = 9;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -523,7 +545,8 @@ def add_claims(
             claim_id = new_id()
             conn.execute(
                 "INSERT INTO claims(id, run_id, doc_id, page, text, value, unit, year,"
-                " subject, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " subject, stance, extraction_prompt_hash, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     claim_id,
                     run_id,
@@ -534,6 +557,10 @@ def add_claims(
                     claim.get("unit"),
                     claim.get("year"),
                     claim.get("subject"),
+                    # `or` (not a plain default) because an explicit None in the
+                    # dict would bypass the SQL DEFAULT and hit the NOT NULL.
+                    claim.get("stance") or "asserted",
+                    claim.get("extraction_prompt_hash"),
                     now_iso(),
                 ),
             )
@@ -590,7 +617,7 @@ def list_verdicts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """A run's verdicts joined with their claims, in document order."""
     rows = conn.execute(
         """
-        SELECT v.*, c.text, c.value, c.unit, c.year, c.page
+        SELECT v.*, c.text, c.value, c.unit, c.year, c.page, c.stance
         FROM verdicts v JOIN claims c ON c.id = v.claim_id
         WHERE v.run_id = ? ORDER BY c.page, c.id
         """,
@@ -608,7 +635,7 @@ def list_verdicts_with_evidence(conn: sqlite3.Connection, run_id: str) -> list[d
     """
     rows = conn.execute(
         """
-        SELECT v.*, c.text, c.value, c.unit, c.year, c.page,
+        SELECT v.*, c.text, c.value, c.unit, c.year, c.page, c.stance,
                ch.page AS evidence_page, d.id AS evidence_doc_id, d.title AS evidence_doc_title
         FROM verdicts v
         JOIN claims c ON c.id = v.claim_id

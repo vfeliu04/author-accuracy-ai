@@ -116,6 +116,11 @@ const ComparePage = () => {
                   One of these runs is not scored yet — its score cells show “—”.
                 </p>
               ) : null}
+              <p style={{ margin: "0.5rem 0 0", fontSize: "0.8em", opacity: 0.7 }}>
+                Accuracy is report-position agreement: contradicted claims the report itself
+                disavows count as correct, so a run can show contradicted claims and high
+                accuracy at once.
+              </p>
             </article>
           ) : null}
         </section>

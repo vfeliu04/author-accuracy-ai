@@ -4,6 +4,8 @@ The LLM does the language judgment (what is a checkable claim, what are its
 normalized value/unit/year); code does the bookkeeping. No regex cascades.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from authorai.llm import LLM
@@ -26,6 +28,13 @@ Rules:
   frame ("some analyses claim that...") and any editorial verdict the report
   attaches ("...an event that never occurred"). The frame's existence is not a
   checkable claim; X is.
+- `stance` records the REPORT'S OWN position on the claim. It is "disavowed"
+  ONLY when the report attaches an explicit falsity marker to the claim itself:
+  wording like "an event that never occurred", "a fabricated figure", "this is
+  false", or a table column/header that labels the value fabricated. Everything
+  else — including neutral reported speech — is "asserted": a report that
+  relays "some analyses claim X" WITHOUT marking X false is lending X its
+  platform, so that claim's stance is "asserted", not "disavowed".
 - `subject` is a short noun phrase naming what the claim is about.
 - `value` is the main number in the claim as a plain float (735 million -> 735000000,
   23.5% -> 23.5). Null when the claim has no central number.
@@ -59,6 +68,13 @@ class ExtractedClaim(BaseModel):
     unit: str | None = Field(default=None, description="What the value counts")
     year: int | None = Field(default=None, description="Year the claim is about")
     page: int | None = Field(default=None, description="Page the claim appears on")
+    stance: Literal["asserted", "disavowed"] = Field(
+        default="asserted",
+        description=(
+            "The report's own position: 'disavowed' only when the report"
+            " explicitly marks the claim false; otherwise 'asserted'"
+        ),
+    )
 
 
 class ClaimExtraction(BaseModel):

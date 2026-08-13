@@ -75,11 +75,21 @@ const ClaimsWorkspace = () => {
               style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}
               onClick={() => setSelectedId(claim.claim_id)}
             >
-              <span
-                className="source-pill__badge"
-                style={{ background: VERDICT_COLOR[claim.verdict], color: "#fff" }}
-              >
-                {claim.verdict}
+              <span style={{ display: "flex", gap: 6 }}>
+                <span
+                  className="source-pill__badge"
+                  style={{ background: VERDICT_COLOR[claim.verdict], color: "#fff" }}
+                >
+                  {claim.verdict}
+                </span>
+                {claim.stance === "disavowed" ? (
+                  <span
+                    className="source-pill__badge"
+                    title="The report itself marks this claim false"
+                  >
+                    disavowed
+                  </span>
+                ) : null}
               </span>
               <span className="upload__item-name" style={{ whiteSpace: "normal" }}>{claim.text}</span>
             </button>

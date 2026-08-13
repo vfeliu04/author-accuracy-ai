@@ -20,6 +20,7 @@ const report: Report = {
       unit: null,
       year: null,
       verdict: "SUPPORTED",
+      stance: "asserted",
       downgraded: false,
       quote: "hunger fell",
       quote_verified: 1,

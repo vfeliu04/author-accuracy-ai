@@ -22,7 +22,10 @@ documents, and scored the report. Everything you know about this run is in the
 ANALYSIS block below. Answer ONLY from it — do not invent claims, verdicts, or
 sources, and when the analysis does not cover something, say so plainly.
 Verdicts mean: SUPPORTED / CONTRADICTED / UNVERIFIABLE *relative to the
-ingested sources only*."""
+ingested sources only*. A claim marked "disavowed by the report" is one the
+report ITSELF calls false — a CONTRADICTED verdict there means the report was
+right to reject it, and accuracy counts stance-verdict agreement, so do not
+present disavowed-CONTRADICTED claims as errors by the report."""
 
 MODE_INSTRUCTIONS = {
     "evidence": (
@@ -48,8 +51,15 @@ def _fmt_score(scores: dict | None) -> str:
     acc = scores["accuracy"]
     cred = scores["credibility"]["score"]
     val = scores["validity"]["score"]
+    # Pre-stance runs stored no correct/incorrect breakdown; omit it rather
+    # than print None (their accuracy is the old supported/decided number).
+    agreement = (
+        f": {acc['correct']} agree with the report's stance, {acc['incorrect']} do not"
+        if acc.get("correct") is not None
+        else ""
+    )
     return (
-        f"accuracy {acc.get('accuracy')} (supported/decided), "
+        f"accuracy {acc.get('accuracy')} (report-position agreement{agreement}), "
         f"coverage {acc.get('coverage')}, credibility {cred}/100, validity {val}/100. "
         f"{acc.get('supported')} supported, {acc.get('contradicted')} contradicted, "
         f"{acc.get('unverifiable')} unverifiable of {acc.get('total')} claims."
@@ -69,7 +79,10 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
         if row["quote"] and row["evidence_doc_title"]:
             page = f" p.{row['evidence_page']}" if row["evidence_page"] is not None else ""
             evidence = f' — evidence: "{row["quote"]}" (source {row["evidence_doc_title"]!r}{page})'
-        lines.append(f'- [{row["verdict"]}] "{row["text"]}" — {row["rationale"]}{evidence}')
+        disavowed = " (disavowed by the report)" if row.get("stance") == "disavowed" else ""
+        lines.append(
+            f'- [{row["verdict"]}]{disavowed} "{row["text"]}" — {row["rationale"]}{evidence}'
+        )
     lines += ["", "SOURCES:"]
     for source in sources:
         lines.append(

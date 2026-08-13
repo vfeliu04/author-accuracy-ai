@@ -150,6 +150,8 @@ def test_migration_4_to_5_adds_prompt_hash(tmp_path):
     # Rewind: drop the column the way a v4 database lacks it.
     conn.executescript(
         "DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
+        " ALTER TABLE claims DROP COLUMN stance;"
+        " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE verdicts DROP COLUMN prompt_hash; PRAGMA user_version = 4;"
     )
     conn.close()
@@ -186,6 +188,8 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
         DROP TABLE run_scores;
         DROP TABLE source_credibility;
         DROP TABLE jobs;
+        ALTER TABLE claims DROP COLUMN stance;
+        ALTER TABLE claims DROP COLUMN extraction_prompt_hash;
         PRAGMA user_version = 5;
         """
     )
@@ -218,7 +222,8 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     # Rewind to a v3 state and reconnect — the v4 block must re-run cleanly.
     conn.executescript(
         "DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
-        " DROP TABLE jobs; PRAGMA user_version = 3;"
+        " DROP TABLE jobs; ALTER TABLE claims DROP COLUMN stance;"
+        " ALTER TABLE claims DROP COLUMN extraction_prompt_hash; PRAGMA user_version = 3;"
     )
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)

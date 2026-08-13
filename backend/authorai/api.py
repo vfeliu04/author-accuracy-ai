@@ -298,6 +298,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
             "unit": r["unit"],
             "year": r["year"],
             "verdict": r["verdict"],
+            "stance": r["stance"],
             "downgraded": dbmod.is_downgraded(r),
             "quote": r["quote"],
             "quote_verified": r["quote_verified"],

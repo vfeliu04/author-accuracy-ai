@@ -285,8 +285,10 @@ def cmd_score(args: argparse.Namespace) -> None:
     accuracy = result["accuracy"]
     print(
         f"accuracy: {accuracy['accuracy']} "
-        f"(supported {accuracy['supported']}, contradicted {accuracy['contradicted']}, "
-        f"unverifiable {accuracy['unverifiable']}; coverage {accuracy['coverage']})"
+        f"(agreement: {accuracy['correct']} correct, {accuracy['incorrect']} incorrect; "
+        f"supported {accuracy['supported']}, contradicted {accuracy['contradicted']}, "
+        f"unverifiable {accuracy['unverifiable']}, disavowed {accuracy['disavowed']}; "
+        f"coverage {accuracy['coverage']})"
     )
     credibility = result["credibility"]
     print(f"credibility: {credibility['score']} ({credibility['method']})")

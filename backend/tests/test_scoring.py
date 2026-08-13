@@ -20,8 +20,8 @@ from authorai.verification import VERDICT_PROMPT_HASH
 from tests.conftest import DIM, FakeLLM
 
 
-def _verdict(kind):
-    return {"verdict": kind}
+def _verdict(kind, stance="asserted"):
+    return {"verdict": kind, "stance": stance}
 
 
 # --- accuracy ---------------------------------------------------------------
@@ -50,6 +50,39 @@ def test_accuracy_empty_run():
     scores = accuracy_scores([])
     assert scores["accuracy"] is None
     assert scores["coverage"] is None
+
+
+def test_accuracy_is_report_position_agreement():
+    # The full stance × verdict matrix: agreement (asserted+SUPPORTED,
+    # disavowed+CONTRADICTED) is correct; the inverses are incorrect;
+    # UNVERIFIABLE is neither, whatever the stance.
+    rows = (
+        [_verdict("SUPPORTED")] * 3  # asserted, supported → correct
+        + [_verdict("CONTRADICTED", "disavowed")] * 2  # report called it false → correct
+        + [_verdict("CONTRADICTED")] * 1  # asserted falsehood → incorrect
+        + [_verdict("SUPPORTED", "disavowed")] * 1  # report wrongly disavowed → incorrect
+        + [_verdict("UNVERIFIABLE")] * 1
+        + [_verdict("UNVERIFIABLE", "disavowed")] * 1
+    )
+    scores = accuracy_scores(rows)
+    assert scores["correct"] == 5
+    assert scores["incorrect"] == 2
+    assert scores["disavowed"] == 4
+    assert scores["accuracy"] == round(5 / 7, 4)
+    # Verdict counts stay raw — the stance never rewrites what the sources said.
+    assert scores["supported"] == 4
+    assert scores["contradicted"] == 3
+    assert scores["coverage"] == round(7 / 9, 4)
+
+
+def test_accuracy_defaults_missing_stance_to_asserted():
+    # Rows from pre-stance code paths (or eval fixtures) carry no stance key;
+    # they must score exactly as before the field existed.
+    scores = accuracy_scores([{"verdict": "SUPPORTED"}, {"verdict": "CONTRADICTED"}])
+    assert scores["correct"] == 1
+    assert scores["incorrect"] == 1
+    assert scores["disavowed"] == 0
+    assert scores["accuracy"] == 0.5
 
 
 # --- validity ----------------------------------------------------------------

@@ -74,10 +74,19 @@ class ValidityAssessment(BaseModel):
     context: ComponentAssessment
 
 
+# The verdict that AGREES with each stance the report can take. Accuracy is
+# report-position agreement: a disavowed claim (the report itself marks it
+# false) is CORRECT when the sources contradict it — the author is not
+# penalized for debunking a falsehood, and gets no credit if it turns out true.
+_AGREEING_VERDICT = {"asserted": "SUPPORTED", "disavowed": "CONTRADICTED"}
+
+
 def accuracy_scores(verdict_rows: list[dict]) -> dict:
-    """Three-way accuracy over a run's verdicts. Pure arithmetic, one home.
+    """Report-position agreement over a run's verdicts. Pure arithmetic, one home.
 
     `accuracy` is None (never a fake 0.0) when no claim was decided either way.
+    UNVERIFIABLE claims are neither correct nor incorrect — they live in the
+    coverage number, same as before stances existed.
     """
     counts = {
         "supported": sum(1 for r in verdict_rows if r["verdict"] == "SUPPORTED"),
@@ -85,10 +94,16 @@ def accuracy_scores(verdict_rows: list[dict]) -> dict:
         "unverifiable": sum(1 for r in verdict_rows if r["verdict"] == "UNVERIFIABLE"),
         "total": len(verdict_rows),
     }
+    correct = sum(
+        1 for r in verdict_rows if r["verdict"] == _AGREEING_VERDICT[r.get("stance") or "asserted"]
+    )
     decided = counts["supported"] + counts["contradicted"]
     return {
         **counts,
-        "accuracy": round(counts["supported"] / decided, 4) if decided else None,
+        "correct": correct,
+        "incorrect": decided - correct,
+        "disavowed": sum(1 for r in verdict_rows if r.get("stance") == "disavowed"),
+        "accuracy": round(correct / decided, 4) if decided else None,
         "coverage": round(decided / counts["total"], 4) if counts["total"] else None,
     }
 

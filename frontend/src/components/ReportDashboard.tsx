@@ -54,6 +54,11 @@ function ClaimRow({ claim }: { claim: Claim }) {
         >
           {claim.verdict}
         </span>
+        {claim.stance === "disavowed" ? (
+          <span className="source-pill__badge" title="The report itself marks this claim false">
+            disavowed
+          </span>
+        ) : null}
         {claim.downgraded ? <span className="source-pill__badge">downgraded</span> : null}
         <span className="upload__item-name" style={{ whiteSpace: "normal" }}>{claim.text}</span>
       </div>

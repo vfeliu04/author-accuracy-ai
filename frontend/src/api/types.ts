@@ -43,6 +43,10 @@ export type EvidenceSource = {
   page: number | null;
 };
 
+// "disavowed" = the report itself marks the claim false; accuracy scores
+// stance-verdict agreement, so disavowed+CONTRADICTED counts as correct.
+export type Stance = "asserted" | "disavowed";
+
 export type Claim = {
   claim_id: string;
   text: string;
@@ -51,6 +55,7 @@ export type Claim = {
   unit: string | null;
   year: number | null;
   verdict: Verdict;
+  stance: Stance;
   downgraded: boolean;
   quote: string | null;
   quote_verified: number | null;
