@@ -98,8 +98,13 @@ def answer(
         },
         {"type": "text", "text": MODE_INSTRUCTIONS[mode]},
     ]
-    # Trim history to whole turns; the current question is the only new input.
-    turns = history[-settings.chat_history_turns :]
+    # Trim history to the most recent turns (guarding the -0 slice, which would
+    # keep ALL history). The conversation must start with a user turn, so drop
+    # any leading assistant turns left after trimming — the API 400s otherwise.
+    n = settings.chat_history_turns
+    turns = history[-n:] if n > 0 else []
+    while turns and turns[0].get("role") != "user":
+        turns = turns[1:]
     messages = [*turns, {"role": "user", "content": question}]
     return llm.chat(
         model=settings.chat_model,

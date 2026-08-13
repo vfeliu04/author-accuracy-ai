@@ -435,6 +435,19 @@ def test_chat_rejects_a_run_that_is_not_done(tmp_path):
     assert resp.status_code == 409
 
 
+def test_chat_rejects_an_oversized_question(tmp_path):
+    """A chat body must not be a memory-amplification vector — an overlong
+    question is a 422, not forwarded whole to the paid model."""
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    dbmod.set_run_status(conn, run_id, "DONE")
+    conn.close()
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(f"/api/runs/{run_id}/chat", headers=AUTH, json={"question": "x" * 5000})
+    assert resp.status_code == 422
+
+
 def test_chat_answers_a_done_run(tmp_path, monkeypatch):
     from authorai import api as apimod
     from tests.conftest import FakeLLM

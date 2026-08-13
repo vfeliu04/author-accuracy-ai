@@ -19,7 +19,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from authorai import chat as chatmod
 from authorai import db as dbmod
@@ -214,12 +214,15 @@ def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) ->
 
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(min_length=1, max_length=8000)
 
 
 class ChatRequest(BaseModel):
-    question: str
-    history: list[ChatTurn] = []
+    # Bounded so a chat request can't be a memory-amplification vector or a
+    # single very expensive model call — the 220MB Content-Length cap is
+    # sized for PDF uploads, far too large for a question.
+    question: str = Field(min_length=1, max_length=4000)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=50)
     mode: Literal["evidence", "guidance", "creative"] = "evidence"
 
 

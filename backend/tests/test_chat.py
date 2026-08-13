@@ -140,6 +140,32 @@ def test_history_is_trimmed_to_the_configured_turns(conn):
     assert call["messages"][0]["content"] == "m8"
 
 
+def test_history_turns_zero_sends_no_history_not_all(conn):
+    """The -0 slice gotcha: history[-0:] would keep EVERYTHING; 0 means none."""
+    run_id = _scored_run(conn)
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", chat_history_turns=0)
+    llm = FakeLLM()
+    history = [{"role": "user", "content": f"m{i}"} for i in range(5)]
+    chatmod.answer(conn, llm, run_id, "q", history, "evidence", settings)
+    [call] = llm.chat_calls
+    assert call["messages"] == [{"role": "user", "content": "q"}]
+
+
+def test_leading_assistant_turns_are_dropped(conn):
+    """The conversation must start with a user turn — an assistant-first
+    history (after trimming) would make the API reject the request."""
+    run_id = _scored_run(conn)
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    llm = FakeLLM()
+    history = [
+        {"role": "assistant", "content": "leading"},
+        {"role": "user", "content": "real"},
+    ]
+    chatmod.answer(conn, llm, run_id, "q", history, "evidence", settings)
+    [call] = llm.chat_calls
+    assert call["messages"][0] == {"role": "user", "content": "real"}
+
+
 def test_unknown_mode_is_rejected(conn):
     run_id = _scored_run(conn)
     with pytest.raises(ValueError, match="Unknown chat mode"):
