@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from authorai import db as dbmod
 from authorai.config import Settings
@@ -182,6 +183,32 @@ def get_job(job_id: str, conn: Conn) -> dict:
     return job
 
 
+@router.get("/runs/{run_id}/documents/{doc_id}/file")
+def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) -> FileResponse:
+    """Stream a run's stored PDF (report or a source) for inline viewing.
+
+    Access is scoped by (run_id, doc_id): a doc from another run resolves to
+    nothing. The served path comes only from the uploads table (a
+    server-generated name), never the client — but it is still resolve-checked
+    to be inside uploads_dir as defense against a tampered DB or a symlink.
+    """
+    settings: Settings = request.app.state.settings
+    resolved = dbmod.get_document_path(conn, run_id, doc_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="No such document in this run")
+    path_str, file_name = resolved
+    path = Path(path_str).resolve()
+    uploads_root = settings.uploads_dir.resolve()
+    if not path.is_relative_to(uploads_root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Document file is unavailable")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=file_name,
+        content_disposition_type="inline",
+    )
+
+
 def _fraction(score: float | None) -> float | None:
     """0–100 component scores leave the API as 0–1 fractions like accuracy."""
     return None if score is None else round(score / 100, 4)
@@ -201,6 +228,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
         verdict_rows = dbmod.list_verdicts_with_evidence(conn, run_id)
         stored = dbmod.get_run_scores(conn, run_id)
         source_rows = dbmod.list_source_credibility(conn, run_id)
+        report_doc_id = dbmod.get_report_doc_id(conn, run_id)
     finally:
         conn.rollback()  # read-only; release the snapshot
 
@@ -261,6 +289,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
     return {
         "run_id": run_id,
         "status": run["status"],
+        "report_doc_id": report_doc_id,
         "scores": scores,
         "stats": stats,
         "claims": claims,

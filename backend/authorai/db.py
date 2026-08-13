@@ -454,6 +454,33 @@ def add_document(
     return doc_id
 
 
+def get_document_path(conn: sqlite3.Connection, run_id: str, doc_id: str) -> tuple[str, str] | None:
+    """The stored PDF path + original file name for a document, scoped to its run.
+
+    Returns None when the (run_id, doc_id) pair does not exist or the document
+    has no upload backing it — the file endpoint turns None into a 404. The
+    run_id predicate is the access boundary: a doc_id from another run resolves
+    to nothing.
+    """
+    row = conn.execute(
+        """
+        SELECT u.path, u.file_name
+        FROM documents d JOIN uploads u ON u.id = d.upload_id
+        WHERE d.id = ? AND d.run_id = ?
+        """,
+        (doc_id, run_id),
+    ).fetchone()
+    return (row["path"], row["file_name"]) if row else None
+
+
+def get_report_doc_id(conn: sqlite3.Connection, run_id: str) -> str | None:
+    """The run's REPORT document id (for the report-PDF pane). None if unset."""
+    row = conn.execute(
+        "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT' LIMIT 1", (run_id,)
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def add_figure(
     conn: sqlite3.Connection,
     run_id: str,

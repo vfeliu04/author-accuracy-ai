@@ -86,7 +86,11 @@ def test_every_api_route_requires_the_key(tmp_path):
     guarded = 0
     with TestClient(app) as client:
         for route in api_router.routes:
-            url = route.path.replace("{run_id}", "x").replace("{job_id}", "x")
+            url = (
+                route.path.replace("{run_id}", "x")
+                .replace("{job_id}", "x")
+                .replace("{doc_id}", "y")
+            )
             for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
                 assert client.request(method, url).status_code == 401, f"{method} {url}"
                 wrong = client.request(method, url, headers={"X-API-Key": "wrong"})
@@ -246,11 +250,24 @@ def test_unknown_ids_404(client):
 
 
 def _seed_scored_run(settings) -> str:
-    """A run with one supported + one unverifiable verdict and stored scores."""
+    """A run with one supported + one unverifiable verdict and stored scores.
+
+    Both documents are backed by real uploaded PDF files on disk so the
+    document-file endpoint can stream them.
+    """
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     conn = dbmod.connect(settings.db_path, settings.embedding_dim)
     run_id = dbmod.create_run(conn)
-    report = dbmod.add_document(conn, run_id, "REPORT")
-    source = dbmod.add_document(conn, run_id, "SOURCE", title="The Source Report")
+    report_pdf = settings.uploads_dir / f"{dbmod.new_id()}.pdf"
+    report_pdf.write_bytes(PDF_BYTES)
+    source_pdf = settings.uploads_dir / f"{dbmod.new_id()}.pdf"
+    source_pdf.write_bytes(PDF_BYTES)
+    report_upload = dbmod.add_upload(conn, "REPORT", "report.pdf", str(report_pdf))
+    source_upload = dbmod.add_upload(conn, "SOURCE", "the-source.pdf", str(source_pdf))
+    report = dbmod.add_document(conn, run_id, "REPORT", upload_id=report_upload)
+    source = dbmod.add_document(
+        conn, run_id, "SOURCE", upload_id=source_upload, title="The Source Report"
+    )
     from authorai.embeddings import FakeEmbedder
 
     embedder = FakeEmbedder(dim=DIM)
@@ -353,6 +370,41 @@ def test_report_shape_scored_run(tmp_path):
     [source] = report["sources"]
     assert source["tier"] == "VERIFIED_DOI"
     assert source["total"] == 62.5
+
+    # The report exposes its own REPORT doc id for the report-PDF pane.
+    assert report["report_doc_id"]
+
+
+def test_document_file_streams_the_pdf(tmp_path):
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        report = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()
+        report_doc = report["report_doc_id"]
+        source_doc = report["sources"][0]["doc_id"]
+        for doc_id in (report_doc, source_doc):
+            resp = client.get(f"/api/runs/{run_id}/documents/{doc_id}/file", headers=AUTH)
+            assert resp.status_code == 200
+            assert resp.headers["content-type"] == "application/pdf"
+            assert resp.content.startswith(b"%PDF-")
+
+
+def test_document_file_cross_run_is_404(tmp_path):
+    """A doc id from another run must not resolve — the run_id is the boundary."""
+    settings = _settings(tmp_path)
+    run_a = _seed_scored_run(settings)
+    run_b = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        report_a = client.get(f"/api/runs/{run_a}/report", headers=AUTH).json()
+        doc_a = report_a["report_doc_id"]
+        # Ask for run A's doc under run B's id.
+        resp = client.get(f"/api/runs/{run_b}/documents/{doc_a}/file", headers=AUTH)
+        assert resp.status_code == 404
+
+
+def test_document_file_unknown_doc_is_404(client):
+    # /api/runs/x/... — the run itself doesn't exist either.
+    assert client.get("/api/runs/x/documents/y/file", headers=AUTH).status_code == 404
 
 
 def test_report_before_scoring_returns_null_scores(tmp_path):
