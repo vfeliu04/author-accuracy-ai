@@ -47,7 +47,9 @@ function ClaimRow({ claim }: { claim: Claim }) {
   const evidence = claim.evidence_source;
   return (
     <div className="upload__item" style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}>
+      {/* flex-wrap + a min basis on the text: in the narrow claims column the
+          badges would otherwise squeeze the text to a word-per-line sliver. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", flexWrap: "wrap" }}>
         <span
           className="source-pill__badge"
           style={{ background: VERDICT_COLOR[claim.verdict], color: "#fff" }}
@@ -60,7 +62,9 @@ function ClaimRow({ claim }: { claim: Claim }) {
           </span>
         ) : null}
         {claim.downgraded ? <span className="source-pill__badge">downgraded</span> : null}
-        <span className="upload__item-name" style={{ whiteSpace: "normal" }}>{claim.text}</span>
+        <span className="upload__item-name" style={{ whiteSpace: "normal", flex: "1 1 200px" }}>
+          {claim.text}
+        </span>
       </div>
       <p style={{ margin: 0, fontSize: "0.85em", opacity: 0.8 }}>{claim.rationale}</p>
       {claim.quote && evidence ? (
@@ -156,7 +160,7 @@ const ReportDashboard = () => {
 
       {status && status !== "DONE" && status !== "FAILED" ? (
         <main className="dashboard__content">
-          <section className="dashboard__column" style={{ width: "100%" }}>
+          <section className="dashboard__column" style={{ width: "100%", gridColumn: "1 / -1" }}>
             <article className="card">
               <header className="card__header">
                 <h2>Running the pipeline</h2>
@@ -169,7 +173,7 @@ const ReportDashboard = () => {
 
       {status === "FAILED" ? (
         <main className="dashboard__content">
-          <section className="dashboard__column" style={{ width: "100%" }}>
+          <section className="dashboard__column" style={{ width: "100%", gridColumn: "1 / -1" }}>
             <p className="dashboard__status dashboard__status--error">
               This run failed: {run?.error ?? "check the server logs"}
             </p>

@@ -1,179 +1,79 @@
 # Configuration Reference
 
-All backend settings come from environment variables. `backend/app.py` loads `backend/.env` with python-dotenv (`override=False`, so variables already set in your shell win over the file). The values are parsed once into a frozen `Settings` dataclass in `backend/author_ai/config.py` and cached by `get_settings()` (an `lru_cache`), so **any change requires a backend restart**. A starter file is provided at `backend/.env.example`:
+All settings live in the `Settings` class in `backend/authorai/config.py` (pydantic-settings `BaseSettings`). Every setting is an environment variable with the `AUTHORAI_` prefix — except the two provider keys, which are read unprefixed via aliases (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). Names are case-insensitive; unknown variables are ignored (`extra="ignore"`). Real environment variables win over the `.env` file.
+
+The `.env` file is loaded from **`backend/.env`, anchored to the package location regardless of the process working directory** — a CWD-relative `.env` would silently load nothing when the server is started from elsewhere. A template exists at `backend/.env.example`:
 
 ```bash
 cp backend/.env.example backend/.env
-# then edit backend/.env with your keys
+# then fill in the keys
 ```
 
-Parsing rules (see the helpers at the top of `config.py`):
+`Settings` is constructed where needed and passed explicitly — there is no cached global, but processes read the environment at construction, so changing a value still means restarting the server.
 
-- **Booleans**: the string `"true"` (case-insensitive) is `True`; anything else is `False`.
-- **Paths**: resolved to absolute paths at startup, and the key directories (`DATA_ROOT`, `CACHE_DIR`, `FAISS_INDEX_DIR`, `CLAIM_VECTOR_PATH`, `LOG_DIR`) are auto-created by `get_settings()`.
-- **Numbers**: parsed with plain `float()` / `int()` — a malformed value crashes at startup rather than falling back to the default.
+> **Note:** the *path* settings have relative defaults (`data/…`) and are **not** anchored — they resolve against the process working directory. Start the server from `backend/`, or set absolute paths.
 
-> **Gotcha:** the path defaults are *relative* (`./data`, `./logs`, …) and are resolved against the process working directory. Always start the server from `backend/` (see [development.md](development.md)), or set absolute paths in `.env`.
+## Keys and auth
 
-## API keys and auth
+| Env var | Default | What it does |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | unset | Claude access for extraction, verdicts, captions, metadata, validity, and chat. Unprefixed on purpose (validation alias) so an existing `.env` keeps working. The LLM client **refuses to construct** without it — no silent degradation |
+| `OPENAI_API_KEY` | unset | OpenAI embeddings (also unprefixed via alias) |
+| `AUTHORAI_API_KEY` | unset | Shared secret clients send as `X-API-Key`. **Fail-closed:** if unset, the server refuses to start (`RuntimeError` at startup) rather than serving an open API, and the auth middleware independently rejects everything with 401 when no key is configured |
 
-Never commit real values; `backend/.env` should stay untracked. Names only below.
+## HTTP server
 
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `ANTHROPIC_API_KEY` | unset | Claude access for chat, explanations, verdicts, rerank, claim filtering | `services/summarizer.py`, `services/verdict_classifier.py`, `services/reranker.py`, `pipelines/chat.py` |
-| `OPENAI_API_KEY` | unset | OpenAI embeddings and the optional LlamaIndex section summarizer | `services/embedding.py`, `services/section_indexer.py` |
-| `API_KEY` | unset | Shared secret checked against the `X-API-Key` request header | `app.py` (`require_api_key`) |
+| Env var | Default | What it does |
+|---|---|---|
+| `AUTHORAI_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins (`allow_credentials` is off — auth is a header, not a cookie) |
+| `AUTHORAI_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, and `/openapi.json`. They expose the full route surface — keep for local dev, **disable for an exposed deployment** |
+| `AUTHORAI_MAX_REQUEST_BYTES` | `220000000` | Whole-request ceiling, checked against `Content-Length` **before** the body is read, so an unauthenticated attacker cannot push gigabytes → 413 |
+| `AUTHORAI_MAX_UPLOAD_BYTES` | `50000000` | Per-file upload cap, checked from the spooled part's size without materializing the bytes → 413 |
+| `AUTHORAI_MAX_SOURCE_FILES` | `20` | Max source PDFs per run → 400 |
+| `AUTHORAI_UPLOADS_DIR` | `data/uploads` | Where uploaded PDFs are stored (server-generated names); the file endpoint resolve-checks every served path against this directory |
 
-> **Gotcha:** if `API_KEY` is unset, `require_api_key` in `app.py` is a **no-op** — every endpoint is open. Set it for anything beyond local development. See [api.md](api.md) for which endpoints are guarded.
+## Storage and embeddings
 
-If the LLM keys are missing the code degrades rather than crashing: clients are simply not constructed and the services fall back to heuristics (e.g. a deterministic character-frequency vector instead of OpenAI embeddings, extractive summaries and rule-based verdicts instead of Claude).
+| Env var | Default | What it does |
+|---|---|---|
+| `AUTHORAI_DB_PATH` | `data/authorai.db` | SQLite database file (run-scoped schema; migrated in place on open) |
+| `AUTHORAI_FIGURES_DIR` | `data/figures` | Extracted figure PNGs, under `<figures_dir>/<run_id>/<doc_id>/` |
+| `AUTHORAI_EMBEDDING_MODEL` | `text-embedding-3-large` | OpenAI embedding model for chunk vectors |
+| `AUTHORAI_EMBEDDING_DIM` | `3072` | Embedding dimension. Baked into the database at creation; opening an existing DB with a different value **fails loudly** rather than silently corrupting similarity search |
 
-## Storage paths
+## Pipeline models
 
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `DATA_ROOT` | `./data` | Root folder for uploaded PDFs and derived data | `services/file_store.py` |
-| `SQLITE_PATH` | `./data/accuracy.db` | SQLite database file | `storage/database.py`, `services/environment.py` |
-| `CACHE_DIR` | `./data/cache` | Cached artifacts (wiped on each pipeline run) | `services/environment.py` |
-| `FAISS_INDEX_DIR` | `./data/indexes` | Base directory for FAISS vector indexes | `services/vector_store.py`, `services/environment.py` |
-| `CLAIM_VECTOR_PATH` | `./data/indexes/claims` | Per-report FAISS index of extracted claims | `pipelines/accuracy.py`, `pipelines/chat.py` |
-| `SOURCE_VECTOR_PATH` | `./data/indexes/sources` | Per-report FAISS index of source chunks | `pipelines/accuracy.py`, `pipelines/chat.py` |
-| `LOG_DIR` | `./logs` | Backend log file location | `services/logger.py` |
+The split is deliberate: the accuracy-critical judgments (extraction, verdicts, validity) run on the frontier model; cheap bounded tasks (captions, bibliographic metadata) run on Haiku.
 
-> **Gotcha:** the app is single-report, last-run-wins. `reset_environment()` in `services/environment.py` wipes the pipeline tables in `SQLITE_PATH` and clears `FAISS_INDEX_DIR` and `CACHE_DIR` at the start of each run. Do not point these at directories containing anything you want to keep. See [architecture.md](architecture.md).
+| Env var | Default | What it does |
+|---|---|---|
+| `AUTHORAI_EXTRACTION_MODEL` | `claude-opus-5` | Claim extraction — the language judgment the whole score rests on |
+| `AUTHORAI_VERDICT_MODEL` | `claude-opus-5` | Per-claim verdicts with schema-quoted evidence |
+| `AUTHORAI_VALIDITY_MODEL` | `claude-opus-5` | The validity rubric over the whole report |
+| `AUTHORAI_CAPTION_MODEL` | `claude-haiku-4-5` | Figure descriptions (vision) baked into chunk text |
+| `AUTHORAI_METADATA_MODEL` | `claude-haiku-4-5` | Bibliographic metadata extraction for source credibility |
 
-## Model selection
+## Scoring
 
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `EMBEDDING_MODEL` | `text-embedding-3-large` | OpenAI embedding model for all vector search | `services/embedding.py` |
-| `EXPLANATION_MODEL` | `claude-sonnet-4-6` | Verdict explanations and summaries | `services/verdict_classifier.py`, `services/summarizer.py` |
-| `LLM_CHAT_MODEL` | `claude-sonnet-4-6` | Chat responses (see [chat.md](chat.md)) | `pipelines/chat.py` |
-| `RERANK_MODEL` | `claude-haiku-4-5` | Evidence reranking after retrieval | `services/reranker.py` |
-| `CLAIM_CLASSIFIER_MODEL` | `claude-haiku-4-5` | LLM claim-verifiability batch filter | `pipelines/accuracy.py` |
+| Env var | Default | What it does |
+|---|---|---|
+| `AUTHORAI_VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity components. Parsed loudly: unknown names, duplicates, non-finite/negative weights, or a sum ≠ 1 raise instead of falling back |
+| `AUTHORAI_AUTHORITY_TIER1` | `FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow |
+| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier` | Second-tier publishers, same matching rules |
+| `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers) |
 
-> **Gotcha:** `services/section_indexer.py` passes `EXPLANATION_MODEL` (a Claude model id) into LlamaIndex's **OpenAI** LLM wrapper together with `OPENAI_API_KEY`. With the defaults this fails and the code silently falls back to the heuristic summarizer. If you want working LlamaIndex section summaries, that wiring needs an OpenAI model — as shipped, treat it as effectively disabled.
+## Jobs
 
-## Retrieval and reranking
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `RETRIEVAL_TOP_K` | `8` | FAISS hits fetched per claim — but only on the fallback path with no indexed sources; normal runs retrieve per source instead | `pipelines/accuracy.py` |
-| `RETRIEVAL_PER_SOURCE_CAP` | `3` | Evidence chunks fetched per source document per claim (the effective limit on normal runs) | `pipelines/accuracy.py` |
-| `RETRIEVAL_SUPPORT_THRESHOLD` | `0.35` | Minimum similarity for evidence to count toward a verdict | `pipelines/accuracy.py` |
-
-## Claim extraction and pipeline
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `CLAIM_SCORE_MIN` | `1.5` | Minimum heuristic score for a sentence to become a claim | `pipelines/accuracy.py` |
-| `CLAIM_ALPHA_RATIO_MIN` | `0.15` | Minimum ratio of alphabetic characters (rejects table-noise "sentences") | `pipelines/accuracy.py` |
-| `CLAIM_NON_NUMERIC_SCORE_MIN` | `0.5` | Score floor for claims without numbers | `pipelines/accuracy.py` |
-| `CLAIM_QUALITY_LLM_FILTER` | `false` | Extra Claude pass that drops non-verifiable claims (`_llm_batch_filter`) | `pipelines/accuracy.py` |
-| `CLAIM_DECOMPOSE_ENABLED` | `true` | Rule-based splitting of compound claims into parts | `pipelines/accuracy.py` |
-| `SECTION_SUMMARY_MODE` | `lazy` | `lazy` = summarize sections during the accuracy run; `eager` = at ingestion | `pipelines/accuracy.py`, `pipelines/ingestion.py` |
-| `PIPELINE_MAX_WORKERS` | `4` | Thread pool size for parallel per-claim evidence retrieval | `pipelines/accuracy.py` |
-
-## Verdicts and confidence
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `VERDICT_MULTI_EVIDENCE_CAP` | `5` | Max evidence snippets combined into one verdict prompt | `pipelines/accuracy.py` |
-| `TEMPORAL_MISMATCH_TOLERANCE_YEARS` | `2` | Year gap between claim and evidence before flagging a temporal mismatch | `pipelines/accuracy.py` |
-
-## OCR
-
-OCR runs when a PDF yields fewer than `PDF_OCR_MIN_TEXT_THRESHOLD` characters **or** its ASCII ratio falls below `PDF_OCR_LOW_QUALITY_RATIO` (`should_run_ocr` in `services/ocr.py`).
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `PDF_OCR_ENABLED` | `true` | Master switch for OCR | `services/ocr.py` |
-| `PDF_OCR_MIN_TEXT_THRESHOLD` | `256` | Character-count trigger for OCR | `services/ocr.py` |
-| `PDF_OCR_LOW_QUALITY_RATIO` | `0.6` | ASCII-ratio trigger for OCR | `services/ocr.py` |
-| `OCR_MY_PDF_PATH` | `/usr/local/bin/ocrmypdf` | Path to the `ocrmypdf` binary | `services/ocr.py` |
-
-## Table extraction
-
-`extract_tables` in `services/table_extraction.py` dispatches on `PDF_TABLES_ENGINE`; any value other than `tabula` or `pdftables` raises a `ValueError`.
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `PDF_TABLES_ENGINE` | `tabula` | `tabula` (local Java jar) or `pdftables` (hosted API) | `services/table_extraction.py` |
-| `TABULA_JAR_PATH` | `/usr/local/tabula/tabula.jar` | Location of the Tabula jar (extraction is skipped with a warning if missing) | `services/table_extraction.py` |
-| `TABULA_JAI_CLASSPATH` | empty | Extra Java classpath entries prepended when invoking Tabula | `services/table_extraction.py` |
-| `PDF_TABLES_API_KEY` | unset | PDFTables.com API key (engine skipped if missing) | `services/table_extraction.py` |
-| `PDF_TABLES_TIMEOUT` | `30` | PDFTables HTTP timeout in seconds | `services/table_extraction.py` |
-
-> **Note:** `PDF_TABLES_TIMEOUT` is the one setting read with a raw `os.getenv` inside `table_extraction.py` instead of going through `Settings` — it is *not* cached and is re-read on every PDFTables request. In practice a restart is still needed to change it, because `backend/.env` is only loaded into the environment once at startup.
-
-## Chart ingestion
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `CHART_INGESTION_ENABLED` | `true` | Extract embedded chart images from PDFs | `services/charts.py` |
-| `CHART_MIN_AREA` | `4096` | Minimum pixel area (w×h) for an image to be treated as a chart | `services/charts.py` |
-| `CHART_MAX_FACT_POINTS` | `4` | Max data points per chart turned into searchable fact chunks | `services/charts.py` |
-
-## Credibility
-
-Publisher lists are comma-separated, lowercase substrings matched against source metadata (see [metrics.md](metrics.md)).
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `AUTHORITY_PUBLISHERS_TIER1` | `fao,un,world bank,imf,who,unicef,oecd` | Publishers granted the top authority score | `pipelines/credibility.py` |
-| `AUTHORITY_PUBLISHERS_TIER2` | `reuters,associated press,bbc,nature,science,lancet` | Publishers granted the second-tier authority score | `pipelines/credibility.py` |
-
-## Validity
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `VALIDITY_TOPICS` | `climate,supply,logistics,nutrition,conflict` | Comma-separated topics the coverage score checks for | `pipelines/validity.py` |
-| `VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity sub-scores | `pipelines/validity.py` |
-
-## Recommendations, OpenAlex, Crossref
-
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `RECOMMENDATION_SIMILARITY_THRESHOLD` | `0.18` | Minimum relevance score for a recommended source | `services/recommendations.py` |
-| `RECOMMENDATION_PUBLICATION_CUTOFF_YEAR` | `2018` | Oldest publication year requested from OpenAlex | `services/recommendations.py` |
-| `OPENALEX_BASE_URL` | `https://api.openalex.org` | OpenAlex API endpoint | `services/recommendations.py` |
-| `OPENALEX_MAILTO` | unset | Contact email appended to OpenAlex requests (polite pool) | `services/recommendations.py` |
-| `CROSSREF_MAILTO` | `dev@example.com` | Contact email in the Crossref `User-Agent` header | `services/metadata_enrichment.py` |
+| Env var | Default | What it does |
+|---|---|---|
+| `AUTHORAI_JOB_POLL_SECONDS` | `2.0` | Worker thread's poll interval for `QUEUED` jobs |
 
 ## Chat
 
 See [chat.md](chat.md) for how these interact.
 
-| Env var | Default | Controls | Main consumer |
-|---|---|---|---|
-| `CHAT_HISTORY_LENGTH` | `20` | Prior messages loaded into the chat context | `pipelines/chat.py` |
-| `CLAIM_RELEVANCE_MIN` | `0.35` | Base similarity threshold for *source* snippets pulled into chat (applied at ×0.8, lowered further in guidance/creative modes); claims are ranked, not thresholded | `pipelines/chat.py` |
-| `CLAIM_CONTEXT_LIMIT` | `5` | Sizes the claim vector search (`top_k` is at least 2× this); it does **not** cap the prompt — every ranked claim is injected | `pipelines/chat.py` |
-| `SOURCE_CONTEXT_LIMIT` | `6` | Max source snippets injected into a chat prompt | `pipelines/chat.py` |
-
-## Flask server variables
-
-These are read by the Flask CLI itself, not by application code, and only apply when starting with `flask run`. Running `python app.py` directly ignores them and hardcodes `debug=True, port=5001` in the `__main__` block of `app.py`.
-
-| Env var | Read by |
-|---|---|
-| `FLASK_APP`, `FLASK_ENV`, `FLASK_DEBUG`, `FLASK_RUN_PORT` | Flask CLI (`flask run`) |
-
-## Declared but currently unused
-
-The following are defined in `Settings` but **no code ever reads them** (verified by grep). Setting them has no effect:
-
-| Env var | Default | Intended purpose |
+| Env var | Default | What it does |
 |---|---|---|
-| `RERANK_WITH_GPT` | `true` | Toggle for LLM reranking (the reranker always runs when a Claude client exists) |
-| `RERANK_MAX_CANDIDATES` | `10` | Cap on rerank candidates |
-| `PDF_OCR_FORCE_WHEN_SCANNED` | `true` | Force OCR on scanned PDFs |
-| `CLAIM_PRIORITY_WEIGHT` | `1.5` | Claim prioritization weight |
-| `CRED_TITLE_MATCH_THRESHOLD` | `0.85` | Credibility title-match threshold |
-| `CRED_RECENCY_DECAY_YEARS` | `10` | Credibility recency decay window |
-| `AUTHORITATIVE_PUBLISHERS` | `fao,un,world bank,imf` | Superseded by the tiered publisher lists |
-| `VALIDITY_TOPIC_THRESHOLD` | `0.35` | Validity topic threshold |
-| `SEMANTIC_SIMILARITY_THRESHOLD` | `0.95` | Near-duplicate detection threshold |
-
-In addition, the local `backend/.env` carries keys that nothing in the codebase consumes at all (not even `Settings`): `BACKEND_PORT`, `LOG_LEVEL`, `CLASSPATH`, `PDF_PIPELINE_LEGACY`, `ENABLE_SEMANTIC_CLAIMS`, and `VERDICT_CONFIDENCE_BANDS`. They are leftovers from earlier iterations (see [history.md](history.md)) and can be removed safely.
+| `AUTHORAI_CHAT_MODEL` | `claude-sonnet-5` | Chat model — Sonnet-class with prompt caching over the static per-run context, cheaper than the Opus judgments |
+| `AUTHORAI_CHAT_MAX_TOKENS` | `2048` | Chat response token budget |
+| `AUTHORAI_CHAT_HISTORY_TURNS` | `12` | Most recent client-sent history messages kept per request |

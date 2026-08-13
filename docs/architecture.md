@@ -1,175 +1,202 @@
 # Architecture
 
-Author AI is a fact-checking and author-credibility scoring app: you upload one **report** PDF plus a set of **source** PDFs, and a pipeline extracts factual claims from the report, checks them against the sources with embeddings + LLM verdicts, scores the report's credibility and validity, and recommends further reading. A Flask backend (`backend/app.py`) does all the work; a React + Vite frontend (`frontend/`) drives uploads, shows the dashboard, and hosts a report-aware chat. This page describes how the pieces fit together. See [api.md](api.md) for endpoint contracts, [metrics.md](metrics.md) for scoring math, and [chat.md](chat.md) for the assistant.
+Author AI v2 fact-checks a **report** PDF against a set of **source** PDFs. A FastAPI backend (`backend/authorai/`) ingests the PDFs, extracts the report's checkable claims, verifies each claim against the sources, and scores the report three ways (accuracy, credibility, validity). A React + Vite frontend (`frontend/`) drives uploads, shows per-run dashboards, and hosts a grounded chat. See [metrics.md](metrics.md) for what the numbers mean and [development.md](development.md) for running it.
 
-## System overview
+## Design principles
+
+- **The LLM makes language judgments; code does the math and bookkeeping.** Every LLM judgment goes through structured outputs (`messages.parse()`), and judgments that assert something (verdicts, validity assessments) must cite a verbatim quote that *code* then verifies against the text actually shown to the model.
+- **Every table is run-scoped.** Each pipeline table carries a `run_id`; runs never overwrite each other and there is no reset step, ever. (v1 wiped the world on every run.)
+- **Failures are loud, never silent fallbacks.** No API key ⇒ the process refuses to start. A missing figure image ⇒ the judge call raises instead of degrading to text. Malformed config weights ⇒ error, not defaults. Partial batch results ⇒ nothing is stored.
+- **Accuracy is reported three ways** — supported / contradicted / unverifiable — and the headline number never counts "we couldn't check it" as "wrong".
+
+## Pipeline
+
+One upload creates one run, one job, and four resumable steps executed by a single background worker:
 
 ```mermaid
 flowchart TD
-    A["Upload PDFs<br/>POST /api/uploads/source + /api/uploads/report"] --> B["POST /api/run_pipeline<br/>jobs row (QUEUED) + background thread"]
-    B --> C["reset_environment()<br/>wipe pipeline tables, FAISS indexes, cache"]
-    C --> D["IngestionPipeline per PDF<br/>OCR heuristic &rarr; table extraction &rarr; chart detection &rarr; per-page sections"]
-    D --> E["Chunking + OpenAI embeddings<br/>&rarr; FAISS 'sources' index"]
-    D --> F["CredibilityPipeline.score_source<br/>PDF metadata + Crossref"]
-    E --> G["AccuracyPipeline.verify_report<br/>heuristic claim extraction (+ optional LLM filter, decomposition)"]
-    G --> H["Per-claim retrieval (thread pool)<br/>FAISS search &rarr; Claude rerank &rarr; Claude verdict + temporal check"]
-    H --> I["ValidityPipeline.score_report<br/>heuristic coverage/consistency/methodology/context/recency"]
-    I --> J["CredibilityPipeline.aggregate_report<br/>usage-weighted source scores"]
-    J --> K["RecommendationService<br/>OpenAlex search"]
-    K --> L["result_json persisted, job DONE"]
-    L --> M["Frontend: poll GET /api/jobs/:id &rarr; dashboard<br/>GET /api/reports/:job/summary, POST /api/chat"]
+    A["POST /api/runs<br/>run + uploads + job rows in ONE transaction (202)"] --> B["Worker claims job<br/>(compare-and-set UPDATE)"]
+    B --> C["ingest<br/>Docling parse → chunks + figure PNGs<br/>→ OpenAI embeddings → sqlite-vec + FTS5"]
+    C --> D["extract<br/>one structured claude-opus-5 call over<br/>report sections + table chunks → claims (with stance)"]
+    D --> E["verify<br/>per-claim SOURCE-only hybrid retrieval →<br/>Batch API verdicts → code-side quote check → verdicts"]
+    E --> F["score<br/>stance-aware accuracy (code) + Crossref credibility<br/>+ validity rubric → run_scores"]
+    F --> G["finish_job_and_run<br/>job DONE + run DONE in one transaction"]
+    G --> H["Frontend polls /api/runs/:id + /report<br/>dashboard, claims workspace, chat"]
 ```
 
-## Repository layout
+Each step is recorded in the job's `progress` JSON (`{step, label, status, ts}`, upserted by step name). A restart re-queues any `RUNNING` job and resumes from its first incomplete step — see [Jobs](#jobs-jobspy).
 
-```
-author-accuracy-ai/
-├── README.md
-├── docs/                  # this documentation set
-├── backend/
-│   ├── app.py             # Flask app factory + all HTTP routes
-│   ├── requirements.txt
-│   ├── author_ai/
-│   │   ├── config.py      # env-driven Settings dataclass (cached)
-│   │   ├── models.py      # dataclasses: Claim, CredibilityScore, ValidityScores, Chart…
-│   │   ├── pipelines/     # ingestion, accuracy, credibility, validity, chat
-│   │   ├── services/      # embeddings, FAISS, LLM helpers, OCR, tables, charts…
-│   │   └── storage/       # SQLite Repository (database.py), JsonStore helper
-│   ├── data/              # runtime state: accuracy.db, uploads/, indexes/, cache/
-│   ├── logs/              # backend.log (single shared log file)
-│   └── tests/             # pytest suite
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx        # react-router route table
-│   │   ├── api/client.ts  # fetch wrapper + typed API calls
-│   │   ├── context/       # ReportDataContext (shared app state)
-│   │   └── components/    # pages and panels
-│   └── vite.config.ts     # dev server on port 5173
-└── example_sources/       # sample PDFs for manual testing
-```
+## Backend modules (`backend/authorai/`)
 
-## Backend
+| Module | Role |
+| --- | --- |
+| `db.py` | SQLite schema, migrations, and all repository functions |
+| `ingest.py` | Docling PDF parsing → sections/tables/figures → chunks + embeddings |
+| `chunking.py` | Plain-code paragraph packing (1200 chars, 200 overlap) |
+| `embeddings.py` | OpenAI embeddings (`text-embedding-3-large`, dim 3072); `FakeEmbedder` for tests |
+| `search.py` | Hybrid search: sqlite-vec KNN + FTS5 BM25, fused with RRF |
+| `claims.py` | Claim extraction (structured LLM call, stance-aware) |
+| `verification.py` | Evidence retrieval, verdict judging, code-side quote verification |
+| `credibility.py` | Source metadata extraction, Crossref verification tiers, credibility scoring |
+| `scoring.py` | Stance-aware accuracy (pure code), validity rubric, `score_run` orchestration |
+| `jobs.py` | Jobs worker: one thread, resumable steps, startup recovery |
+| `api.py` | Authenticated HTTP API + pure-ASGI auth/size middleware |
+| `chat.py` | Grounded chat over a DONE run (prompt-cached context) |
+| `llm.py` | The one Anthropic client — all LLM traffic, sync + batch + vision + chat |
+| `evals.py` | Golden-set scorers (extraction recall/precision, verdict accuracy, stance) |
+| `config.py` | Pydantic settings from env / `backend/.env` (prefix `AUTHORAI_`) |
+| `cli.py` | `python -m authorai.cli ingest/extract/eval-extract/verify/eval-verdict/score/search` |
+| `main.py` | App factory: fail-closed startup, worker lifecycle, CORS |
 
-### API layer (`backend/app.py`)
+## Storage (`db.py`)
 
-`create_app()` builds the Flask app with CORS enabled and wires every route. Pipelines (`AccuracyPipeline`, `CredibilityPipeline`, `ValidityPipeline`, `ChatService`) are instantiated **once at module level** and reused across requests. Every `/api/*` route is wrapped in a `require_api_key` decorator that compares the `X-API-Key` request header to the `API_KEY` env var.
+One SQLite file (`AUTHORAI_DB_PATH`, default `data/authorai.db`) holds everything: relational tables, the FTS5 keyword index, and the sqlite-vec vector index. Connections run WAL with `busy_timeout=5000` (set *before* the WAL switch so racing openers wait instead of throwing `SQLITE_BUSY`) and `foreign_keys=ON`.
 
-> **Gotcha:** if `API_KEY` is unset, `require_api_key` is a **no-op** — the whole API is open. Set it for anything beyond local development. See [configuration.md](configuration.md).
+**Migrations** run at connect time via `PRAGMA user_version`; `SCHEMA_VERSION` is currently **9**. Each migration is an `if version < N:` block whose DDL, data moves, and version bump execute in one `BEGIN…COMMIT` script, so an interruption can never leave a half-created schema. Two loud guards at open:
 
-Error handling is centralized: `FileNotFoundError` → 404, `ValueError` → 400, anything else → 500 JSON (Werkzeug `HTTPException`s keep their own status code and description). `build_report_summary` assembles the dashboard payload from a finished job's `result_json` (accuracy = supported/total claims; credibility and validity scaled from 0–100 to 0–1; overall = plain mean of the three). It also lazily backfills `recommended_sources` into `result_json` if a pre-recommendations job is read.
-
-### Pipelines (`backend/author_ai/pipelines/`)
-
-**Ingestion (`ingestion.py`)** — `IngestionPipeline.ingest` takes a PDF and: runs OCR only when heuristics say text is sparse (via `services/ocr.py` and OCRmyPDF), extracts tables (Tabula or the PDFTables API), detects and parses chart images into synthetic data-point chunks, then reads text per page with PyPDF2. Each page becomes a "section" (`page-N`); section text is chunked with LangChain's `RecursiveCharacterTextSplitter` (1200 chars, 200 overlap; sliding-window fallback if LangChain is missing). The document (with a summary, table previews, and `sections_detail`), its chunks, and its charts are persisted to SQLite. Section summaries come from `SECTION_INDEXER` eagerly or lazily depending on `SECTION_SUMMARY_MODE`.
-
-**Accuracy (`accuracy.py`)** — the coordinator. `index_source` ingests a source PDF and embeds its chunks into the shared FAISS `sources` index. `verify_report` ingests the report, extracts claims from `body_text` with regex/heuristic scoring (title/header filters, numeric-claim scorer, non-numeric verb-signal path), optionally runs a batch LLM verifiability filter (`CLAIM_QUALITY_LLM_FILTER`, uses `CLAIM_CLASSIFIER_MODEL`, default `claude-haiku-4-5`), and rule-splits compound claims. Evidence retrieval runs in a `ThreadPoolExecutor` (`PIPELINE_MAX_WORKERS`): per-source FAISS similarity search (capped by `RETRIEVAL_PER_SOURCE_CAP`), Claude rerank (`EvidenceReranker`), then a `VerdictClassifier` call over the top hits produces SUPPORTED / CONTRADICTED / NOT_FOUND with a confidence. A numeric-overlap override can rescue hits below the similarity threshold, and a temporal check downgrades SUPPORTED verdicts when claim and evidence years differ by more than `TEMPORAL_MISMATCH_TOLERANCE_YEARS`. Claims and evidence rows are persisted, and two per-report FAISS indexes are written for chat retrieval.
-
-**Credibility (`credibility.py`)** — `score_source` collects metadata for each source (embedded PDF info + first-page heuristics + Crossref DOI lookup via `services/metadata_enrichment.py`) and sums component scores: metadata completeness, publisher authority tiers, recency, extraction confidence, and an optional manual adjustment (0–100 total). `aggregate_report` computes the report-level score as a weighted average of source scores, weighted by how many SUPPORTED claims each source backs times a confidence multiplier — sources never cited by supported claims contribute nothing.
-
-**Validity (`validity.py`)** — `score_report` scores the report itself with pure heuristics (no LLM): topic coverage against `VALIDITY_TOPICS`, internal numeric consistency, methodology-keyword presence, geographic context terms, and source recency, combined via `VALIDITY_WEIGHTS`. Results and diagnostics (missing topics, methodology gaps) are upserted into `validity_scores`.
-
-> **Quirk:** `verify_report` and `score_report` each call `IngestionPipeline.ingest` on the report, so the report PDF is fully ingested **twice** per pipeline run.
-
-**Chat (`chat.py`)** — `ChatService.respond` answers questions about the latest verified report. It detects intent (small talk vs. report), resolves explicit claim references ("claim 3", "all claims"), embeds the question and searches the per-report claim and evidence FAISS indexes, then assembles a context prompt (claim findings, evidence snippets, metric diagnostics, trimmed history) for `LLM_CHAT_MODEL` (default `claude-sonnet-4-6`). Three modes — evidence / guidance / creative — swap the system prompt and relax retrieval thresholds; without `ANTHROPIC_API_KEY` it degrades to a deterministic composed answer. Details in [chat.md](chat.md).
-
-### Services (`backend/author_ai/services/`)
-
-| Group | Module | Role |
-| --- | --- | --- |
-| Retrieval stack | `embedding.py` | OpenAI embeddings (`EMBEDDING_MODEL`, default `text-embedding-3-large`); deterministic local fallback when `OPENAI_API_KEY` is unset |
-| Retrieval stack | `vector_store.py` | `VectorStore`: LangChain FAISS wrapper (L2-normalized, persisted per directory) with a raw-FAISS fallback implementation |
-| Retrieval stack | `reranker.py` | `EvidenceReranker`: Claude (`RERANK_MODEL`, default `claude-haiku-4-5`) re-scores candidate snippets; falls back to similarity order |
-| Retrieval stack | `verdict_classifier.py` | `VerdictClassifier`: Claude-based SUPPORTED/CONTRADICTED/NOT_FOUND labeling with a numeric-comparison heuristic fallback |
-| Retrieval stack | `section_indexer.py` | `SECTION_INDEXER`: optional LlamaIndex + OpenAI section summarizer for parent-section context |
-| LLM / external | `summarizer.py` | Document summaries via Anthropic, extractive fallback otherwise |
-| LLM / external | `recommendations.py` | `RecommendationService`: queries the OpenAlex API and ranks results with embeddings + summaries |
-| PDF processing | `ocr.py` | Heuristics for "does this PDF need OCR", shells out to OCRmyPDF |
-| PDF processing | `table_extraction.py` | Table extraction via the Tabula JAR (subprocess) or PDFTables API |
-| PDF processing | `charts.py`, `chart_parser.py` | Detect chart images in PDFs and parse them (cv2/pytesseract, stubbed if absent) into data-point chunks |
-| PDF processing | `metadata_enrichment.py` | Embedded PDF metadata + header heuristics + Crossref DOI lookup for credibility |
-| Misc | `environment.py` | `reset_environment()`: wipes pipeline tables, FAISS index dirs, and cache before each run |
-| Misc | `file_store.py` | Saves uploads to `data/uploads/<upload_id>/<filename>` |
-| Misc | `logger.py` | Named per-module loggers that all write to a single `backend.log` under `LOG_DIR` |
-
-### Storage (`backend/author_ai/storage/database.py`)
-
-`Repository` is a thin helper over SQLite at `backend/data/accuracy.db` (`SQLITE_PATH`). Connections are **thread-local** (one per worker thread), rows are `sqlite3.Row`, and most structured fields are JSON-encoded TEXT columns stamped with a `schema_version`. `init_db()` creates all tables idempotently and applies additive `ALTER TABLE` migrations (e.g. `claims.processing_mode`, `jobs.progress_json`, chart columns on `chunks`).
+- A database with `user_version > SCHEMA_VERSION` (written by a newer build) **refuses to open** — an old checkout writing through a schema it doesn't understand would corrupt silently.
+- A database created with a different `embedding_dim` than configured refuses to open — mixed dimensions would corrupt every similarity search.
 
 | Table | Contents |
 | --- | --- |
-| `documents` | One row per ingested PDF (`doc_type` REPORT/SOURCE, metadata JSON incl. `sections_detail` and summaries, full `body_text`) |
-| `chunks` | Text chunks and chart data points (`chunk_type`, `chart_id`, `x_value`/`y_value`/`series_name`) |
-| `charts` | Detected chart figures (page, bbox, chart type, raw parse JSON) |
-| `claims` | Extracted claims with verdict, confidence, band, explanation, metadata |
-| `claim_evidence` | Retrieval hits per claim; best hit carries the claim's verdict, others are `ALTERNATIVE` |
-| `credibility_scores` | Per-source score + component breakdown |
-| `validity_scores` | Per-report validity sub-scores + diagnostics JSON |
-| `chat_logs` | Chat turns keyed by session and report |
-| `uploads` | Uploaded-file registry (survives environment resets) |
-| `jobs` | Pipeline runs: status, `source_ids`, `result_json`, `progress_json`, error message (survives resets) |
+| `meta` | Key/value; stores the database's `embedding_dim` |
+| `runs` | `id, created_at, status (CREATED/RUNNING/DONE/FAILED), error` |
+| `uploads` | Stored PDF files: kind, original file name, server-side path |
+| `documents` | One row per ingested PDF: `run_id`, kind (`SOURCE`/`REPORT`), title, metadata JSON (report sections) |
+| `chunks` | Retrieval units: `run_id`, `doc_id`, page, section, kind (`text`/`table`/`figure`), text, `figure_id` |
+| `chunks_fts` | FTS5 index over chunk text (external-content table, trigger-synced) |
+| `chunks_vec` | sqlite-vec `vec0` index: `run_id` **and** `doc_kind` are PARTITION KEYs |
+| `figures` | Extracted figure PNGs: image path, caption, LLM description |
+| `claims` | Extracted claims: text, value, unit, year, subject, **`stance`** (`asserted`/`disavowed`), `extraction_prompt_hash` |
+| `verdicts` | One per claim (`claim_id UNIQUE`, `ON DELETE CASCADE`): verdict, `raw_verdict`, quote, `quote_verified`, `quoted_chunk_id`, evidence chunk ids, `year_flag`, rationale, model, `prompt_hash` |
+| `run_scores` | The run's three scores as JSON (accuracy, credibility, validity) |
+| `source_credibility` | Per-source metadata, component scores, total, tier |
+| `jobs` | Pipeline jobs: status, payload (upload ids), progress JSON, error |
 
-FAISS indexes live under `backend/data/indexes/` (`FAISS_INDEX_DIR`), each as a directory of `index.faiss` + `index.pkl`:
+Index-invariants enforced in SQL:
 
-- `indexes/sources/` — the shared source-chunk index used for claim verification (`VectorStore("sources")`).
-- `indexes/claims/<report_id>/` — per-report claim index for chat (`CLAIM_VECTOR_PATH`).
-- `indexes/sources/<report_id>/` — per-report evidence-snippet index for chat (`SOURCE_VECTOR_PATH`).
+- **Chunk text is immutable** — a `BEFORE UPDATE OF text` trigger aborts, because an in-place edit would desync the stored embedding. Delete and re-add instead.
+- FTS5 stays in sync via `AFTER INSERT` / `AFTER DELETE` triggers; the delete trigger also removes the row's vector from `chunks_vec`.
+- Embeddings are L2-normalized on write, so vector distance ordering equals cosine ordering.
 
-> **Quirk:** the per-report evidence indexes are **nested inside** the shared `indexes/sources/` directory, so a `<report_id>/` folder sits next to `index.faiss`. It works because each index is loaded by its own directory path, but it looks odd on disk.
+## Hybrid search (`search.py`)
 
-> **Design note — last run wins:** every `/api/run_pipeline` call runs `reset_environment()`, which deletes all rows from `documents`, `chunks`, `claims`, `claim_evidence`, `credibility_scores`, `validity_scores`, and `chat_logs`, and removes the FAISS index and cache directories. Only `uploads`, `jobs` (with their frozen `result_json`), the files on disk — and, because `charts` is missing from the wipe list, stale `charts` rows — survive. The app is a single-report system: live queries (claims, source details, chat) always describe the most recent run.
+Vector search is good at paraphrase and bad at exact numbers; keyword search is the reverse. Both channels fetch up to `max(k, 20)` candidates, then Reciprocal Rank Fusion (`score = Σ 1/(60 + rank)`, rank 1-based) merges them so a chunk found by both outranks single-channel hits.
 
-## Async job lifecycle
+- **Vector channel**: sqlite-vec KNN, scoped by the `run_id` (and optionally `doc_kind`) PARTITION KEYs — index-native filtering, no over-fetch, no post-filter.
+- **Keyword channel**: FTS5/BM25; each query token is quoted (user text can't break FTS5 syntax) and tokens are **OR**-joined — claim-length queries under implicit AND would return nothing.
 
-`POST /api/run_pipeline` inserts a `jobs` row with status `QUEUED`, then validates the report/source upload IDs (a validation failure returns 400 but leaves that row stuck in `QUEUED`), spawns a **daemon thread**, and returns `{job_id, status}` immediately. The thread moves the job to `RUNNING`, then pushes named progress steps into `progress_json` via `Repository.push_job_progress` — each entry is `{step, label, status, ts}` with `status` in `running` / `done` / `failed`:
+Every query is scoped to one run via SQL. Verification passes `doc_kind="SOURCE"` so a report can never be its own evidence.
 
-| Step | Meaning |
+## Ingestion (`ingest.py`, `chunking.py`)
+
+`parse_pdf` is the only function that touches Docling (digital PDFs only — `do_ocr=False` is a deliberate flag, not a gap; `images_scale=2.0`, picture images generated). It yields sections, tables (exported to Markdown + caption), and figures (PIL images + caption). Downstream:
+
+- **Text** chunks: paragraphs packed greedily to 1200 chars with 200-char overlap; a chunk never splices non-adjacent passages (**document-order invariant** — chunk text is quoted as evidence downstream).
+- **Table** chunks: caption + Markdown, capped at 4000 chars.
+- **Figure** chunks: caption plus an LLM-written description (`claude-haiku-4-5`), baked into the chunk text *before* embedding — chunk text is immutable, so this is the only moment it can happen. The PNG is saved under `figures_dir/<run_id>/<doc_id>/`.
+
+All failure-prone external work (parsing, figure descriptions, the embedding call) happens **before** any database or filesystem write, so a failed ingest leaves no half-ingested document. An empty parse raises instead of indexing an empty document.
+
+## LLM layer (`llm.py`, `config.py`)
+
+All Anthropic traffic goes through one client. It refuses to construct without `ANTHROPIC_API_KEY`, raises when a call yields no usable output, and logs token usage (including cache read/write) per call.
+
+| Path | Details |
 | --- | --- |
-| `indexing` | Ingest + embed each source, score its credibility |
-| `verifying` | Extract claims from the report and retrieve/classify evidence |
-| `validity` | Heuristic validity scoring |
-| `credibility` | Usage-weighted credibility aggregation |
-| `recommendations` | OpenAlex recommendation search |
+| `parse()` | `messages.parse()` structured outputs; `max_tokens=16000` (Opus thinking shares the budget; 16k is the ceiling under the SDK's non-streaming timeout); optional image blocks |
+| `parse_batch()` | Batch API at `max_tokens=32000`; **all-or-nothing** — a failed item gets one logged sync retry, and anything still failing raises with nothing stored (partial results would silently change score denominators). The batch id is logged at creation so an interrupt never orphans a paid batch |
+| `describe_image()` | Figure captions (vision) |
+| `chat()` | System sent as a list of blocks so the static per-run context carries `cache_control` (prompt caching); thinking disabled |
 
-On success the job gets `status=DONE` and a `result_json` containing `claims`, `report_id`, `validity`, `credibility`, and `recommended_sources`. On failure the last `running` step is flipped to `failed` and the job gets `status=FAILED` plus `error_message`. Clients poll `GET /api/jobs/<job_id>`; the frontend's `UploadPage` polls every 2 seconds and renders `progress_json` as a checklist.
+`prompt_fingerprint()` produces the canonical hash of a **prompt contract**: the system prompt, a prompt *rendered* from frozen synthetic inputs (so builder formatting changes move the hash), and the output model's field descriptions (which are prompt text under structured outputs). Claims are stamped with `EXTRACTION_PROMPT_HASH` and verdicts with `VERDICT_PROMPT_HASH:k=N`; the eval commands and `score_run` refuse rows whose stamp differs from the current prompt (stale-guard; `--allow-stale` overrides).
 
-> **Gotcha:** jobs run inside the Flask process itself — there is no queue or worker. If the server restarts mid-run, the job stays `RUNNING` forever and is simply lost.
+Model assignment (all configurable):
+
+| Task | Model |
+| --- | --- |
+| Claim extraction | `claude-opus-5` |
+| Verdicts | `claude-opus-5` |
+| Validity rubric | `claude-opus-5` |
+| Figure captions | `claude-haiku-4-5` |
+| Source metadata | `claude-haiku-4-5` |
+| Chat | `claude-sonnet-5` |
+| Embeddings | OpenAI `text-embedding-3-large` (dim 3072) |
+
+## Claim extraction (`claims.py`)
+
+One structured call over the report's prose sections **and its table chunks** (tables are chunks, not section text — without passing them explicitly, the report's most checkable figures would be invisible). Each `ExtractedClaim` carries verbatim `text`, `subject`, `value`, `unit`, `year`, `page`, and **`stance`**:
+
+- When a report presents a claim as reported speech ("some analyses claim X"), the checkable claim is **X itself** — extraction stores the embedded assertion, dropping the reporting frame and any editorial verdict.
+- `stance` is `disavowed` only when the report attaches an **explicit falsity marker** ("an event that never occurred", "a fabricated figure"). Neutral relaying stays `asserted`.
+
+Re-extraction replaces a document's claims atomically; the `verdicts.claim_id` FK cascades, so stale verdicts go with them.
+
+## Verification (`verification.py`)
+
+Per claim, the LLM makes exactly one judgment; everything else is code:
+
+1. **Retrieval** — SOURCE-only hybrid search (`doc_kind="SOURCE"` partition), 8 evidence chunks per claim (`-k` overrides), one batched embedding call for all queries. A claim with no retrieved evidence gets an UNVERIFIABLE bookkeeping row (logged, not judged).
+2. **Judging** — structured `Verdict` (verdict, verbatim quote, 1-based evidence index, rationale) on `claude-opus-5`, normally via the Batch API. When evidence includes figure chunks, up to 2 figure PNGs are attached so the judge sees the chart; a missing PNG **raises** rather than silently judging text-only.
+3. **Code-side quote check** — the quote must appear (case-folded, PDF typography normalized) in the cited excerpt, or failing that in *any* excerpt shown (right quote, wrong index is an indexing slip, not fabrication). Quotes under 10 normalized chars are rejected as too weak to ground anything.
+4. **Downgrade rule** — a SUPPORTED or CONTRADICTED verdict whose quote fails the check is downgraded to **UNVERIFIABLE**; the model's original answer is preserved in `raw_verdict` so the downgrade rate stays measurable.
+5. **Year flag** (informational only) — `year_flag=1` when the claim's year is absent from the quoted chunk.
+
+Verdicts are stored with `replace=True` semantics and stamped with the judge's prompt hash + evidence k.
+
+## Scoring (`scoring.py`, `credibility.py`)
+
+`score_run` computes everything **before** persisting anything (a mid-way failure leaves the prior score set intact), refuses stale verdicts by default, then writes `source_credibility` and `run_scores` adjacent at the end.
+
+- **Accuracy** — pure arithmetic; stance-aware report-position agreement. See [metrics.md](metrics.md).
+- **Credibility** — per source: Haiku extracts bibliographic metadata from the opening chunks; Crossref verification assigns a tier (`VERIFIED_DOI` / `VERIFIED_TITLE` / `METADATA_ONLY` / `NONE`); code sums component points (completeness, word-boundary publisher authority, recency, verification — **no floors**). Aggregated as a usage-weighted mean, where usage counts quote-verified verdicts citing each source (SUPPORTED **and** CONTRADICTED — a contradicting source is doing its job). Crossref 404 is an answer; 429/5xx retries then **raises** (a throttled Crossref must not silently downgrade tiers).
+- **Validity** — one structured rubric call (coverage, consistency, methodology, context, each 0–100 with justification + illustrative quote that code checks against the report text) plus a code-side recency component from real source publication years. Weights come from config, parsed loudly; a component with no score is excluded and weights renormalize.
+
+## Jobs (`jobs.py`)
+
+- **One** persistent worker thread claims queued jobs via a compare-and-set `UPDATE … RETURNING`. The worker survives anything a job lets escape (a dead worker would leave every job QUEUED while `/health` reports ok).
+- The job `payload` carries its work order (upload ids), so recovery never guesses what a run should contain.
+- **Startup recovery**: `RUNNING` jobs found at startup are re-queued and resumed from the first incomplete step. Steps make that safe: extract/verify/score are replace-semantics idempotent, and ingest reconciles per upload — chunks present ⇒ done; a document with zero chunks is a torn ingest and is deleted (rows + figure PNGs) and re-ingested; nothing ⇒ ingest fresh.
+- **Atomic terminal state**: `finish_job_and_run` writes job and run terminal status in one transaction — two separate writes would leave a crash window where job=DONE, run=RUNNING forever, invisible to recovery. The DONE write sits *outside* the failure handler, so a bookkeeping failure can never rewrite a successful run as FAILED.
+- **Single process** is a hard constraint: startup recovery re-queues every RUNNING job unconditionally, which is only correct when no other process can be mid-job. Never run `uvicorn --workers N>1` against one database.
+
+## HTTP API (`api.py`, `main.py`)
+
+Startup is **fail-closed**: no `AUTHORAI_API_KEY` ⇒ the app refuses to start (v1 silently served everything openly).
+
+Auth and the request-size cap live in a **pure-ASGI middleware** that runs before the body is parsed — a FastAPI route dependency resolves only *after* the whole multipart body is read, so per-route auth cannot stop an unauthenticated upload DoS. The middleware guards the whole `/api` prefix (a new endpoint cannot forget it), compares keys on raw bytes in constant time, and rejects oversized `Content-Length` with 413 before reading anything. CORS is outermost so its headers land on the guard's 401s; credentials mode is off.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Liveness (unauthenticated) |
+| `POST /api/runs` → 202 | Upload report + sources; every file validated (extension, size, `%PDF-` magic) before any write; run + uploads + job committed in one transaction; files cleaned up on failure |
+| `GET /api/runs` | Run history |
+| `GET /api/runs/{id}` | Run + latest job (progress feed) |
+| `GET /api/jobs/{id}` | Job by id |
+| `GET /api/runs/{id}/report` | Full report payload (claims + verdicts + evidence sources, scores, per-source credibility) read in one snapshot transaction |
+| `GET /api/runs/{id}/documents/{doc_id}/file` | Stream a run's stored PDF; scoped by `(run_id, doc_id)`, path resolve-checked inside `uploads_dir` |
+| `POST /api/runs/{id}/chat` | Grounded Q&A over a DONE run; the static per-run context is a `cache_control` system block, so repeat turns hit the prompt cache |
 
 ## Frontend (`frontend/`)
 
-React 18 + TypeScript + Vite (dev server on port 5173), routing via `react-router-dom`. Routes are declared in `src/App.tsx`:
+React 18 + TypeScript + Vite 5, `react-router-dom` 6, **TanStack Query v5** as the data layer (`src/api/{types,v2,queries}.ts`). All requests carry `X-API-Key` from `VITE_API_KEY`; base URL from `VITE_API_BASE_URL` (default `http://localhost:8000`).
 
 | Route | Component | Purpose |
 | --- | --- | --- |
-| `/` | `UploadPage` | Upload sources + report, start the pipeline, watch progress |
-| `/dashboard` | `ReportDashboard` | Scores, claims, sources, recommendations, chat |
-| `/dashboard/sources/:sourceId` | `SourceDetail` | Per-source credibility breakdown, claims, PDF viewer |
-| `/dashboard/report` | `ReportDetail` | Full report PDF alongside summary and scores |
-| `/dashboard/recommendations/:sourceIndex` | `RecommendedSourceDetail` | Detail view of one OpenAlex recommendation |
+| `/` | `UploadPage` | Single-request upload (report + sources) → navigate to the run |
+| `/runs` | `HistoryPage` | Run history |
+| `/runs/:runId` | `ReportDashboard` | Live job progress feed → full report on DONE; `RatingPanel` (accuracy / coverage / credibility / validity rings — **no composite overall**); chat |
+| `/runs/:runId/report` | `ReportDetail` | Report PDF viewer |
+| `/runs/:runId/sources/:sourceId` | `SourceDetail` | Per-source credibility breakdown + PDF |
+| `/runs/:runId/workspace` | `ClaimsWorkspace` | Claim ↔ report-page ↔ source-page navigation, `#page` deep links, side-by-side PDF panes |
+| `/compare` | `ComparePage` | Two runs' scores + stats with per-metric deltas |
 
-**`ReportDataContext`** (`src/context/ReportDataContext.tsx`) is the app's shared state: the uploaded source list and report document (hydrated from `GET /api/uploads` on mount), the cached `ReportSummaryResponse`, per-job chat history, and job status. `refreshJobStatus` re-fetches a job and stores `active_job_id` in `localStorage` once it is `DONE`, so the dashboard can find the latest report after a page reload.
+Mechanics worth knowing:
 
-| Component | Role |
-| --- | --- |
-| `UploadPage` | Drag/drop uploads, `POST /api/run_pipeline`, 2-second job polling with step checklist |
-| `ReportDashboard` | Composes the dashboard from `GET /api/reports/…/summary` and paginated claims |
-| `SummaryPanel` | Report summary text, claim stats, top sources |
-| `RatingPanel` | SVG score rings for overall / accuracy / credibility / validity |
-| `ClaimsPanel` | Paginated claim list with verdict colouring and evidence snippets |
-| `ClaimsWorkspace` | Expanded claim explorer with verdict filters next to the report PDF |
-| `InternalSourcesPanel` | Uploaded source list with add/remove |
-| `AnalyticsPanel` | Recommended-sources overview linking to detail pages |
-| `RecommendedSourcesPanel` | Simple pill list of recommended source names |
-| `ChatPanel` | Chat UI with mode selector, markdown rendering (react-markdown + remark-gfm) |
-| `SourceDetail` / `ReportDetail` / `RecommendedSourceDetail` | The three detail pages listed in the routes table |
+- Run/report queries poll every 1.5 s and **stop on terminal status** (`DONE`/`FAILED`) or query error — a finished run is never refetched forever.
+- PDFs are fetched as **authenticated blobs** (`usePdfBlob`): an iframe can't send the API key header, so the client fetches the file itself, hands the iframe an object URL, and revokes the previous URL on change. The key never appears in any URL.
+- Tests: Vitest 3.x + React Testing Library (`npm run test`, also in CI).
 
-**Talking to the API** — `src/api/client.ts` exports `apiFetch`, which prefixes `VITE_API_BASE_URL` (default `http://localhost:5001`), sets `Content-Type: application/json` for non-FormData bodies, and attaches `X-API-Key` from `VITE_API_KEY` when present. All typed helper functions (`getReportSummary`, `runPipelineWithUploads`, `sendChat`, …) go through it. PDF viewing is a special case: because an `<iframe>` cannot send headers, `ReportDetail`, `SourceDetail`, and `ClaimsWorkspace` fetch `/api/uploads/<id>/file` themselves with the API key, turn the response into a **blob object URL**, and point the iframe at that.
+## Evals (`evals.py`, `backend/evals/`)
 
-## Related docs
-
-- [README.md](../README.md) — quick start
-- [api.md](api.md) — full endpoint reference
-- [metrics.md](metrics.md) — accuracy / credibility / validity formulas
-- [chat.md](chat.md) — chat modes and retrieval
-- [development.md](development.md) — running and testing locally
-- [configuration.md](configuration.md) — every env var
-- [history.md](history.md) — how the project evolved and what the other branches contain
+Two audited label sets (dev golden, 37 records; holdout, 27) with recorded baselines as JSON. Scorers compare stored claims/verdicts against the labels with one-to-one pairing. Full details, discipline, and the recorded numbers: [metrics.md](metrics.md); how to run them: [development.md](development.md).

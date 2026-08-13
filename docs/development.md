@@ -1,150 +1,119 @@
 # Development Guide
 
-This guide walks through setting up the Author AI fact-checking app locally: a Flask backend (`backend/`) and a React + Vite frontend (`frontend/`).
+Working on the v2 codebase: FastAPI backend in `backend/authorai/`, tests in `backend/tests/`, eval sets in `backend/evals/`, React + Vite frontend in `frontend/`.
 
-## Prerequisites
+## Environment
 
-Required:
-
-| Tool | Version | Used for |
-|------|---------|----------|
-| Python | 3.9+ | Backend (Flask, pipelines). The code uses `list[...]` generics, which require 3.9. |
-| Node.js + npm | 18+ | Frontend (Vite 5 requires Node 18+) |
-
-Optional external tools — each **degrades gracefully** when absent (the related feature is skipped with a warning in the log; ingestion continues):
-
-| Tool | Feature | Behavior when missing |
-|------|---------|----------------------|
-| `ocrmypdf` binary (needs Tesseract + Ghostscript installed) | OCR of scanned/low-text PDFs | OCR step fails inside a try/except; the original PDF text is used as-is |
-| Java + Tabula jar (`tabula.jar`) | Table extraction from PDFs | Logs `Tabula jar not found ... skipping table extraction`; documents ingest with zero tables |
-| `tesseract` (via `pytesseract` + OpenCV) | Chart OCR during chart ingestion | Chart extraction falls back to a skeleton / is skipped |
-
-You also need two paid API accounts: **Anthropic** (chat, reranking, verdicts, explanations) and **OpenAI** (embeddings only). See [configuration.md](configuration.md) for every knob.
-
-## Backend setup
+The backend runs in the **`author_ai` conda env** — not uv, not a venv:
 
 ```bash
+conda activate author_ai
 cd backend
-python -m venv .venv
-source .venv/bin/activate        # or use a Conda env if you prefer
-pip install -r requirements.txt
-cp .env.example .env             # then edit .env and fill in your keys
+pip install -e ".[dev]"        # after any dependency change (deps are pinned in pyproject.toml)
 ```
 
-At minimum, set these in `backend/.env` (names only — never commit values):
+Python ≥ 3.11 (CI uses 3.11). Notable pins in `pyproject.toml`: `torch`/`torchvision` are declared explicitly because Docling's default layout engine needs them at runtime but does not declare them; `python-multipart` is required by FastAPI for the upload endpoint.
+
+Required environment variables (put them in `backend/.env` — settings are anchored to that file regardless of CWD; prefix is `AUTHORAI_` except the provider keys, which are read unprefixed):
 
 | Variable | Purpose |
-|----------|---------|
-| `ANTHROPIC_API_KEY` | Claude models (`claude-sonnet-4-6` for chat/explanations/verdicts, `claude-haiku-4-5` for rerank/claim classification) |
-| `OPENAI_API_KEY` | `text-embedding-3-large` embeddings |
-| `API_KEY` | Shared secret for the `X-API-Key` header on all `/api/*` routes |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | All Claude calls — the client refuses to construct without it |
+| `OPENAI_API_KEY` | Embeddings — same refusal |
+| `AUTHORAI_API_KEY` | The HTTP API's shared secret; **the server refuses to start without it** (fail-closed) |
+| `AUTHORAI_CROSSREF_MAILTO` | Optional but polite — anonymous Crossref is slower |
 
-> **Warning:** if `API_KEY` is left unset, the `require_api_key` decorator in `app.py` becomes a no-op and authentication is **disabled entirely**. Fine for local dev, dangerous anywhere else.
+Everything else (models, paths, weights, limits) has defaults in `backend/authorai/config.py`.
 
-### Running the backend
-
-Run from inside `backend/` — relative storage paths (`./data`, `./logs`) resolve against the working directory:
-
-```bash
-cd backend
-flask run --port 5001
-# or equivalently:
-python app.py                    # app.run(debug=True, port=5001)
-```
-
-Both paths load `backend/.env` automatically: `flask run` picks it up via python-dotenv, and `app.py` calls `load_dotenv` on its own `.env` at import time. No manual `export` needed (the old manual's `export FLASK_APP=...` steps are obsolete — `FLASK_APP=app.py` is already in `.env.example`).
-
-Verify it is up:
+## Everyday commands
 
 ```bash
-curl http://localhost:5001/health                                  # no auth required
-curl -H "X-API-Key: dev-api-key" http://localhost:5001/api/claims  # auth check
+# tests (offline: FakeEmbedder, dim=8; integration tests excluded)
+python -m pytest -q -m "not integration"
+
+# integration tests (Docling layout models + example PDFs — local only, big first download)
+python -m pytest -q -m integration
+
+# lint + format
+ruff check . && ruff format .
+
+# dev server — port 8000; GET /health (unauthenticated), GET /docs
+uvicorn authorai.main:app
 ```
 
-> **Note:** the old manual suggested `GET /api/dashboard` as a smoke test, but that endpoint returns `404 {"error": "No completed reports"}` on a fresh database. Use `/health` or `/api/claims` instead.
+CI (`.github/workflows/ci.yml`, push/PR on `main` and `v2`) runs exactly: `ruff check .` and `pytest -q -m "not integration"` on Python 3.11, then `npm ci` / `npm run build` / `npm run test` on Node 20. Integration tests never run in CI — they need Docling's GB-class layout models.
 
-Storage is created automatically on first run: SQLite at `backend/data/accuracy.db` plus FAISS index directories under `backend/data/indexes/`. See [architecture.md](architecture.md).
-
-## Frontend setup
+## Frontend
 
 ```bash
 cd frontend
-npm install
-cp .env.example .env
-npm run dev
+npm ci
+npm run dev        # http://localhost:5173
+npm run build      # tsc + vite build (this is also the type-check)
+npm run test       # vitest run (Vitest + React Testing Library)
 ```
 
-The dev server runs at `http://localhost:5173` (pinned in `vite.config.ts`). Frontend environment variables:
+Set `VITE_API_BASE_URL` (default `http://localhost:8000`) and `VITE_API_KEY` (must match `AUTHORAI_API_KEY`, or every call 401s). Vite env vars are baked in at dev-server start — restart after editing.
 
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `VITE_API_BASE_URL` | `http://localhost:5001` | Where the Flask backend lives |
-| `VITE_API_KEY` | `dev-api-key` | **Must match** the backend `API_KEY`, or every API call returns 401 |
+> **Pin note:** Vitest is pinned to **3.x**. Vitest 4 requires Vite ^6+, and this project pins Vite ^5; npm installs the mismatch without failing (peer conflicts are warnings since npm 7), and it only breaks later at `vitest run` with a confusing Vite-internal error. When adding tooling that plugs into Vite, check `peerDependencies` against the installed Vite version before wiring it up.
 
-Other scripts: `npm run build` (runs `tsc` then `vite build` — also your type-check, since there is no separate lint/test setup) and `npm run preview`.
+## The CLI
 
-## Trying it out
-
-Sample PDFs live in `example_sources/` at the repo root:
-
-| File | Role |
-|------|------|
-| `2024 Global Wolrd Hunger Index.pdf` | Source |
-| `2025_world_hunger.pdf` | Source |
-| `HH_Nov24-May25_FINAL.pdf` | Source |
-| `disruptions_in_the_food_supply_chain.pdf` | Source |
-| `World_Hunger_Fake.pdf` (also `.docx`) | **Report** — deliberately contains claims to fact-check |
-
-In the UI: upload the source PDFs as sources, upload `World_Hunger_Fake.pdf` as the report, then run the pipeline. The run executes in a background thread; the UI polls `GET /api/jobs/<job_id>` for progress. Full endpoint reference: [api.md](api.md).
-
-> **Gotcha:** the app is single-report, last-run-wins. Each pipeline run calls `reset_environment()` and **wipes all prior pipeline data** (claims, indexes, chat history) before starting. Don't expect to compare two runs side by side. See [history.md](history.md) for why.
-
-> **Cost note:** a real pipeline run makes paid Anthropic and OpenAI API calls proportional to document size.
-
-## Running tests
+All pipeline stages are runnable by hand (from `backend/`, inside the conda env):
 
 ```bash
-cd backend
-python -m pytest
+python -m authorai.cli ingest ../example_sources/*.pdf            # new run, kind=SOURCE
+python -m authorai.cli ingest report.pdf --run <run_id> --kind REPORT
+python -m authorai.cli extract <run_id>                           # claims from the run's REPORT
+python -m authorai.cli eval-extract <run_id> [--golden PATH] [--allow-stale]
+python -m authorai.cli verify <run_id> [--sync] [-k N]            # Batch API by default
+python -m authorai.cli eval-verdict <run_id> [--golden PATH] [--allow-stale]
+python -m authorai.cli score <run_id> [--allow-stale]
+python -m authorai.cli search <run_id> some query terms [-k N]
 ```
 
-Test files in `backend/tests/`:
+Notes:
 
-| File | Covers |
-|------|--------|
-| `test_api.py` | `/health`, and that `/api/*` requires `X-API-Key` |
-| `test_accuracy_pipeline.py` | Claim extraction heuristics (heading filtering, numeric claims) and end-to-end retrieval with a faked ingestion step |
-| `test_chart_pipeline.py` | Chart-to-chunk conversion, chart persistence, chart-aware verdict prompts (all with mocked LLM clients) |
-| `test_chunking.py` | The `chunk_text` splitter (this file replaced the old `test_semantic_chunking.py`) |
+- `ingest` describes figures with an LLM by default (`--no-describe-figures` to skip); one bad PDF reports and continues, and the run id is printed first so it is never lost.
+- `verify --sync` makes per-claim sync calls (full price, immediate) — the debug path; batch is half price at minutes-scale latency.
+- **`--allow-stale`**: claims and verdicts are stamped with a hash of the prompt that produced them. `eval-extract`, `eval-verdict`, and `score` refuse rows whose stamp differs from the current prompt — a score over stale rows says nothing about the code you are tuning (this exact mistake produced a wrong conclusion once). `--allow-stale` downgrades the refusal to a loud warning.
 
-`conftest.py` provides a `settings` fixture that redirects `DATA_ROOT`, `SQLITE_PATH`, `FAISS_INDEX_DIR`, `CACHE_DIR`, and the vector paths into pytest temp directories and sets `API_KEY=test-key`, so tests never touch your real `backend/data/`.
+## Eval discipline
 
-> **Warning:** `conftest.py` also loads `backend/.env` before tests run. The suite mocks LLM calls in most places, but if real `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` values are present, code paths that construct live clients can hit paid APIs. For a guaranteed-offline run, unset those variables or point the tests at a bare `.env`:
+Two label sets under `backend/evals/`:
 
-```bash
-cd backend
-env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY python -m pytest
-```
+- **Dev golden** (`evals/golden.jsonl`, 37 audited records) — tune against it freely. `eval-extract`/`eval-verdict` print a delta against `baseline.json` / `verdict_baseline.json` automatically when scoring this set.
+- **Holdout** (`evals/holdout/holdout.jsonl`, 27 audited records, separate fake report) — **scored only at phase boundaries, never tuned against.** No baseline delta is printed for it by design: comparing a holdout score to the dev baseline would mislead.
 
-There is no frontend test suite; `npm run build` is the closest thing to a frontend CI check.
+Run the eval after *any* change to prompts, retrieval, chunking, or verdict logic — never tune blind. Both baselines record a measured noise floor; treat deltas inside it as noise, and re-run before attributing a change to your edit. Current recorded numbers: [metrics.md](metrics.md).
 
-## Troubleshooting
+### Eval in CI (`.github/workflows/eval.yml`)
 
-**Constant "Tabula jar not found" warnings / no tables extracted.** `TABULA_JAR_PATH` in `backend/.env` must be on a **single line**. A value wrapped across lines (easy to do when pasting) makes the path check in `table_extraction.py` fail on every ingest, silently disabling table extraction. Confirm the jar exists at the configured path, and that `java` is on your `PATH`.
+Manual `workflow_dispatch` only — each run costs real API money (~$0.5) and fork PRs have no secrets, so a human presses the button and reads the deltas in the job summary; there is no hard fail-gate. Requirements:
 
-**OCR never runs / OCR errors.** The `ocrmypdf` binary path comes from `OCR_MY_PDF_PATH` (default `/usr/local/bin/ocrmypdf`). Check `which ocrmypdf` and update the variable — Homebrew on Apple Silicon installs to `/opt/homebrew/bin/ocrmypdf`. `ocrmypdf` itself needs Tesseract and Ghostscript installed. OCR only triggers for PDFs with little or non-ASCII text (`should_run_ocr` in `services/ocr.py`), so most digital PDFs skip it by design. Set `PDF_OCR_ENABLED=false` to turn it off entirely.
+- Repo secrets `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (optional `AUTHORAI_CROSSREF_MAILTO`).
+- **Dispatchable from the default branch only** — GitHub lists dispatchable workflows from the default branch, so the file cannot be dispatched from `v2` until it lands on `main`.
 
-**Port conflicts.** The backend defaults to 5001 (avoid 5000 — macOS AirPlay Receiver squats on it). If 5001 is taken, run `flask run --port <other>` and update `VITE_API_BASE_URL` in `frontend/.env` to match. The frontend port 5173 is pinned in `vite.config.ts`; change it there if needed.
+The workflow ingests the pinned source pair + dev report, then runs extract → eval-extract → verify → eval-verdict → score. The `score` step is `continue-on-error` (live Crossref + the validity rubric make it the flakiest) and its output is compared to `evals/score_reference.json` by hand.
 
-**401 Unauthorized from the frontend.** `VITE_API_KEY` (frontend) and `API_KEY` (backend) do not match. Vite env vars are baked in at dev-server start, so restart `npm run dev` after editing `frontend/.env`.
+## Database and migrations
 
-**Where are the logs?** `backend/logs/backend.log` (path from `LOG_DIR`, default `./logs` relative to the working directory — another reason to run from `backend/`). Logs also stream to the console. Both `backend/logs/` and `backend/data/` are gitignored.
+One SQLite file (`backend/data/authorai.db` by default) holds relational tables + FTS5 + sqlite-vec. Two rules to know:
+
+**A worker on an old checkout dies loudly against a newer database.** `db.py` refuses to open any database whose `PRAGMA user_version` is higher than the build's `SCHEMA_VERSION` (currently 9). This is deliberate: an old build writing through a newer schema corrupts silently (e.g. the pre-partition `add_chunks` would store `doc_kind=NULL` rows that every SOURCE-filtered search then misses). When you see this error, **upgrade the checkout — do not work around the guard.**
+
+**Migration discipline.** Adding a migration means, in the same commit:
+
+1. Bump `SCHEMA_VERSION` in `db.py` and add an `if version < N:` block whose DDL and `PRAGMA user_version = N` bump run inside one `BEGIN…COMMIT` script (interruptions must never leave a half-migrated database).
+2. Update every migration-rewind test in `tests/test_db.py`. Those tests build a database at the **latest** schema, then fake an old one by setting `user_version` back — so anything your new migration created is still physically present, and the re-run migration collides ("table already exists"). Grep `tests/test_db.py` for `user_version =` and add your new tables/columns to the DROP list of **every rewind below N** (today the rewinds drop `run_scores`, `source_credibility`, `jobs`, `claims.stance`, `claims.extraction_prompt_hash`, `verdicts.prompt_hash`). This has broken the suite twice when done reactively.
+
+Also: the server is **single-process by design** — startup recovery re-queues every RUNNING job unconditionally, which is only correct when no other process can be mid-job. Never run `uvicorn --workers N>1` against one database.
+
+## Trying it end to end
+
+Sample PDFs live in `example_sources/`. Upload `World_Hunger_Fake.pdf` as the report and the real PDFs (`2025_world_hunger.pdf`, `disruptions_in_the_food_supply_chain.pdf`, …) as sources — via the UI at `:5173`, or `POST /api/runs` directly. The pipeline runs as one background job; the dashboard polls the progress feed and flips to the full report on DONE. A real run makes paid Anthropic + OpenAI calls proportional to document size.
 
 ## Related docs
 
-- [architecture.md](architecture.md) — pipelines, storage layout, reset-on-run design
-- [api.md](api.md) — full HTTP endpoint reference
-- [configuration.md](configuration.md) — every environment variable and default
-- [metrics.md](metrics.md) — accuracy / credibility / validity scoring
-- [chat.md](chat.md) — the chat service
-- [history.md](history.md) — how the design evolved
+- [architecture.md](architecture.md) — system map, storage schema, pipeline
+- [metrics.md](metrics.md) — what the scores mean + recorded eval baselines

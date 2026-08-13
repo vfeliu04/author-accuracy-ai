@@ -61,7 +61,7 @@ const HistoryPage = () => {
         </div>
       </header>
       <main className="dashboard__content">
-        <section className="dashboard__column" style={{ width: "100%" }}>
+        <section className="dashboard__column" style={{ width: "100%", gridColumn: "1 / -1" }}>
           {isLoading ? <p className="dashboard__status">Loading runs…</p> : null}
           {error ? (
             <p className="dashboard__status dashboard__status--error">

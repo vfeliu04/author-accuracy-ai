@@ -3,82 +3,120 @@
 [![CI](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Author AI fact-checks a report against a set of trusted source documents. Upload source PDFs and a report PDF, and it extracts the factual claims from the report, verifies each claim against the sources with retrieval + LLM judgment, and scores the report on three metrics — then lets you interrogate the results through a grounded chat assistant.
+Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its source PDFs; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained, browsable in a run history, and comparable side by side with any other run.
 
-![Report dashboard showing verdict stats, grounded chat, score rings, and recommended sources](docs/screenshots/dashboard.png)
-
-## What it does
-
-- **Accuracy** — every factual claim in the report is extracted, matched against the source documents (FAISS vector retrieval + Claude reranking), and labeled `SUPPORTED`, `CONTRADICTED`, or `NOT_FOUND` with a confidence band. Accuracy = supported claims ÷ total claims.
-- **Credibility** — each source is scored 0–100 from its metadata (completeness, publisher authority, recency, enrichment confidence via Crossref), then aggregated into a report-level score weighted by how often each source actually supported claims.
-- **Validity** — structural heuristics on the report itself: topic coverage, internal numeric consistency, methodology signals, geographic context, and source recency.
-- **Recommended sources** — scholarly works fetched from the [OpenAlex](https://openalex.org) API, filtered by embedding similarity to the report's content.
-- **Grounded chat** — an assistant (evidence / guidance / creative modes) that answers questions strictly from the stored claims, evidence snippets, and metrics. See [docs/chat.md](docs/chat.md).
-- **Claims workspace** — a full-screen review UI showing each claim beside the report PDF and the cited source PDF, opened at the exact pages.
+![Run dashboard: verdict stats, score rings, grounded chat](docs/screenshots/dashboard.png)
 
 ## How it works
 
 ```
- source PDFs ─┐
-              ├─► ingestion (OCR · tables · charts) ─► chunking ─► OpenAI embeddings ─► FAISS + SQLite
- report PDF ──┘
-                    │
-                    ▼
-        claim extraction (heuristics + Claude)
-                    │
-                    ▼
-   per-claim retrieval ─► Claude rerank ─► Claude verdict ─► accuracy score
-                    │
-                    ▼
-     credibility · validity · OpenAlex recommendations
-                    │
-                    ▼
-        job result ─► React dashboard + grounded chat
+ report PDF ──┐
+ source PDFs ─┴─► INGEST   Docling parse (text · tables · figure images) ─► chunks
+                           ─► OpenAI embeddings ─► SQLite (sqlite-vec + FTS5, run-scoped)
+                     │
+                     ▼
+                  EXTRACT  claims from the report (structured outputs: text, value,
+                           unit, year, page — and stance: asserted or disavowed)
+                     │
+                     ▼
+                  VERIFY   per-claim hybrid retrieval over the SOURCES
+                           ─► structured verdict (SUPPORTED / CONTRADICTED / UNVERIFIABLE)
+                              with quoted evidence — the quote is mechanically checked
+                              by code; a failed check downgrades the verdict
+                     │
+                     ▼
+                  SCORE    accuracy (stance-aware) · credibility (per-source,
+                           Crossref-verified metadata) · validity (code-weighted rubric)
 ```
 
-The pipeline runs as a background job with step-by-step progress the UI polls. Full detail in [docs/architecture.md](docs/architecture.md) and [docs/metrics.md](docs/metrics.md).
+The whole pipeline runs as a background job (a single worker thread with startup recovery — an interrupted run is re-queued, never stranded). The frontend polls per-step progress and renders the full report when the run is done. Unverifiable claims never count against the report: accuracy is computed over decided claims only, with a separate coverage number.
 
-**Stack:** Flask + SQLite + FAISS on the backend; Anthropic Claude for reranking, verdicts, summaries, and chat; OpenAI for text embeddings; React 18 + Vite + TypeScript on the frontend.
+### Stance-aware accuracy
+
+Accuracy measures agreement with the report's **stated positions**, not raw source support. Each extracted claim carries a stance: `asserted` (the report presents it as true) or `disavowed` (the report itself marks it false — "some analyses claim X, which never happened"). An asserted claim is correct when the sources support it; a disavowed claim is correct when the sources *contradict* it. A report that debunks a falsehood is not penalized for mentioning it — and gets no credit if the "falsehood" turns out to be true.
+
+## Stack
+
+- **Backend** — FastAPI + Pydantic v2, Python 3.11+
+- **Storage** — SQLite with sqlite-vec (vectors) + FTS5 (keywords), fused by reciprocal-rank hybrid search; every table is keyed by `run_id`, so runs are isolated and nothing is ever reset
+- **PDF parsing** — Docling (sections, tables, and figure images are all first-class)
+- **LLM** — Anthropic SDK: structured outputs (`messages.parse()`) with code-verified evidence quotes, the Batch API for bulk verification, vision for chart evidence, prompt caching for chat. `claude-opus-5` for extraction, verdicts, and the validity rubric; `claude-haiku-4-5` for figure captions and source metadata; `claude-sonnet-5` for chat
+- **Embeddings** — OpenAI `text-embedding-3-large`
+- **Frontend** — React 18 + Vite + TanStack Query
 
 ## Repository layout
 
 ```
 backend/
-  app.py                 Flask API (all HTTP endpoints, background jobs)
-  author_ai/
-    pipelines/           ingestion, accuracy, credibility, validity, chat
-    services/            vector store, embeddings, reranker, verdict classifier,
-                         OCR, tables, charts, summaries, OpenAlex recommendations
-    storage/             SQLite repository
-  tests/                 pytest suite
-  .env.example           backend configuration template
+  authorai/            FastAPI app + pipeline: ingest, claims, verification,
+                       scoring, credibility, jobs, chat, search, CLI
+  tests/               pytest suite (runs offline; live tests marked "integration")
+  evals/               golden claim/verdict sets + recorded baselines
+    holdout/           held-out eval set (scored only at phase boundaries)
+  pyproject.toml       pinned dependencies
 frontend/
-  src/                   React SPA (upload page, dashboard, claims workspace, chat)
-  .env.example           frontend configuration template
-example_sources/         sample PDFs to try the app with
-docs/                    full documentation (see below)
+  src/                 React SPA: upload, run dashboard, claims workspace,
+                       run history, compare view, grounded chat
+docs/                  full documentation (see below)
+example_sources/       sample PDFs to try the app with
+.github/workflows/     ci.yml (lint, backend tests, frontend build + tests),
+                       eval.yml (manually dispatched golden-eval run)
 ```
 
 ## Quickstart
 
-```bash
-# Backend (Python 3.9+)
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env        # add your ANTHROPIC_API_KEY / OPENAI_API_KEY
-flask run --port 5001
+Backend (Python 3.11+ — the project uses a conda env named `author_ai`):
 
-# Frontend (Node 18+), in a second terminal
-cd frontend
-npm install
-cp .env.example .env        # VITE_API_KEY must match the backend API_KEY
-npm run dev                 # http://localhost:5173
+```bash
+conda activate author_ai
+cd backend
+pip install -e ".[dev]"
+cp .env.example .env         # fill in ANTHROPIC_API_KEY, OPENAI_API_KEY, AUTHORAI_API_KEY
+uvicorn authorai.main:app    # http://localhost:8000 — /health, /docs
 ```
 
-Upload a few PDFs from `example_sources/` as sources, `World_Hunger_Fake.pdf` as the report, and run the pipeline. Full setup, optional tools (OCR, table extraction), and troubleshooting: [docs/development.md](docs/development.md).
+The server is **fail-closed**: it refuses to start without `AUTHORAI_API_KEY` (clients send it as the `X-API-Key` header), and the provider clients refuse to construct without their keys — there is no unauthenticated or silently-degraded mode.
 
-![Upload page with source and report dropzones](docs/screenshots/upload.png)
+Frontend (Node 20+), in a second terminal:
+
+```bash
+cd frontend
+npm ci
+cp .env.example .env         # VITE_API_BASE_URL + VITE_API_KEY (must match AUTHORAI_API_KEY)
+npm run dev                  # http://localhost:5173
+```
+
+Try it with the bundled PDFs: upload `example_sources/World_Hunger_Fake.pdf` as the report, with `2025_world_hunger.pdf` and `disruptions_in_the_food_supply_chain.pdf` as sources.
+
+![Upload page with report and source dropzones](docs/screenshots/upload.png)
+
+Every run is kept — revisit any past run from the history page, or diff two runs metric by metric:
+
+![Run history](docs/screenshots/history.png)
+
+![Compare view with per-metric deltas](docs/screenshots/compare.png)
+
+Tests:
+
+```bash
+cd backend && python -m pytest -q -m "not integration"   # offline: fake embedder, no API keys
+cd frontend && npm run test
+```
+
+## CLI
+
+The pipeline is also driveable step by step from the command line (from `backend/`):
+
+```bash
+python -m authorai.cli ingest ../example_sources/2025_world_hunger.pdf     # prints the run id
+python -m authorai.cli ingest ../example_sources/World_Hunger_Fake.pdf --run <run_id> --kind REPORT
+python -m authorai.cli extract <run_id>                                    # claims + stance
+python -m authorai.cli verify <run_id>                                     # Batch API; --sync for immediate
+python -m authorai.cli score <run_id>                                      # accuracy / credibility / validity
+python -m authorai.cli search <run_id> hunger 735 million                  # hybrid search a run
+```
+
+`eval-extract` and `eval-verdict` score a run against the golden set in `backend/evals/` — both refuse to score rows produced by an outdated prompt (pass `--allow-stale` to override).
 
 ## Documentation
 
@@ -87,18 +125,18 @@ Upload a few PDFs from `example_sources/` as sources, `World_Hunger_Fake.pdf` as
 | [docs/architecture.md](docs/architecture.md) | System design, data flow, backend layers, frontend structure |
 | [docs/api.md](docs/api.md) | Every HTTP endpoint, auth, and error handling |
 | [docs/metrics.md](docs/metrics.md) | The exact math behind accuracy, credibility, and validity |
-| [docs/chat.md](docs/chat.md) | Chat modes, grounding, and claim commands |
+| [docs/chat.md](docs/chat.md) | The grounded chat endpoint and its prompt-caching design |
 | [docs/development.md](docs/development.md) | Setup, running, testing, troubleshooting |
 | [docs/configuration.md](docs/configuration.md) | Every environment variable and its default |
 | [docs/history.md](docs/history.md) | How the project evolved; guide to the other branches |
 
 ## Project status
 
-This is a working prototype built for local, single-user use:
+This is v2 — a clean-slate rewrite of the original Flask app, built on the `v2` branch and merging into `main` (the v1 lineage is documented in [docs/history.md](docs/history.md)):
 
-- Each pipeline run **replaces** the previous run's data (single-report, last-run-wins design).
-- Auth is a shared `X-API-Key` header — suitable for development, not production (it is disabled entirely if `API_KEY` is unset).
-- The other branches in this repo are historical prototypes, not alternatives — see [docs/history.md](docs/history.md) before exploring them.
+- Runs are never deleted or replaced; every analysis is retained and comparable.
+- Auth is a shared `X-API-Key` header and is always on — the server will not start without a key. Suitable for local, single-user use; not hardened for public deployment.
+- The extraction and verdict quality is measured against hand-audited golden sets (dev + held-out) with recorded baselines; the eval pipeline runs in CI via a manually dispatched workflow ([.github/workflows/eval.yml](.github/workflows/eval.yml)) because each run costs real API money.
 
 ## License
 

@@ -73,7 +73,7 @@ const ComparePage = () => {
         </div>
       </header>
       <main className="dashboard__content">
-        <section className="dashboard__column" style={{ width: "100%" }}>
+        <section className="dashboard__column" style={{ width: "100%", gridColumn: "1 / -1" }}>
           {missing ? (
             <p className="dashboard__status">Pick two runs from the history to compare.</p>
           ) : loading ? (

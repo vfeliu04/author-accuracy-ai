@@ -1,204 +1,178 @@
 # API Reference
 
-The backend is a single Flask app defined in `backend/app.py` (`create_app`). It exposes JSON endpoints for uploading PDFs, running the verification pipeline as a background job, reading report summaries/claims, inspecting sources, and chatting about the latest report. The React frontend consumes these endpoints through the typed wrapper in `frontend/src/api/client.ts`. For how the pipeline itself works, see [architecture](architecture.md); for score definitions, see [metrics](metrics.md).
+The backend is a FastAPI app built by `create_app` in `backend/authorai/main.py`; all `/api` routes live in `backend/authorai/api.py`. A run is created by uploading a report PDF plus its source PDFs in one request; the full pipeline (ingest → extract → verify → score) then executes as a background job that the client polls. Limits and defaults referenced below come from `backend/authorai/config.py` — see [configuration.md](configuration.md).
 
 ## Base URL
 
-Running `python app.py` starts Flask on port **5001** (`app.run(debug=True, port=5001)`), so the default base URL is:
-
-```
-http://localhost:5001
+```bash
+uvicorn authorai.main:app     # from backend/, default port 8000
 ```
 
-The frontend defaults to the same value via `VITE_API_BASE_URL` (see [configuration](configuration.md)). CORS is enabled for all origins via `flask_cors.CORS(app)`.
+Default base URL: `http://localhost:8000`. CORS is restricted to `AUTHORAI_CORS_ORIGINS` (default `http://localhost:5173`, comma-separated), with `allow_credentials=False` — auth is a header, not a cookie.
 
 ## Authentication
 
-Every endpoint except `GET /health` is wrapped in a `require_api_key` decorator that compares the `X-API-Key` request header against the `API_KEY` environment variable (read into `settings.api_key`). On mismatch it returns `401 {"error": "Unauthorized"}`.
+Every request whose path is `/api` or starts with `/api/` must carry the API key in the `X-API-Key` header. The check is done by `ApiGuardMiddleware`, a pure-ASGI middleware that runs **before the request body is parsed** — an unauthenticated request is rejected with 401 without the server ever reading its body (a route-dependency check would run only after FastAPI had already parsed the whole multipart upload). Keys are compared in constant time on raw bytes.
+
+The system is fail-closed: if `AUTHORAI_API_KEY` is unset, the app **refuses to start** (`RuntimeError` in the lifespan), and the middleware independently treats "no configured key" as 401. There is no unauthenticated mode.
 
 ```bash
-curl -H "X-API-Key: $API_KEY" http://localhost:5001/api/uploads
+curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 ```
 
-> **Warning:** if `API_KEY` is unset, the check is a **no-op** — the API is completely open. Set `API_KEY` on the backend (and the matching `VITE_API_KEY` on the frontend, which sends the header only when that variable is defined) for any non-local deployment.
+`/health`, `/docs`, `/redoc`, and `/openapi.json` are outside the `/api` prefix and need no key. The middleware is innermost and CORS outermost, so 401/413 rejections still carry CORS headers and are readable by a browser client.
 
-## Error Handling
+## Limits
 
-Errors are returned as JSON with the shape `{"error": "<message>"}`. `create_app` registers these handlers:
-
-| Exception | Status | Body |
+| Limit | Default | Enforced |
 |---|---|---|
-| `FileNotFoundError` | 404 | `{"error": "<message>"}` |
-| `ValueError` | 400 | `{"error": "<message>"}` |
-| `werkzeug.exceptions.HTTPException` | its own code | `{"error": "<description>"}` |
-| any other `Exception` | 500 | `{"error": "Internal Server Error"}` |
+| Whole request (`Content-Length`) | 220,000,000 bytes (`max_request_bytes`) | In the middleware, before the body is read → 413 |
+| Per uploaded file | 50,000,000 bytes (`max_upload_bytes`) | In `POST /api/runs`, from the spooled part's size → 413 |
+| Source files per run | 20 (`max_source_files`) | In `POST /api/runs` → 400 |
 
-Several handlers also return explicit 400/404 responses directly (noted per endpoint below). The frontend's `apiFetch` throws on any non-2xx response using the raw response text as the error message.
+## Error shapes
 
-## Endpoint Index
+All errors are JSON with a `detail` key.
+
+| Status | Producer | Body |
+|---|---|---|
+| 401 | Middleware (missing/wrong/unconfigured key) | `{"detail": "Invalid or missing API key"}` |
+| 413 | Middleware (`Content-Length` over cap) | `{"detail": "Request body exceeds the size limit"}` |
+| 413 | Upload validation (one file over cap) | `{"detail": "'<name>' exceeds the <n> byte per-file limit"}` |
+| 400 | Upload validation | `detail` is `'<name>' is not a .pdf file` / `'<name>' is not PDF content` / `too many source files (N > 20)` |
+| 404 | Route handlers | `{"detail": "Unknown run '<id>'"}` etc. (exact strings per endpoint below) |
+| 409 | Chat on an unfinished run | `{"detail": "The run is not scored yet — chat is available once it is DONE"}` |
+| 422 | FastAPI/Pydantic validation | `{"detail": [{"type": ..., "loc": [...], "msg": ..., ...}]}` — the standard FastAPI validation-error list |
+
+## Endpoint index
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | no | Liveness check |
-| POST | `/api/uploads/source` | yes | Upload source PDFs |
-| POST | `/api/uploads/report` | yes | Upload the report PDF |
-| GET | `/api/uploads` | yes | List uploads |
-| DELETE | `/api/uploads/<upload_id>` | yes | Delete an upload |
-| GET | `/api/uploads/<upload_id>/file` | yes | Download/serve an uploaded file |
-| POST | `/api/run_pipeline` | yes | Start a pipeline job (async) |
-| GET | `/api/jobs/<job_id>` | yes | Poll job status/progress |
-| GET | `/api/dashboard` | yes | Summary of the latest completed job |
-| GET | `/api/reports/latest` | yes | Same as `/api/dashboard` |
-| GET | `/api/reports/<job_id>/summary` | yes | Summary of a specific job |
-| GET | `/api/reports/<job_id>/claims` | yes | Paginated claims with evidence |
-| GET | `/api/sources/<source_id>` | yes | Source detail (credibility, claims) |
-| GET | `/api/claims` | yes | All claims in the database |
-| POST | `/api/chat` | yes | Ask a question about a report |
-| GET | `/api/chat/history` | yes | Chat history for a job's report |
+| GET | `/health` | no | Liveness: `{"status": "ok", "version": "<pkg version>"}` |
+| GET | `/docs`, `/redoc`, `/openapi.json` | no | Interactive docs; served only when `docs_enabled` (see below) |
+| POST | `/api/runs` | yes | Upload report + sources, queue the pipeline (202) |
+| GET | `/api/runs` | yes | List all runs, newest first |
+| GET | `/api/runs/{run_id}` | yes | Run detail + latest job (progress feed) |
+| GET | `/api/jobs/{job_id}` | yes | One job by id |
+| GET | `/api/runs/{run_id}/report` | yes | Full analysis payload: scores, stats, claims, sources |
+| GET | `/api/runs/{run_id}/documents/{doc_id}/file` | yes | Stream a run's stored PDF inline |
+| POST | `/api/runs/{run_id}/chat` | yes | Grounded Q&A over a DONE run (see [chat.md](chat.md)) |
 
-## Health
+## Runs and jobs
 
-### `GET /health`
+### `POST /api/runs` → 202
 
-Returns `{"status": "ok"}`. No authentication — safe for load-balancer probes.
+Multipart form with two fields:
 
-## Uploads
-
-Upload records (SQLite `uploads` table, see `Repository` in `backend/author_ai/storage/database.py`) are serialized as:
-
-| Field | Meaning |
-|---|---|
-| `upload_id` | Generated ID, used everywhere else as `source_id` / `report_id` |
-| `file_name` | Sanitized original filename |
-| `file_type` | `SOURCE` or `REPORT` |
-| `path` | Absolute path on the server's filesystem |
-| `created_at` | ISO timestamp |
-| `file_url` | `/api/uploads/<upload_id>/file` |
-
-### `POST /api/uploads/source`
-
-Multipart form upload of one or more source PDFs under the field name `files` (falls back to `file`). Each file is saved to disk and recorded with type `SOURCE`. Returns `{"uploads": [<upload>, ...]}`. If no non-empty files are provided, a `ValueError` yields 400 `No files were provided.`.
-
-### `POST /api/uploads/report`
-
-Multipart form upload of exactly one report PDF under the field name `file`. Returns a single upload object (not wrapped in a list). Missing file → 400 `Report file is required`.
-
-### `GET /api/uploads?type=source|report`
-
-Lists uploads, newest first, as `{"uploads": [...]}`. The `type` query param is optional and case-insensitive (it is upper-cased before matching `file_type`).
-
-### `DELETE /api/uploads/<upload_id>`
-
-Deletes the file from disk (also removing its now-empty parent directory) and the DB row. Returns `{"status": "deleted"}`, or 404 `{"status": "not_found"}` for an unknown ID.
-
-### `GET /api/uploads/<upload_id>/file`
-
-Serves the raw file inline (`send_file` with `as_attachment=False`) — used by the frontend PDF viewer. 404 `{"error": "File not found"}` for unknown IDs.
-
-## Pipeline & Jobs
-
-### `POST /api/run_pipeline`
-
-JSON body:
-
-| Field | Required | Meaning |
+| Field | Type | Rules |
 |---|---|---|
-| `source_ids` | yes (non-empty) | Upload IDs with `file_type=SOURCE` |
-| `report_id` | yes | Upload ID with `file_type=REPORT` |
+| `report` | one file | Required. `.pdf` extension, `%PDF-` magic bytes, ≤ `max_upload_bytes` |
+| `sources` | list of files | Required. Same per-file rules; at most `max_source_files` |
 
-Creates a job row with status `QUEUED`, then validates that every ID exists and has the right type (400 `Invalid source upload: <id>` / `Invalid report upload` otherwise), starts the pipeline in a **daemon background thread**, and immediately returns `{"job_id": "<uuid>", "status": "QUEUED"}`. Poll `GET /api/jobs/<job_id>` for progress.
+Every file is validated (extension, size, magic bytes — without reading it into memory) before any file is written. Files are stored under `uploads_dir` with server-generated names; the client filename is kept only as display metadata and never touches a path. The run, its upload rows, and a `full_pipeline` job commit in **one transaction** — a failure anywhere deletes the written files and leaves no rows.
 
-The job thread runs, in order: indexing + credibility scoring of each source, claim extraction/verification, validity scoring, credibility aggregation, and OpenAlex-based source recommendations, recording each phase in `progress_json`. On success the job becomes `DONE` with `result_json` containing `claims`, `report_id`, `validity`, `credibility`, and `recommended_sources`; on any exception it becomes `FAILED` with `error_message` set and the last running progress step marked `failed`.
+Response: `{"run_id": "<hex>", "job_id": "<hex>"}`. The job starts `QUEUED`; a single worker thread picks it up (poll interval `job_poll_seconds`). Poll `GET /api/runs/{run_id}` for progress.
 
-> **Destructive side effect:** the job thread calls `reset_environment()` (`backend/author_ai/services/environment.py`) before indexing. This deletes the FAISS index and cache directories and wipes the `documents`, `chunks`, `claims`, `claim_evidence`, `credibility_scores`, `validity_scores`, and **`chat_logs`** tables. The app is deliberately single-report, last-run-wins: each run erases all prior pipeline data and chat history. Only the `uploads`, `jobs`, and `charts` tables survive. See [history](history.md) for why.
+### `GET /api/runs`
 
-> **Quirk:** the job row is created *before* the source/report IDs are validated, so a 400 validation failure leaves an orphaned job stuck in `QUEUED`.
-
-### `GET /api/jobs/<job_id>`
-
-Returns the full job record (404 `{"error": "Job not found"}` otherwise):
+`{"runs": [<run>, ...]}` ordered by `created_at` descending. A run object:
 
 | Field | Meaning |
 |---|---|
-| `job_id`, `status` | Status is `QUEUED`, `RUNNING`, `DONE`, or `FAILED` |
-| `report_id`, `source_ids` | Inputs to the run |
-| `result_json` | Pipeline output once `DONE` (`{}` before) |
-| `error_message` | Set when `FAILED` |
-| `progress_json` | List of `{step, label, status, ts}` where status ∈ `running`/`done`/`failed` and step ∈ `indexing`, `verifying`, `validity`, `credibility`, `recommendations` |
-| `created_at`, `updated_at` | ISO timestamps |
+| `id` | Run id |
+| `created_at` | ISO-8601 UTC timestamp |
+| `status` | `CREATED` \| `RUNNING` \| `DONE` \| `FAILED` |
+| `error` | Failure message, else `null` |
 
-## Reports & Claims
+### `GET /api/runs/{run_id}`
 
-### `GET /api/dashboard` and `GET /api/reports/latest`
+`{"run": <run>, "job": <job> | null}` — the run plus its most recent job. 404 `Unknown run '<id>'` otherwise.
 
-These two endpoints are **equivalent**: both look up the most recent job with status `DONE` and return `build_report_summary` for it, or 404 `{"error": "No completed reports"}` if none exists.
-
-### `GET /api/reports/<job_id>/summary`
-
-Same summary for a specific job. 404 `{"error": "Report not ready"}` unless the job exists and is `DONE`.
-
-Summary response fields (built by `build_report_summary` in `app.py`):
+A job object:
 
 | Field | Meaning |
 |---|---|
-| `job_id` | The job the summary was built from |
-| `report` | `{id, name, pdf_url, summary}` — `summary` is a "X of Y claims supported" line |
-| `scores` | `{overall, accuracy, credibility, validity}`, all fractions 0–1. `accuracy` = supported claims / total; `credibility` and `validity` are the pipelines' 0–100 scores divided by 100; `overall` is the plain mean of the three. See [metrics](metrics.md). |
-| `recommended_sources` | Normalized OpenAlex recommendations (`id`, `title`, `summary`, `abstract`, `credibility_score`, `validity_score`, `date_published`, `authors`, `doi`, `url`, `openalex_url`, `host_venue`) |
-| `chat_messages` | Seed messages: verdict + text of up to 3 claims |
-| `sources` | Per-source `{id, name, file_url, summary, scores: {credibility}, usage_count}` where `usage_count` counts claims the source supports |
-| `claims` | The full claims list from `result_json` (unpaginated) |
-| `stats` | `{claims_total, claims_supported, claims_contradicted, claims_not_found}` |
-| `top_sources` | Top 5 sources by usage count, then credibility |
+| `id`, `run_id`, `kind` | `kind` is `full_pipeline` |
+| `status` | `QUEUED` \| `RUNNING` \| `DONE` \| `FAILED` |
+| `payload` | The work order: `{"report_upload_id", "source_upload_ids"}` |
+| `progress` | Array of `{step, label, status, ts}`; `step` ∈ `ingest`, `extract`, `verify`, `score` (plus a `recovered` entry if the job was re-queued after a restart); `status` ∈ `running`, `done`, `failed` |
+| `error` | Failure message, else `null` |
+| `created_at`, `updated_at` | ISO-8601 UTC timestamps |
 
-> **Side effect on read:** if the job's `result_json` has no `recommended_sources` (e.g. jobs from before recommendations were persisted), the summary builder calls `RecommendationService.recommend` — a live OpenAlex network fetch — and writes the results back into the job row. The first read of such a report can therefore be slow and mutates the database.
+Jobs are resumable: on startup, any job left `RUNNING` by a crash is re-queued and resumes from its first incomplete step.
 
-### `GET /api/reports/<job_id>/claims?limit=5&page=0`
+### `GET /api/jobs/{job_id}`
 
-Paginated claims for a `DONE` job (404 `Report not ready` otherwise; non-integer pagination params → 400 `Invalid pagination parameters`). Returns `{"claims": [...], "total": <int>, "has_more": <bool>}`.
+The job object above, or 404 `Unknown job '<id>'`.
 
-Each claim carries `claim_id`, `report_id`, `text`, `verdict` (`SUPPORTED`, `CONTRADICTED`, or `NOT_FOUND`), `confidence`, `confidence_band`, `explanation`, `processing_mode`, and `metadata`, and is enriched here with `parent_page` (page in the report PDF) and `evidence`: up to 2 entries of `{snippet, source_id, source_name, page, score}`, excluding evidence rows labeled `ALTERNATIVE`.
+## Report payload
 
-## Sources
+### `GET /api/runs/{run_id}/report`
 
-### `GET /api/sources/<source_id>?claim_limit=5&claim_page=0`
+404 `Unknown run '<id>'` for unknown runs. Works at any run status — before scoring, `scores` is `null` and `claims`/`sources` may be empty. All rows are read in one transaction, so the payload is a consistent snapshot even while the worker is committing.
 
-Detail view for one uploaded source (404 `Source not found` for unknown IDs; bad pagination ints → 400). Response:
+```json
+{
+  "run_id": "…",
+  "status": "DONE",
+  "report_doc_id": "…",          // the report's document id (for the file endpoint), or null
+  "scores": { "accuracy": 0.84, "coverage": 0.97, "credibility": 0.509, "validity": 0.42 },
+  "stats": { "claims_total": 37, "claims_supported": 30, "claims_contradicted": 3, "claims_unverifiable": 4 },
+  "claims": [ … ],
+  "sources": [ … ]
+}
+```
+
+`scores` values are all 0–1 fractions (credibility and validity are stored 0–100 and divided by 100 here); `accuracy` and `coverage` can be `null` when no claim was decided. `accuracy` is report-position agreement over decided claims; UNVERIFIABLE claims count only against `coverage`, never against `accuracy`.
+
+Each entry in `claims` (ordered by report page, then id):
 
 | Field | Meaning |
 |---|---|
-| `upload` | The upload record (see Uploads) |
-| `credibility` | Row from `credibility_scores` (`score` on a 0–100 scale, `metadata_confidence`, `components`, `updated_at`) or `null` |
-| `claims`, `claim_total`, `claim_has_more` | Paginated claims that cite this source |
-| `usage_count` | Total distinct claims linked to this source |
-| `tables` | At most one extracted table preview |
-| `summary` | Document summary, falling back to first line of body text, then filename |
-| `validity` | `{score, supported, total}` computed **only over the current page of claims**, or `null` if the page is empty |
+| `claim_id`, `text`, `page` | The extracted claim and where it appears in the report |
+| `value`, `unit`, `year` | Parsed quantitative fields, `null` when absent |
+| `verdict` | `SUPPORTED` \| `CONTRADICTED` \| `UNVERIFIABLE` — relative to the ingested sources only |
+| `stance` | `asserted` \| `disavowed` — the report's own position; `disavowed` means the report itself marks the claim false (so a CONTRADICTED verdict there is the report being *right*) |
+| `downgraded` | `true` when code-side checks overrode the model's verdict (stored `raw_verdict` differs from `verdict`, e.g. a failed quote check forced UNVERIFIABLE) |
+| `quote` | The evidence quote the judge cited, or `null` |
+| `quote_verified` | `1` quote found verbatim in the cited chunk, `0` check failed, `null` no quote applicable |
+| `rationale` | The judge's reasoning |
+| `year_flag` | `1` when the claim's year is absent from the cited chunk, else `null` |
+| `evidence_source` | `{"doc_id", "title", "page"}` of the source document behind the quoted chunk, or `null` when no chunk was cited |
 
-### `GET /api/claims`
+Each entry in `sources` (ordered by credibility, highest first):
 
-Returns every claim in the database as `{"claims": [...]}` (no pagination, no evidence enrichment). Because pipeline runs wipe prior data, this is effectively the latest run's claims.
+| Field | Meaning |
+|---|---|
+| `doc_id`, `title` | The source document |
+| `total` | Credibility score 0–100 (no floors — unknown metadata earns nothing) |
+| `tier` | Crossref verification tier: `VERIFIED_DOI` \| `VERIFIED_TITLE` \| `METADATA_ONLY` \| `NONE` |
+| `components` | `{"metadata_completeness", "authority", "recency", "verification"}` point breakdown |
+
+## Document files
+
+### `GET /api/runs/{run_id}/documents/{doc_id}/file`
+
+Streams the stored PDF (report or source) with `Content-Type: application/pdf` and `Content-Disposition: inline; filename="<original name>"` — meant for an embedded viewer. `doc_id` is a document id from the report payload (`report_doc_id` or a source's `doc_id`).
+
+Access is scoped by `(run_id, doc_id)`: a document id from another run returns 404 `No such document in this run`. As defense in depth, the stored path (already server-generated) is resolve-checked to lie inside `uploads_dir`; a path escaping it, or a missing file, returns 404 `Document file is unavailable`.
 
 ## Chat
 
-See [chat](chat.md) for modes and behavior; the HTTP contract is:
+### `POST /api/runs/{run_id}/chat`
 
-### `POST /api/chat`
+Grounded Q&A over a completed run's analysis. 404 for an unknown run; **409** unless the run's status is `DONE`. JSON body (Pydantic-validated, 422 on violation):
 
-JSON body:
+| Field | Rules |
+|---|---|
+| `question` | Required, 1–4,000 chars |
+| `history` | Optional, ≤ 50 turns of `{"role": "user"|"assistant", "content": <1–8,000 chars>}` — client-held; the server stores nothing |
+| `mode` | `evidence` (default) \| `guidance` \| `creative` |
 
-| Field | Required | Meaning |
-|---|---|---|
-| `question` | yes | The user's question (defaults to empty string) |
-| `job_id` | no | Target job; must be `DONE`, else 400 `Report not ready`. If omitted, falls back to the latest `DONE` job |
-| `session_id` | no | Continues an existing chat session |
-| `mode` | no | `evidence`, `guidance`, or `creative` |
-| `mode_locked` | no | Boolean; pin the mode instead of letting the service switch it |
+Response: `{"answer": "<text>", "mode": "<mode>"}`. Details — context construction, prompt caching, history trimming — in [chat.md](chat.md).
 
-400 `No completed report` if no report can be resolved. Response (as consumed by the frontend): `{"answer", "claims_used": [{claim_id, text, verdict}], "sources_used": [{source_id, snippet?}], "mode", "suggested_mode"?}`.
+## Health and docs
 
-### `GET /api/chat/history?job_id=<id>`
+`GET /health` returns `{"status": "ok", "version": "<package version>"}` with no auth — safe for probes.
 
-Returns `{"history": [{session_id, role, message, timestamp, context_ids}]}` in chronological order for the job's report. 400 `job_id required` without the param; 404 `Job not found` for unknown jobs; `{"history": []}` if the job has no `report_id`.
-
-> **Gotcha:** chat history lives in the `chat_logs` table, which `reset_environment()` clears — every new pipeline run erases all previous chat history.
+Swagger (`/docs`), ReDoc (`/redoc`), and the OpenAPI schema (`/openapi.json`) are served only while `docs_enabled` is true (the default). They expose the full route surface; disable them (`AUTHORAI_DOCS_ENABLED=false`) for an exposed deployment.
