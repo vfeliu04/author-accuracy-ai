@@ -77,6 +77,7 @@ const ReportDashboard = () => {
 
   const [mode, setMode] = useState<ChatMode>("evidence");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatError, setChatError] = useState<string | null>(null);
 
   const run = runQuery.data?.run;
   const job = runQuery.data?.job;
@@ -85,6 +86,7 @@ const ReportDashboard = () => {
   const done = status === "DONE";
 
   const handleSend = (text: string) => {
+    setChatError(null);
     const history = messages.map((m) => ({ role: m.author, content: m.text }));
     setMessages((prev) => [...prev, { id: Date.now(), author: "user", text }]);
     chat.mutate(
@@ -92,15 +94,10 @@ const ReportDashboard = () => {
       {
         onSuccess: (data) =>
           setMessages((prev) => [...prev, { id: Date.now() + 1, author: "assistant", text: data.answer }]),
+        // Surface the failure separately — do NOT push it into `messages`, or
+        // the next turn would send a fabricated assistant reply as history.
         onError: (err) =>
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: Date.now() + 1,
-              author: "assistant",
-              text: `The chat service is unavailable: ${err instanceof Error ? err.message : "unknown error"}`
-            }
-          ])
+          setChatError(err instanceof Error ? err.message : "The chat service is unavailable.")
       }
     );
   };
@@ -217,6 +214,11 @@ const ReportDashboard = () => {
               onModeChange={setMode}
               suggestions={CHAT_SUGGESTIONS}
             />
+            {chatError ? (
+              <p className="dashboard__status dashboard__status--error">
+                The chat service is unavailable: {chatError}
+              </p>
+            ) : null}
           </section>
           <section className="dashboard__column dashboard__column--right dashboard__column--stacked-right">
             <RatingPanel scores={report.scores} />

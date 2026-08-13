@@ -34,7 +34,9 @@ const ClaimsWorkspace = () => {
   }
 
   const claims = report.claims.filter((c) => filter === "ALL" || c.verdict === filter);
-  const selected = report.claims.find((c) => c.claim_id === selectedId) ?? claims[0] ?? null;
+  // Resolve the selection within the FILTERED list, so switching the filter
+  // falls back to a visible claim rather than showing a now-hidden one.
+  const selected = claims.find((c) => c.claim_id === selectedId) ?? claims[0] ?? null;
 
   return (
     <div className="workspace">

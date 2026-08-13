@@ -55,6 +55,22 @@ describe("ComparePage", () => {
     expect(screen.getByText("-1")).toBeInTheDocument();
   });
 
+  it("keeps the delta consistent with the two displayed cells", async () => {
+    // 0.144 → 0.156 renders as 14% → 16% (a 2-point cell gap); the delta must
+    // read the difference of the CELLS (+2%), not round(0.156-0.144)=+1%.
+    vi.spyOn(v2, "getReport").mockImplementation((id: string) =>
+      Promise.resolve(
+        id === "a"
+          ? reportFor("a", { scores: { accuracy: 0.144, coverage: 0.5, credibility: 0.8, validity: 0.6 } })
+          : reportFor("b", { scores: { accuracy: 0.156, coverage: 0.5, credibility: 0.8, validity: 0.6 } })
+      )
+    );
+    renderCompare("a", "b");
+    await waitFor(() => expect(screen.getByText("14%")).toBeInTheDocument());
+    expect(screen.getByText("16%")).toBeInTheDocument();
+    expect(screen.getByText("+2%")).toBeInTheDocument();
+  });
+
   it("guards an unscored run with dashes and a note", async () => {
     vi.spyOn(v2, "getReport").mockImplementation((id: string) =>
       Promise.resolve(id === "a" ? reportFor("a", {}) : reportFor("b", { status: "RUNNING", scores: null }))

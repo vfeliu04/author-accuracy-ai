@@ -26,13 +26,20 @@ export function useRuns() {
   return useQuery({ queryKey: queryKeys.runs, queryFn: listRuns });
 }
 
+// Stop polling once the run reaches a terminal status OR the query itself
+// errored — an error state carries no data, so a status-only check would poll
+// a 404'd /report forever.
+function pollUntilTerminal(status: string, isTerminalData: boolean): number | false {
+  return status === "error" || isTerminalData ? false : POLL_MS;
+}
+
 export function useRun(runId: string | undefined) {
   return useQuery({
     queryKey: queryKeys.run(runId ?? ""),
     queryFn: () => getRun(runId as string),
     enabled: Boolean(runId),
-    refetchInterval: (query: { state: { data?: RunDetail } }) =>
-      isTerminal(query.state.data?.run.status) ? false : POLL_MS
+    refetchInterval: (query: { state: { status: string; data?: RunDetail } }) =>
+      pollUntilTerminal(query.state.status, isTerminal(query.state.data?.run.status))
   });
 }
 
@@ -41,8 +48,8 @@ export function useReport(runId: string | undefined) {
     queryKey: queryKeys.report(runId ?? ""),
     queryFn: () => getReport(runId as string),
     enabled: Boolean(runId),
-    refetchInterval: (query: { state: { data?: Report } }) =>
-      isTerminal(query.state.data?.status) ? false : POLL_MS
+    refetchInterval: (query: { state: { status: string; data?: Report } }) =>
+      pollUntilTerminal(query.state.status, isTerminal(query.state.data?.status))
   });
 }
 

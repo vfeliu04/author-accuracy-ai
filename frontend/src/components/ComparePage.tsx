@@ -25,7 +25,9 @@ function Delta({ a, b, asPct }: { a: number | null; b: number | null; asPct: boo
   if (a === null || b === null) {
     return <span className="compare__delta compare__delta--flat">—</span>;
   }
-  const raw = asPct ? Math.round((b - a) * 100) : b - a;
+  // Round each side first so the delta always equals the difference of the two
+  // displayed cells (never off-by-one against them).
+  const raw = asPct ? Math.round(b * 100) - Math.round(a * 100) : b - a;
   const cls = raw > 0 ? "up" : raw < 0 ? "down" : "flat";
   const sign = raw > 0 ? "+" : "";
   return (
