@@ -20,6 +20,11 @@ class Settings(BaseSettings):
         env_prefix="AUTHORAI_",
         env_file=_ENV_FILE,
         extra="ignore",
+        # Without this, an aliased field ignores its FIELD NAME as an init
+        # kwarg: Settings(anthropic_api_key="x") silently fell through to the
+        # env/.env sources, so tests only worked where a real key existed —
+        # first CI run (no .env) exposed it.
+        populate_by_name=True,
     )
 
     db_path: Path = Path("data/authorai.db")
