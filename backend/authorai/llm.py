@@ -9,6 +9,7 @@ cost stays visible. Retries are the SDK's built-in ones — no hand-rolled loop.
 import base64
 import hashlib
 import io
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,16 +28,22 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def prompt_fingerprint(*parts: str, output_type: type[BaseModel]) -> str:
-    """Canonical hash of a prompt CONTRACT: rendered text + output field specs.
+    """Canonical hash of a prompt CONTRACT: rendered text + the output schema.
 
     Callers pass the system prompt plus a prompt RENDERED from frozen synthetic
     inputs, so the hash moves exactly when the model would see a different
     prompt shape — including builder formatting changes a bare template
-    constant would miss. The output type's (name, description) pairs are
-    hashed too: a field description IS prompt text under structured outputs.
+    constant would miss. The schema part hashes the ACTUAL schema the API is
+    sent (transform_schema of the type handed to parse), so docstrings, field
+    types, Literal vocabularies, and nested models all count — hashing only
+    the visible (name, description) pairs already missed docstring and
+    Literal edits once (review 2026-08-14). `output_type` must therefore be
+    the exact type passed to parse, not an inner model.
     """
-    fields = repr(sorted((name, f.description) for name, f in output_type.model_fields.items()))
-    return hashlib.sha256("\x1e".join([*parts, fields]).encode()).hexdigest()
+    from anthropic import transform_schema
+
+    schema = json.dumps(transform_schema(output_type), sort_keys=True)
+    return hashlib.sha256("\x1e".join([*parts, schema]).encode()).hexdigest()
 
 
 # Claude Opus 5 thinks by default, and thinking shares this budget with the

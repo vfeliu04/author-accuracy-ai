@@ -617,7 +617,7 @@ def list_verdicts(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """A run's verdicts joined with their claims, in document order."""
     rows = conn.execute(
         """
-        SELECT v.*, c.text, c.value, c.unit, c.year, c.page, c.stance
+        SELECT v.*, c.text, c.value, c.unit, c.year, c.page, c.stance, c.extraction_prompt_hash
         FROM verdicts v JOIN claims c ON c.id = v.claim_id
         WHERE v.run_id = ? ORDER BY c.page, c.id
         """,

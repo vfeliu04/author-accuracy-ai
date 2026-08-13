@@ -199,10 +199,16 @@ def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore
 class StanceScore:
     agreed: int
     labeled: int  # golden records carrying a stance label that paired to a row
+    unpaired: int  # stance-labeled golden records that matched NO row
     disagreements: list[str]
 
     def summary(self) -> str:
-        return f"stance agreement {self.agreed}/{self.labeled} paired golden claims"
+        base = f"stance agreement {self.agreed}/{self.labeled} paired golden claims"
+        if self.unpaired:
+            # A dropped record silently shrinks the denominator — say so, or
+            # the agreement ratio reads better than it is.
+            base += f" ({self.unpaired} labeled golden claims UNPAIRED — ratio may flatter)"
+        return base
 
 
 def score_stance(extracted: list[dict], golden: list[dict]) -> StanceScore:
@@ -216,10 +222,14 @@ def score_stance(extracted: list[dict], golden: list[dict]) -> StanceScore:
     """
     agreed = 0
     labeled = 0
+    unpaired = 0
     disagreements: list[str] = []
     for golden_claim, hit in _pair(golden, extracted, quality=_pair_quality):
         expected = golden_claim.get("stance")
-        if expected is None or hit is None:
+        if expected is None:
+            continue
+        if hit is None:
+            unpaired += 1
             continue
         labeled += 1
         actual = extracted[hit].get("stance") or "asserted"
@@ -229,7 +239,9 @@ def score_stance(extracted: list[dict], golden: list[dict]) -> StanceScore:
             disagreements.append(
                 f"{golden_claim['text'][:80]!r}: expected {expected}, extracted {actual}"
             )
-    return StanceScore(agreed=agreed, labeled=labeled, disagreements=disagreements)
+    return StanceScore(
+        agreed=agreed, labeled=labeled, unpaired=unpaired, disagreements=disagreements
+    )
 
 
 def score_extraction(extracted: list[dict], golden: list[dict]) -> ExtractionScore:

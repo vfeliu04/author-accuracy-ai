@@ -63,8 +63,26 @@ def test_score_stance_agreement_and_disagreements():
     score = score_stance(extracted, golden)
     assert score.labeled == 2  # the unlabeled golden record is skipped, not defaulted
     assert score.agreed == 1
+    assert score.unpaired == 0
     [disagreement] = score.disagreements
     assert "expected asserted, extracted disavowed" in disagreement
+
+
+def test_score_stance_reports_unpaired_labeled_records():
+    # A labeled golden claim that matches nothing must be COUNTED as unpaired,
+    # not silently dropped — a shrinking denominator flatters the ratio.
+    golden = [
+        {
+            "text": "Wheat exports fell by 12 percent.",
+            "value": 12.0,
+            "year": None,
+            "stance": "asserted",
+        },
+    ]
+    score = score_stance([], golden)
+    assert score.labeled == 0
+    assert score.unpaired == 1
+    assert "UNPAIRED" in score.summary()
 
 
 def test_score_stance_pairs_table_twins_by_best_fit():

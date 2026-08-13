@@ -214,7 +214,7 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     for text in score.missed:
         print(f"MISSED: {text}")
     stance = score_stance(extracted, golden)
-    if stance.labeled:
+    if stance.labeled or stance.unpaired:
         print(stance.summary())
         for line in stance.disagreements:
             print(f"STANCE MISMATCH: {line}")
@@ -224,6 +224,12 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
             f"baseline: recall {b['recall']:.2f}, precision {b['precision']:.2f} "
             f"(delta: recall {score.recall - b['recall']:+.2f}, "
             f"precision {score.precision - b['precision']:+.2f})"
+            + (
+                f"; stance {stance.agreed}/{stance.labeled} vs baseline "
+                f"{b['stance_agreed']}/{b['stance_labeled']}"
+                if stance.labeled and b.get("stance_agreed") is not None
+                else ""
+            )
         ),
     )
 
@@ -278,6 +284,11 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
     verdict_rows = dbmod.list_verdicts(conn, args.run_id)
     if not verdict_rows:
         raise SystemExit(f"Run {args.run_id!r} has no verdicts — run `verify` first")
+    # Both guards: the verdict stamp proves the JUDGE configuration, but says
+    # nothing about the claim population — verdicts freshly judged over claims
+    # from an older extraction prompt would measure the judge on outdated
+    # inputs (list_verdicts joins extraction_prompt_hash for exactly this).
+    _assert_claims_fresh(verdict_rows, args.allow_stale)
     _assert_verdicts_fresh(verdict_rows, args.allow_stale)
     models = sorted({r["model"] for r in verdict_rows})
     print(f"judge model(s): {', '.join(models)}")

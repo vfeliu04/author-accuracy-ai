@@ -51,15 +51,18 @@ def _fmt_score(scores: dict | None) -> str:
     acc = scores["accuracy"]
     cred = scores["credibility"]["score"]
     val = scores["validity"]["score"]
-    # Pre-stance runs stored no correct/incorrect breakdown; omit it rather
-    # than print None (their accuracy is the old supported/decided number).
-    agreement = (
-        f": {acc['correct']} agree with the report's stance, {acc['incorrect']} do not"
-        if acc.get("correct") is not None
-        else ""
-    )
+    # Pre-stance runs stored the old supported/decided number with no
+    # correct/incorrect breakdown — label it as what it IS, or the model
+    # would confidently misdescribe the metric on old runs.
+    if acc.get("correct") is not None:
+        label = (
+            f"report-position agreement: {acc['correct']} agree with the report's stance, "
+            f"{acc['incorrect']} do not"
+        )
+    else:
+        label = "supported/decided; scored before stance-aware accuracy"
     return (
-        f"accuracy {acc.get('accuracy')} (report-position agreement{agreement}), "
+        f"accuracy {acc.get('accuracy')} ({label}), "
         f"coverage {acc.get('coverage')}, credibility {cred}/100, validity {val}/100. "
         f"{acc.get('supported')} supported, {acc.get('contradicted')} contradicted, "
         f"{acc.get('unverifiable')} unverifiable of {acc.get('total')} claims."

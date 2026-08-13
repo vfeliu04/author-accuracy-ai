@@ -106,7 +106,9 @@ EXTRACTION_PROMPT_HASH = prompt_fingerprint(
         [{"title": "Frozen Section", "text": "Frozen section text.", "page": 1}],
         [{"text": "frozen | table | row", "page": 2}],
     ),
-    output_type=ExtractedClaim,
+    # The type extract_claims actually parses — the wrapper's schema is part
+    # of what the model sees, so it must be part of the hash.
+    output_type=ClaimExtraction,
 )
 
 
