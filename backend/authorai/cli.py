@@ -14,7 +14,7 @@ from authorai import db as dbmod
 from authorai.claims import EXTRACTION_PROMPT_HASH, claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.evals import load_golden, score_extraction, score_verdicts
+from authorai.evals import load_golden, score_extraction, score_stance, score_verdicts
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
 from authorai.llm import AnthropicClient
 from authorai.scoring import score_run
@@ -213,6 +213,11 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     print(score.summary())
     for text in score.missed:
         print(f"MISSED: {text}")
+    stance = score_stance(extracted, golden)
+    if stance.labeled:
+        print(stance.summary())
+        for line in stance.disagreements:
+            print(f"STANCE MISMATCH: {line}")
     _print_baseline_delta(
         _resolve_baseline(args, BASELINE_PATH),
         lambda b: (

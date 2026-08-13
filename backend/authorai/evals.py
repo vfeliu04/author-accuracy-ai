@@ -195,6 +195,43 @@ def score_verdicts(verdict_rows: list[dict], golden: list[dict]) -> VerdictScore
     )
 
 
+@dataclass
+class StanceScore:
+    agreed: int
+    labeled: int  # golden records carrying a stance label that paired to a row
+    disagreements: list[str]
+
+    def summary(self) -> str:
+        return f"stance agreement {self.agreed}/{self.labeled} paired golden claims"
+
+
+def score_stance(extracted: list[dict], golden: list[dict]) -> StanceScore:
+    """Stance agreement over best-fit pairs; cannot perturb recall/precision.
+
+    Separate from score_extraction on purpose: recall/precision keep their
+    recorded first-match pairing, but stance comparison needs the best-fitting
+    row — the real-vs-fabricated table twins both pass _matches, exactly the
+    collision class that corrupted the first holdout verdict reference.
+    Golden records without a stance label are skipped, not defaulted.
+    """
+    agreed = 0
+    labeled = 0
+    disagreements: list[str] = []
+    for golden_claim, hit in _pair(golden, extracted, quality=_pair_quality):
+        expected = golden_claim.get("stance")
+        if expected is None or hit is None:
+            continue
+        labeled += 1
+        actual = extracted[hit].get("stance") or "asserted"
+        if actual == expected:
+            agreed += 1
+        else:
+            disagreements.append(
+                f"{golden_claim['text'][:80]!r}: expected {expected}, extracted {actual}"
+            )
+    return StanceScore(agreed=agreed, labeled=labeled, disagreements=disagreements)
+
+
 def score_extraction(extracted: list[dict], golden: list[dict]) -> ExtractionScore:
     matched = 0
     missed: list[str] = []

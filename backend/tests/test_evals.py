@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from authorai.evals import load_golden, score_extraction
+from authorai.evals import load_golden, score_extraction, score_stance
 
 GOLDEN = [
     {"text": "Hunger affected 735 million people in 2023.", "value": 735e6, "year": 2023},
@@ -37,6 +37,72 @@ def test_missed_and_precision_accounting():
     assert score.recall == 1 / 3
     assert score.precision == 1 / 2
     assert "Wheat exports fell by 12 percent." in score.missed
+
+
+def test_score_stance_agreement_and_disagreements():
+    golden = [
+        {
+            "text": "Hunger was eradicated in 2019.",
+            "value": None,
+            "year": 2019,
+            "stance": "disavowed",
+        },
+        {"text": "Conflict drives hunger.", "value": None, "year": None, "stance": "asserted"},
+        {"text": "No stance label on this one.", "value": None, "year": None},  # skipped
+    ]
+    extracted = [
+        {
+            "text": "Hunger was eradicated in 2019.",
+            "value": None,
+            "year": 2019,
+            "stance": "disavowed",
+        },
+        {"text": "Conflict drives hunger.", "value": None, "year": None, "stance": "disavowed"},
+        {"text": "No stance label on this one.", "value": None, "year": None, "stance": "asserted"},
+    ]
+    score = score_stance(extracted, golden)
+    assert score.labeled == 2  # the unlabeled golden record is skipped, not defaulted
+    assert score.agreed == 1
+    [disagreement] = score.disagreements
+    assert "expected asserted, extracted disavowed" in disagreement
+
+
+def test_score_stance_pairs_table_twins_by_best_fit():
+    # The real-vs-fabricated table twins share enough tokens to both pass
+    # _matches; first-match pairing would compare stances across the wrong
+    # pair. Best-fit pairing must line each golden up with its own row.
+    golden = [
+        {
+            "text": "Global total: 733 million undernourished.",
+            "value": 733e6,
+            "year": None,
+            "stance": "asserted",
+        },
+        {
+            "text": "Global total: only 10 million undernourished.",
+            "value": 10e6,
+            "year": None,
+            "stance": "disavowed",
+        },
+    ]
+    extracted = [
+        {
+            "text": "Global total: only 10 million undernourished.",
+            "value": 10e6,
+            "year": None,
+            "stance": "disavowed",
+        },
+        {
+            "text": "Global total: 733 million undernourished.",
+            "value": 733e6,
+            "year": None,
+            "stance": "asserted",
+        },
+    ]
+    score = score_stance(extracted, golden)
+    assert score.labeled == 2
+    assert score.agreed == 2
+    assert score.disagreements == []
 
 
 def test_each_extracted_claim_matches_at_most_one_golden():
