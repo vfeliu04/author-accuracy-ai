@@ -1,15 +1,6 @@
 import { ChangeEvent, FormEvent, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useReportData } from "../context/ReportDataContext";
-import { runPipelineWithUploads, fetchJob, ProgressEntry } from "../api/client";
-
-const PIPELINE_STEPS: { step: string; label: string }[] = [
-  { step: "indexing",        label: "Indexing sources" },
-  { step: "verifying",       label: "Verifying report claims" },
-  { step: "validity",        label: "Scoring validity" },
-  { step: "credibility",     label: "Aggregating credibility" },
-  { step: "recommendations", label: "Finding recommendations" },
-];
+import { useCreateRun } from "../api/queries";
 
 function PdfIcon({ size = 16 }: { size?: number }) {
   return (
@@ -33,139 +24,55 @@ function UploadIcon() {
   );
 }
 
-function stepIcon(status: ProgressEntry["status"] | "pending") {
-  if (status === "done")    return "✓";
-  if (status === "running") return "⟳";
-  if (status === "failed")  return "✗";
-  return "·";
-}
-
-function PipelineProgress({ entries }: { entries: ProgressEntry[] }) {
-  const byStep = Object.fromEntries(entries.map((e) => [e.step, e]));
-  return (
-    <ul className="pipeline-progress">
-      {PIPELINE_STEPS.map(({ step, label }) => {
-        const entry = byStep[step];
-        const status = entry?.status ?? "pending";
-        const displayLabel = entry?.label ?? label;
-        return (
-          <li
-            key={step}
-            className={`pipeline-progress__step pipeline-progress__step--${status}`}
-          >
-            <span className="pipeline-progress__icon">{stepIcon(status)}</span>
-            <span>{displayLabel}</span>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-// UploadPage lets the user add sources and the primary report before entering the dashboard.
+// A run is created in ONE request: the report + its sources are uploaded
+// together (POST /api/runs), then we navigate to the run's page to watch the
+// pipeline. Files are held in local state until submit — v2 has no separate
+// per-file upload endpoint.
 const UploadPage = () => {
-  const {
-    internalSources,
-    addInternalSource,
-    removeInternalSource,
-    reportDocument,
-    setReportDocument,
-    refreshUploads,
-    setSummaryData,
-    setJobStatus,
-    refreshJobStatus
-  } = useReportData();
   const navigate = useNavigate();
+  const createRun = useCreateRun();
 
   const sourceInputRef = useRef<HTMLInputElement>(null);
   const reportInputRef = useRef<HTMLInputElement>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [pipelineMessage, setPipelineMessage] = useState<string | null>(null);
-  const [progressEntries, setProgressEntries] = useState<ProgressEntry[]>([]);
+  const [sources, setSources] = useState<File[]>([]);
+  const [report, setReport] = useState<File | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const handleSourceAdd = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleSourceAdd = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
-      try {
-        await addInternalSource(file);
-      } catch (error) {
-        setSubmitError(error instanceof Error ? error.message : "Failed to upload source.");
-      }
+      setSources((prev) => [...prev, file]);
     }
     event.target.value = "";
   };
 
-  const handleReportAdd = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleReportAdd = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
-      try {
-        await setReportDocument(file);
-      } catch (error) {
-        setSubmitError(error instanceof Error ? error.message : "Failed to upload report.");
-      }
+      setReport(file);
     }
     event.target.value = "";
   };
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setSubmitError(null);
-
-    if (!internalSources.length) {
-      setSubmitError("Please add at least one source PDF to run the pipeline.");
+    setFormError(null);
+    if (!sources.length) {
+      setFormError("Add at least one source PDF.");
       return;
     }
-
-    if (!reportDocument?.id) {
-      setSubmitError("Please upload the report PDF before continuing.");
+    if (!report) {
+      setFormError("Upload the report PDF before continuing.");
       return;
     }
-
-    setIsSubmitting(true);
-    try {
-      const job = await runPipelineWithUploads(
-        internalSources.map((source) => source.id),
-        reportDocument.id
-      );
-      setPipelineMessage(`Pipeline status: ${job.status}`);
-      setJobStatus({ job_id: job.job_id, status: job.status });
-      await monitorJob(job.job_id);
-    } catch (error) {
-      setSubmitError(
-        error instanceof Error ? error.message : "Failed to run the pipeline. Please try again."
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
+    createRun.mutate(
+      { report, sources },
+      { onSuccess: (data) => navigate(`/runs/${data.run_id}`) }
+    );
   };
 
-  const monitorJob = async (jobId: string) => {
-    const POLL_INTERVAL = 2000;
-    let done = false;
-    while (!done) {
-      const job = await fetchJob(jobId);
-      setJobStatus({ job_id: job.job_id, status: job.status, updated_at: job.updated_at });
-      setPipelineMessage(`Pipeline status: ${job.status}`);
-      if (job.progress_json?.length) {
-        setProgressEntries(job.progress_json);
-      }
-      if (job.status === "DONE") {
-        localStorage.setItem("active_job_id", job.job_id);
-        localStorage.setItem("last_run_at", job.updated_at ?? new Date().toISOString());
-        setSummaryData(null);
-        await refreshUploads();
-        await refreshJobStatus(job.job_id);
-        done = true;
-        navigate("/dashboard");
-      } else if (job.status === "FAILED") {
-        setSubmitError(`Pipeline failed: ${job.error_message ?? "check server logs"}`);
-        done = true;
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
-      }
-    }
-  };
+  const submitting = createRun.isPending;
+  const error = formError ?? (createRun.error instanceof Error ? createRun.error.message : null);
 
   return (
     <div className="upload">
@@ -173,35 +80,31 @@ const UploadPage = () => {
         <div className="upload__header">
           <h1 className="upload__title">Upload Sources and Report</h1>
           <p className="upload__subtitle">Add your source documents and the report to verify.</p>
+          <button
+            type="button"
+            className="upload__replace"
+            onClick={() => navigate("/runs")}
+          >
+            View run history →
+          </button>
         </div>
         <div className="upload__columns">
-          {/* Sources panel */}
           <section className="upload__panel card">
             <header className="card__header">
               <h2>Sources</h2>
-              {internalSources.length > 0 && (
-                <span className="upload__count">{internalSources.length}</span>
-              )}
+              {sources.length > 0 && <span className="upload__count">{sources.length}</span>}
             </header>
-            {internalSources.length > 0 && (
+            {sources.length > 0 && (
               <div className="upload__list">
-                {internalSources.map((source) => (
-                  <div key={source.id} className="upload__item upload__item--with-actions">
+                {sources.map((source, index) => (
+                  <div key={`${source.name}-${index}`} className="upload__item upload__item--with-actions">
                     <span className="upload__item-icon"><PdfIcon size={15} /></span>
                     <span className="upload__item-name">{source.name}</span>
                     <button
                       type="button"
                       className="upload__remove"
                       aria-label={`Remove ${source.name}`}
-                      onClick={async () => {
-                        try {
-                          await removeInternalSource(source.id);
-                        } catch (error) {
-                          setSubmitError(
-                            error instanceof Error ? error.message : "Failed to remove source."
-                          );
-                        }
-                      }}
+                      onClick={() => setSources((prev) => prev.filter((_, i) => i !== index))}
                     >
                       ×
                     </button>
@@ -211,32 +114,25 @@ const UploadPage = () => {
             )}
             <button
               type="button"
-              className={`upload__dropzone${internalSources.length === 0 ? " upload__dropzone--fill" : ""}`}
+              className={`upload__dropzone${sources.length === 0 ? " upload__dropzone--fill" : ""}`}
               onClick={() => sourceInputRef.current?.click()}
             >
               <span className="upload__dropzone-icon"><UploadIcon /></span>
               <span className="upload__dropzone-text">Click to add a PDF source</span>
               <span className="upload__dropzone-hint">PDF files only</span>
             </button>
-            <input
-              ref={sourceInputRef}
-              type="file"
-              accept=".pdf"
-              hidden
-              onChange={handleSourceAdd}
-            />
+            <input ref={sourceInputRef} type="file" accept=".pdf" hidden onChange={handleSourceAdd} />
           </section>
 
-          {/* Report panel */}
           <section className="upload__panel card">
             <header className="card__header">
               <h2>Report</h2>
             </header>
             <div className="upload__list upload__list--single">
-              {reportDocument?.name ? (
+              {report ? (
                 <div className="upload__item upload__item--report">
                   <span className="upload__item-icon upload__item-icon--accent"><PdfIcon size={15} /></span>
-                  <span className="upload__item-name">{reportDocument.name}</span>
+                  <span className="upload__item-name">{report.name}</span>
                 </div>
               ) : (
                 <button
@@ -249,7 +145,7 @@ const UploadPage = () => {
                   <span className="upload__dropzone-hint">PDF files only</span>
                 </button>
               )}
-              {reportDocument?.name && (
+              {report && (
                 <button
                   type="button"
                   className="upload__replace"
@@ -258,24 +154,13 @@ const UploadPage = () => {
                   Replace Report
                 </button>
               )}
-              <input
-                ref={reportInputRef}
-                type="file"
-                accept=".pdf"
-                hidden
-                onChange={handleReportAdd}
-              />
+              <input ref={reportInputRef} type="file" accept=".pdf" hidden onChange={handleReportAdd} />
             </div>
 
-            {submitError ? <p className="upload__status upload__status--error">{submitError}</p> : null}
-            {isSubmitting && progressEntries.length === 0 ? (
-              <p className="upload__status">Starting pipeline…</p>
-            ) : null}
-            {isSubmitting && progressEntries.length > 0 ? (
-              <PipelineProgress entries={progressEntries} />
-            ) : null}
+            {error ? <p className="upload__status upload__status--error">{error}</p> : null}
+            {submitting ? <p className="upload__status">Creating run…</p> : null}
 
-            <button type="submit" className="upload__submit" disabled={isSubmitting}>
+            <button type="submit" className="upload__submit" disabled={submitting}>
               ➤
             </button>
           </section>
