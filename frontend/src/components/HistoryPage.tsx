@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useRuns } from "../api/queries";
 import type { RunStatus } from "../api/types";
@@ -30,6 +31,12 @@ function formatTimestamp(value: string): string {
 const HistoryPage = () => {
   const navigate = useNavigate();
   const { data: runs, isLoading, error } = useRuns();
+  // Pick two runs to diff — keep the two most recent selections.
+  const [selected, setSelected] = useState<string[]>([]);
+  const toggleCompare = (id: string) =>
+    setSelected((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id].slice(-2)
+    );
 
   return (
     <div className="dashboard">
@@ -39,6 +46,15 @@ const HistoryPage = () => {
           <p className="dashboard__subtitle">Every fact-check run, newest first.</p>
         </div>
         <div className="dashboard__meta">
+          {selected.length === 2 ? (
+            <button
+              type="button"
+              className="dashboard__refresh-button"
+              onClick={() => navigate(`/compare?a=${selected[0]}&b=${selected[1]}`)}
+            >
+              Compare selected →
+            </button>
+          ) : null}
           <button type="button" className="dashboard__refresh-button" onClick={() => navigate("/")}>
             + New run
           </button>
@@ -57,16 +73,23 @@ const HistoryPage = () => {
           ) : null}
           <div className="upload__list">
             {runs?.map((run) => (
-              <Link
-                key={run.id}
-                to={`/runs/${run.id}`}
-                className="upload__item upload__item--with-actions"
-                style={{ textDecoration: "none" }}
-              >
-                <span className="upload__item-name">{formatTimestamp(run.created_at)}</span>
-                <span className="source-pill__badge">{run.id.slice(0, 8)}</span>
-                <span className={STATUS_CLASS[run.status]}>{STATUS_LABEL[run.status]}</span>
-              </Link>
+              <div key={run.id} className="upload__item upload__item--with-actions">
+                <Link
+                  to={`/runs/${run.id}`}
+                  style={{ display: "flex", gap: 8, alignItems: "center", flex: 1, textDecoration: "none" }}
+                >
+                  <span className="upload__item-name">{formatTimestamp(run.created_at)}</span>
+                  <span className="source-pill__badge">{run.id.slice(0, 8)}</span>
+                  <span className={STATUS_CLASS[run.status]}>{STATUS_LABEL[run.status]}</span>
+                </Link>
+                <button
+                  type="button"
+                  className={selected.includes(run.id) ? "pill pill--outlined" : "pill pill--ghost"}
+                  onClick={() => toggleCompare(run.id)}
+                >
+                  {selected.includes(run.id) ? "✓ compare" : "compare"}
+                </button>
+              </div>
             ))}
           </div>
         </section>
