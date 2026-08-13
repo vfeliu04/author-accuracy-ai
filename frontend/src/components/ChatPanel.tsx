@@ -1,13 +1,15 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMode } from "../api/client";
+import type { ChatMode } from "../api/types";
 
 export type ChatMessage = {
   id: number;
-  author: string;
+  author: "user" | "assistant";
   text: string;
 };
+
+const MODES: ChatMode[] = ["evidence", "guidance", "creative"];
 
 function AiAvatar() {
   return <div className="chat__avatar chat__avatar--ai" aria-hidden="true">A</div>;
@@ -18,30 +20,21 @@ function UserAvatar() {
 
 type ChatPanelProps = {
   messages: ChatMessage[];
-  onSendMessage: (text: string) => Promise<void>;
+  onSendMessage: (text: string) => void;
   isSending?: boolean;
   mode: ChatMode;
-  modeLocked: boolean;
   onModeChange: (mode: ChatMode) => void;
-  onModeReset: () => void;
-  modeSuggestion?: ChatMode | null;
-  onSuggestionAccept?: (mode: ChatMode) => void;
-  onSuggestionDismiss?: () => void;
   suggestions?: string[];
 };
 
-// ChatPanel mimics the conversational area for discussing improvements to the report.
+// The report-scoped chat. Conversation history is held by the parent and sent
+// with each request; the mode just swaps a system instruction server-side.
 const ChatPanel = ({
   messages,
   onSendMessage,
   isSending = false,
   mode,
-  modeLocked,
   onModeChange,
-  onModeReset,
-  modeSuggestion,
-  onSuggestionAccept,
-  onSuggestionDismiss,
   suggestions
 }: ChatPanelProps) => {
   const [draft, setDraft] = useState("");
@@ -61,9 +54,7 @@ const ChatPanel = ({
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
-      if (!modeMenuOpen) {
-        return;
-      }
+      if (!modeMenuOpen) return;
       if (menuRef.current && event.target instanceof Node && !menuRef.current.contains(event.target)) {
         setModeMenuOpen(false);
       }
@@ -86,20 +77,12 @@ const ChatPanel = ({
     el.style.height = `${el.scrollHeight}px`;
   }, [draft]);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-
     const trimmed = draft.trim();
-    if (!trimmed) {
-      return;
-    }
-
+    if (!trimmed || isSending) return;
     setDraft("");
-    try {
-      await onSendMessage(trimmed);
-    } catch (error) {
-      // swallow errors since parent already handles UI feedback
-    }
+    onSendMessage(trimmed);
   };
 
   return (
@@ -117,7 +100,7 @@ const ChatPanel = ({
       </header>
       <div className="chat__history" ref={historyRef}>
         {messages.map((message) => {
-          const isUser = message.author.toLowerCase() === "user";
+          const isUser = message.author === "user";
           return (
             <div
               key={message.id}
@@ -125,9 +108,7 @@ const ChatPanel = ({
             >
               {!isUser && <AiAvatar />}
               <div className={`chat__bubble ${isUser ? "chat__bubble--user" : "chat__bubble--ai"}`}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {message.text}
-                </ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
               </div>
               {isUser && <UserAvatar />}
             </div>
@@ -144,88 +125,60 @@ const ChatPanel = ({
       {messages.length <= 1 && !isSending && (
         <div className="chat__suggestions">
           {(suggestions ?? []).map((s) => (
-            <button
-              key={s}
-              type="button"
-              className="chat__suggestion-chip"
-              onClick={() => { setDraft(s); }}
-            >
+            <button key={s} type="button" className="chat__suggestion-chip" onClick={() => setDraft(s)}>
               {s}
             </button>
           ))}
         </div>
       )}
       <form className="chat__composer-inner" onSubmit={handleSubmit}>
-          <textarea
-            ref={textareaRef}
-            className="chat__input"
-            placeholder="Ask about your report..."
-            value={draft}
-            rows={1}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-            disabled={isSending}
-          />
-          <div className="chat__mode-trigger" ref={menuRef}>
-            <button
-              type="button"
-              className="chat__mode-button"
-              onClick={() => setModeMenuOpen((open) => !open)}
-              aria-label="Select chat mode"
-            >
-              {modeLocked ? formatMode(mode) : `Auto · ${formatMode(mode)}`}
-              <span className="chat__mode-caret">▾</span>
-            </button>
-            {modeMenuOpen ? (
-              <div className="chat__mode-menu">
+        <textarea
+          ref={textareaRef}
+          className="chat__input"
+          placeholder="Ask about your report..."
+          value={draft}
+          rows={1}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          disabled={isSending}
+        />
+        <div className="chat__mode-trigger" ref={menuRef}>
+          <button
+            type="button"
+            className="chat__mode-button"
+            onClick={() => setModeMenuOpen((open) => !open)}
+            aria-label="Select chat mode"
+          >
+            {formatMode(mode)}
+            <span className="chat__mode-caret">▾</span>
+          </button>
+          {modeMenuOpen ? (
+            <div className="chat__mode-menu">
+              {MODES.map((option) => (
                 <button
+                  key={option}
                   type="button"
+                  className={option === mode ? "chat__mode-option--active" : undefined}
                   onClick={() => {
-                    onModeReset();
+                    onModeChange(option);
                     setModeMenuOpen(false);
                   }}
                 >
-                  Auto (let assistant choose)
+                  {formatMode(option)}
                 </button>
-                <hr />
-                {(["evidence", "guidance", "creative"] as ChatMode[]).map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    className={option === mode ? "chat__mode-option--active" : undefined}
-                    onClick={() => {
-                      onModeChange(option);
-                      setModeMenuOpen(false);
-                    }}
-                  >
-                    {formatMode(option)}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <button className="chat__send-button" type="submit" aria-label="Send" disabled={isSending}>
-            ➤
-          </button>
-      </form>
-      {modeSuggestion ? (
-        <div className="chat__mode-suggestion">
-          <span>{`Try ${modeSuggestion} mode for better results.`}</span>
-          <div className="chat__mode-suggestion-actions">
-            <button type="button" onClick={() => onSuggestionAccept?.(modeSuggestion!)}>
-              Switch
-            </button>
-            <button type="button" onClick={onSuggestionDismiss}>
-              Dismiss
-            </button>
-          </div>
+              ))}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+        <button className="chat__send-button" type="submit" aria-label="Send" disabled={isSending}>
+          ➤
+        </button>
+      </form>
     </article>
   );
 };
