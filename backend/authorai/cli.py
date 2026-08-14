@@ -126,14 +126,14 @@ def cmd_extract(args: argparse.Namespace) -> None:
         document = reports[0]
 
     sections = json.loads(document["metadata"]).get("sections", [])
-    if not sections:
-        raise SystemExit(
-            "Document has no stored sections (ingested before Phase 3?) — re-ingest it"
-        )
-
     # Tables live in their own chunks, never in metadata sections — pass them in
     # explicitly or every tabulated figure in the report goes unchecked.
     tables = dbmod.list_chunks_by_kind(conn, document["id"], "table")
+    if not sections and not tables:
+        raise SystemExit(
+            "Document has no stored sections or table chunks (ingested before Phase 3?)"
+            " — re-ingest it"
+        )
 
     llm = AnthropicClient(settings.anthropic_api_key)
     claims = extract_claims(llm, sections, settings.extraction_model, tables=tables)

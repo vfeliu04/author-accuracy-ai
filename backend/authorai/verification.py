@@ -150,7 +150,6 @@ _QUOTE_TRANSLATION = str.maketrans(
         "”": '"',
         "–": "-",
         "—": "-",
-        " ": " ",
     }
 )
 
