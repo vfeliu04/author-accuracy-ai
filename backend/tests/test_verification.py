@@ -205,6 +205,93 @@ def _items():
     ]
 
 
+def _stub_batch_client_with_create(results, *, existing=None, request_count=2):
+    """Like _stub_batch_client, plus a create() counter and a retrievable
+    pre-existing batch for the resume path."""
+    from types import SimpleNamespace
+
+    counts = SimpleNamespace(
+        processing=0, succeeded=request_count, errored=0, canceled=0, expired=0
+    )
+    created: list = []
+
+    def create(requests):
+        created.append(len(requests))
+        return SimpleNamespace(id="batch-new")
+
+    def retrieve(batch_id):
+        if existing is not None and batch_id == existing:
+            return SimpleNamespace(id=batch_id, processing_status="ended", request_counts=counts)
+        if batch_id == "batch-new":
+            return SimpleNamespace(id=batch_id, processing_status="ended", request_counts=counts)
+        raise ValueError(f"no such batch {batch_id}")
+
+    batches = SimpleNamespace(
+        create=create, retrieve=retrieve, results=lambda batch_id: iter(results)
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(batches=batches))
+    return client, created
+
+
+def test_batch_resume_polls_stored_batch_without_creating(monkeypatch):
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    stub, created = _stub_batch_client_with_create(
+        [
+            _succeeded("ok", _verdict().model_dump_json()),
+            _succeeded("bad", _verdict().model_dump_json()),
+        ],
+        existing="batch-old",
+    )
+    client._client = stub
+    results = client.parse_batch(model="m", items=_items(), resume_batch_id="batch-old")
+    assert set(results) == {"ok", "bad"}
+    assert created == []  # the stored batch was reused — nothing was paid twice
+
+
+def test_batch_resume_falls_back_when_stored_batch_unusable(monkeypatch):
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    stub, created = _stub_batch_client_with_create(
+        [
+            _succeeded("ok", _verdict().model_dump_json()),
+            _succeeded("bad", _verdict().model_dump_json()),
+        ],
+        existing=None,  # the stored id is not retrievable
+    )
+    client._client = stub
+    remembered: list[str] = []
+    results = client.parse_batch(
+        model="m",
+        items=_items(),
+        resume_batch_id="batch-gone",
+        on_batch_created=remembered.append,
+    )
+    assert set(results) == {"ok", "bad"}
+    assert created == [2]  # fell back to a fresh submission
+    assert remembered == ["batch-new"]  # and persisted the new id
+
+
+def test_batch_resume_refuses_foreign_custom_ids(monkeypatch):
+    import pytest
+
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    stub, _ = _stub_batch_client_with_create(
+        [
+            _succeeded("someone-elses-claim", _verdict().model_dump_json()),
+            _succeeded("ok", _verdict().model_dump_json()),
+        ],
+        existing="batch-old",
+    )
+    client._client = stub
+    with pytest.raises(RuntimeError, match="unknown custom_id"):
+        client.parse_batch(model="m", items=_items(), resume_batch_id="batch-old")
+
+
 def test_batch_failed_item_is_retried_sync_once(monkeypatch):
     from authorai.llm import AnthropicClient
 

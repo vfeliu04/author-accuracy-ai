@@ -718,6 +718,28 @@ def get_run_job(conn: sqlite3.Connection, run_id: str) -> dict | None:
     return _job_row(row) if row else None
 
 
+def update_job_payload(conn: sqlite3.Connection, job_id: str, updates: dict) -> None:
+    """Merge keys into a job's payload JSON (a value of None deletes the key).
+
+    Read-modify-write is safe here: the single worker thread is the only
+    payload writer, and the API only ever reads it.
+    """
+    with conn:
+        row = conn.execute("SELECT payload FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown job {job_id!r}")
+        payload = json.loads(row["payload"])
+        for key, value in updates.items():
+            if value is None:
+                payload.pop(key, None)
+            else:
+                payload[key] = value
+        conn.execute(
+            "UPDATE jobs SET payload = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(payload), now_iso(), job_id),
+        )
+
+
 def requeue_job(conn: sqlite3.Connection, job_id: str, run_id: str) -> None:
     """Send a FAILED job back to the queue, with its run, in ONE transaction.
 

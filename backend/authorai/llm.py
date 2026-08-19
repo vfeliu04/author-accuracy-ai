@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar
@@ -96,6 +97,8 @@ class LLM(Protocol):
         model: str,
         items: list[ParseItem],
         max_tokens: int = BATCH_MAX_TOKENS,
+        resume_batch_id: "str | None" = None,
+        on_batch_created: "Callable[[str], None] | None" = None,
     ) -> dict[str, BaseModel]: ...
 
     def describe_image(
@@ -206,12 +209,48 @@ class AnthropicClient:
             )
         return response.parsed_output
 
+    def _resumable_batch(self, batch_id: str, expected_count: int) -> str | None:
+        """The stored batch id, iff that batch is still usable for these items.
+
+        Anything wrong — not retrievable, canceled/canceling, wrong request
+        count (the claim set changed since it was submitted) — logs loudly and
+        returns None so the caller submits a fresh batch instead.
+        """
+        try:
+            batch = self._client.messages.batches.retrieve(batch_id)
+        except Exception as exc:  # noqa: BLE001 - any retrieval failure means "start fresh"
+            logger.warning("stored batch %s not retrievable (%s) — submitting anew", batch_id, exc)
+            return None
+        if batch.processing_status not in ("in_progress", "ended"):
+            logger.warning(
+                "stored batch %s is %r — submitting anew", batch_id, batch.processing_status
+            )
+            return None
+        counts = batch.request_counts
+        total = (
+            counts.processing + counts.succeeded + counts.errored + counts.canceled + counts.expired
+        )
+        if total != expected_count:
+            logger.warning(
+                "stored batch %s holds %d requests but %d are needed — submitting anew",
+                batch_id,
+                total,
+                expected_count,
+            )
+            return None
+        logger.info(
+            "resuming batch %s (%s) instead of resubmitting", batch_id, batch.processing_status
+        )
+        return batch_id
+
     def parse_batch(
         self,
         *,
         model: str,
         items: list[ParseItem],
         max_tokens: int = BATCH_MAX_TOKENS,
+        resume_batch_id: str | None = None,
+        on_batch_created: Callable[[str], None] | None = None,
     ) -> dict[str, BaseModel]:
         """Run all items through the Batch API; returns results keyed by custom_id.
 
@@ -219,26 +258,35 @@ class AnthropicClient:
         are transient: corrupted verdict literals, max_tokens truncation), then
         the call is ALL-OR-NOTHING: items that fail twice raise after the batch
         ends, listing every failure — storing partial results would silently
-        change the denominator of any score computed on them. The batch id is
-        logged the moment it exists so a timeout or interrupt never orphans a
-        paid batch.
+        change the denominator of any score computed on them.
+
+        A batch is paid work, so it is never orphaned: `on_batch_created` fires
+        with the id the moment it exists (callers persist it), and passing that
+        id back as `resume_batch_id` polls the SAME batch instead of paying for
+        a duplicate — a server-side queue delay that outlives our timeout costs
+        a retry, not a second batch.
         """
-        requests = [build_batch_request(item, model, max_tokens) for item in items]
-        batch = self._client.messages.batches.create(requests=requests)
-        logger.info(
-            "batch %s created (%d items) — reattach by id if interrupted", batch.id, len(items)
-        )
+        batch_id = self._resumable_batch(resume_batch_id, len(items)) if resume_batch_id else None
+        if batch_id is None:
+            requests = [build_batch_request(item, model, max_tokens) for item in items]
+            batch = self._client.messages.batches.create(requests=requests)
+            batch_id = batch.id
+            logger.info(
+                "batch %s created (%d items) — reattach by id if interrupted", batch_id, len(items)
+            )
+            if on_batch_created is not None:
+                on_batch_created(batch_id)
 
         deadline = time.monotonic() + BATCH_TIMEOUT_SECONDS
         while True:
-            batch = self._client.messages.batches.retrieve(batch.id)
+            batch = self._client.messages.batches.retrieve(batch_id)
             if batch.processing_status == "ended":
                 break
             if time.monotonic() > deadline:
                 raise TimeoutError(
-                    f"Batch {batch.id} still {batch.processing_status!r} after "
+                    f"Batch {batch_id} still {batch.processing_status!r} after "
                     f"{BATCH_TIMEOUT_SECONDS}s — it is still queued server-side; "
-                    "re-poll or cancel it"
+                    "its id is retained, so a retry resumes it instead of paying twice"
                 )
             time.sleep(BATCH_POLL_SECONDS)
 
@@ -247,8 +295,16 @@ class AnthropicClient:
         # Keyed by custom_id so nothing ever parses ids back out of message
         # strings (and a custom_id that prefixes another can't mask a failure).
         failures: dict[str, str] = {}
-        for result in self._client.messages.batches.results(batch.id):
+        for result in self._client.messages.batches.results(batch_id):
             custom_id = result.custom_id
+            if custom_id not in output_types:
+                # Same request count, different ids: the stored batch belongs
+                # to a different claim set. Refuse loudly rather than pairing
+                # verdicts with the wrong claims.
+                raise RuntimeError(
+                    f"Batch {batch_id} returned unknown custom_id {custom_id!r} — the "
+                    "stored batch does not match the current claims; rerun verify"
+                )
             if result.result.type != "succeeded":
                 failures[custom_id] = result.result.type
                 continue
@@ -294,7 +350,7 @@ class AnthropicClient:
                     still_failing.append(f"{custom_id}: {reason}; retry: {exc}")
             if still_failing:
                 raise RuntimeError(
-                    f"Batch {batch.id}: {len(still_failing)}/{len(items)} items failed even "
+                    f"Batch {batch_id}: {len(still_failing)}/{len(items)} items failed even "
                     "after a sync retry — storing nothing (rerun is safe, replace "
                     "semantics): " + "; ".join(still_failing)
                 )

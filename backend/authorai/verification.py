@@ -12,6 +12,7 @@ in `raw_verdict` so the downgrade rate stays measurable.
 
 import re
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -280,8 +281,15 @@ def verify_run(
     model: str,
     k: int = EVIDENCE_K,
     batch: bool = True,
+    resume_batch_id: str | None = None,
+    on_batch_created: "Callable[[str], None] | None" = None,
 ) -> dict:
-    """Verify every claim in a run; stores verdicts (replacing) and returns a summary."""
+    """Verify every claim in a run; stores verdicts (replacing) and returns a summary.
+
+    `resume_batch_id`/`on_batch_created` thread through to parse_batch so a
+    caller (the jobs worker) can persist a submitted batch's id and resume it
+    on retry instead of paying for a duplicate.
+    """
     if k < 1:
         raise ValueError(
             f"k must be >= 1, got {k} — zero evidence would silently "
@@ -332,7 +340,12 @@ def verify_run(
 
     if items:
         if batch:
-            results = llm.parse_batch(model=model, items=items)
+            results = llm.parse_batch(
+                model=model,
+                items=items,
+                resume_batch_id=resume_batch_id,
+                on_batch_created=on_batch_created,
+            )
         else:
             # Deliberate divergence: sync is the debug path and stays at the
             # non-streaming ceiling (PARSE_MAX_TOKENS); a thinking-heavy claim

@@ -160,6 +160,16 @@ def step_extract(context: PipelineContext, run_id: str, payload: dict) -> str:
 
 
 def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
+    # A verify batch is paid work: its id is persisted on the job the moment
+    # it is submitted, so a retry after a timeout resumes the SAME batch
+    # instead of paying for a duplicate (the id survives in the payload; a
+    # stale or mismatched batch falls back to a fresh submission loudly).
+    job = dbmod.get_run_job(context.conn, run_id)
+
+    def remember_batch(batch_id: str) -> None:
+        if job is not None:
+            dbmod.update_job_payload(context.conn, job["id"], {"verify_batch_id": batch_id})
+
     summary = verify_run(
         context.conn,
         context.embedder,
@@ -167,6 +177,8 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
         run_id,
         model=context.settings.verdict_model,
         batch=True,
+        resume_batch_id=payload.get("verify_batch_id"),
+        on_batch_created=remember_batch,
     )
     counts = summary["counts"]
     return (

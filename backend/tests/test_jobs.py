@@ -234,6 +234,46 @@ def test_requeued_failed_job_resumes_without_repeating_done_steps(conn):
     assert record == ["ingest", "extract", "verify", "score"]  # no repeats
 
 
+def test_update_job_payload_merges_and_deletes(conn):
+    run_id, job_id = _job(conn, payload={"report_upload_id": "r", "source_upload_ids": []})
+    dbmod.update_job_payload(conn, job_id, {"verify_batch_id": "msgbatch_1"})
+    assert dbmod.get_job(conn, job_id)["payload"]["verify_batch_id"] == "msgbatch_1"
+    # Existing keys survive a merge; None deletes.
+    assert dbmod.get_job(conn, job_id)["payload"]["report_upload_id"] == "r"
+    dbmod.update_job_payload(conn, job_id, {"verify_batch_id": None})
+    assert "verify_batch_id" not in dbmod.get_job(conn, job_id)["payload"]
+
+
+def test_step_verify_resumes_stored_batch_and_persists_new_ids(conn, monkeypatch):
+    """The don't-pay-twice contract: a stored batch id is passed to verify_run
+    as resume_batch_id, and a newly created batch's id is persisted on the job
+    the moment the callback fires."""
+    from authorai import jobs as jobsmod
+    from authorai.jobs import step_verify
+
+    run_id, job_id = _job(conn)
+    captured: dict = {}
+
+    def fake_verify_run(conn_, embedder, llm, run_id_, **kwargs):
+        captured["resume_batch_id"] = kwargs["resume_batch_id"]
+        kwargs["on_batch_created"]("msgbatch_new")
+        return {
+            "counts": {"SUPPORTED": 1, "CONTRADICTED": 0, "UNVERIFIABLE": 0},
+            "downgraded": 0,
+            "year_flagged": 0,
+            "no_evidence": 0,
+            "total": 1,
+        }
+
+    monkeypatch.setattr(jobsmod, "verify_run", fake_verify_run)
+    dbmod.update_job_payload(conn, job_id, {"verify_batch_id": "msgbatch_old"})
+    payload = dbmod.get_job(conn, job_id)["payload"]
+    step_verify(PipelineContext(conn, SETTINGS), run_id, payload)
+
+    assert captured["resume_batch_id"] == "msgbatch_old"
+    assert dbmod.get_job(conn, job_id)["payload"]["verify_batch_id"] == "msgbatch_new"
+
+
 def test_requeue_refuses_non_failed_jobs(conn):
     run_id, job_id = _job(conn)  # QUEUED
     import pytest
