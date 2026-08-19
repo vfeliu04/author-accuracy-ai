@@ -54,6 +54,12 @@ export function getRun(runId: string): Promise<RunDetail> {
   return apiJson<RunDetail>(`/api/runs/${runId}`);
 }
 
+// Requeue a FAILED run's job; the worker resumes from the first incomplete
+// step, keeping documents that were already ingested.
+export function retryRun(runId: string): Promise<{ run_id: string; job_id: string; status: string }> {
+  return apiJson(`/api/runs/${runId}/retry`, { method: "POST" });
+}
+
 export function getReport(runId: string): Promise<Report> {
   return apiJson<Report>(`/api/runs/${runId}/report`);
 }

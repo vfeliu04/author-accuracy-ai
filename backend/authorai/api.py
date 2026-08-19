@@ -178,6 +178,25 @@ def get_run(run_id: str, conn: Conn) -> dict:
     return {"run": run, "job": dbmod.get_run_job(conn, run_id)}
 
 
+@router.post("/runs/{run_id}/retry", status_code=202)
+def retry_run(run_id: str, conn: Conn) -> dict:
+    """Requeue a FAILED run's job; the worker resumes from the first
+    incomplete step, keeping already-ingested documents (a transient failure
+    like a dropped connection should not cost the whole ingest again)."""
+    if dbmod.get_run(conn, run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown run {run_id!r}")
+    job = dbmod.get_run_job(conn, run_id)
+    if job is None:
+        raise HTTPException(status_code=409, detail=f"Run {run_id!r} has no job to retry")
+    if job["status"] != "FAILED":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run {run_id!r} job is {job['status']} — only FAILED runs can be retried",
+        )
+    dbmod.requeue_job(conn, job["id"], run_id)
+    return {"run_id": run_id, "job_id": job["id"], "status": "QUEUED"}
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str, conn: Conn) -> dict:
     job = dbmod.get_job(conn, job_id)

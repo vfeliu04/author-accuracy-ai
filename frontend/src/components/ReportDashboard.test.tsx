@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Report, RunDetail } from "../api/types";
@@ -73,6 +73,21 @@ describe("ReportDashboard", () => {
     renderAt("r");
     await waitFor(() => expect(screen.getByText("Extracting claims")).toBeInTheDocument());
     expect(screen.getByText("Running the pipeline")).toBeInTheDocument();
+  });
+
+  it("offers a retry on a failed run and calls the endpoint", async () => {
+    vi.spyOn(v2, "getRun").mockResolvedValue({
+      run: { id: "r", status: "FAILED", created_at: "t", error: "Connection error." },
+      job: null
+    });
+    vi.spyOn(v2, "getReport").mockResolvedValue({ ...doneReport, status: "FAILED", scores: null });
+    const retry = vi
+      .spyOn(v2, "retryRun")
+      .mockResolvedValue({ run_id: "r", job_id: "j", status: "QUEUED" });
+    renderAt("r");
+    await waitFor(() => expect(screen.getByText(/This run failed/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Retry run" }));
+    await waitFor(() => expect(retry).toHaveBeenCalledWith("r"));
   });
 
   it("shows claims, sources, and rating when the run is done", async () => {

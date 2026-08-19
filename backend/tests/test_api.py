@@ -247,6 +247,28 @@ def test_unknown_ids_404(client):
     assert client.get("/api/runs/nope", headers=AUTH).status_code == 404
     assert client.get("/api/jobs/nope", headers=AUTH).status_code == 404
     assert client.get("/api/runs/nope/report", headers=AUTH).status_code == 404
+    assert client.post("/api/runs/nope/retry", headers=AUTH).status_code == 404
+
+
+def test_retry_requeues_only_failed_runs(client):
+    conn = dbmod.connect(client.app.state.settings.db_path, DIM)
+    run_id = dbmod.create_run(conn)
+    job_id = dbmod.create_job(conn, run_id, {"report_upload_id": "r", "source_upload_ids": []})
+
+    # QUEUED (not FAILED) — refused, nothing double-runs.
+    assert client.post(f"/api/runs/{run_id}/retry", headers=AUTH).status_code == 409
+
+    dbmod.finish_job_and_run(conn, job_id, run_id, "FAILED", error="Connection error.")
+    response = client.post(f"/api/runs/{run_id}/retry", headers=AUTH)
+    assert response.status_code == 202
+    assert response.json() == {"run_id": run_id, "job_id": job_id, "status": "QUEUED"}
+    assert dbmod.get_job(conn, job_id)["status"] == "QUEUED"
+    assert dbmod.get_run(conn, run_id)["status"] == "RUNNING"
+    assert dbmod.get_run(conn, run_id)["error"] is None
+
+    # Already requeued — a second retry is refused too.
+    assert client.post(f"/api/runs/{run_id}/retry", headers=AUTH).status_code == 409
+    conn.close()
 
 
 def _seed_scored_run(settings) -> str:

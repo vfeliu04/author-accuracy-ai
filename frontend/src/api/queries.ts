@@ -10,7 +10,8 @@ import {
   getReport,
   getRun,
   listRuns,
-  postChat
+  postChat,
+  retryRun
 } from "./v2";
 
 const POLL_MS = 1500;
@@ -66,6 +67,20 @@ export function useChat(runId: string) {
   return useMutation({
     mutationFn: (body: { question: string; history: ChatTurn[]; mode: ChatMode }) =>
       postChat(runId, body)
+  });
+}
+
+// Retrying flips the run back to RUNNING server-side; invalidating the run
+// query restarts the polling that stopped on the terminal FAILED status.
+export function useRetryRun(runId: string | undefined) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => retryRun(runId as string),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.run(runId ?? "") });
+      client.invalidateQueries({ queryKey: queryKeys.report(runId ?? "") });
+      client.invalidateQueries({ queryKey: queryKeys.runs });
+    }
   });
 }
 

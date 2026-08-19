@@ -718,6 +718,27 @@ def get_run_job(conn: sqlite3.Connection, run_id: str) -> dict | None:
     return _job_row(row) if row else None
 
 
+def requeue_job(conn: sqlite3.Connection, job_id: str, run_id: str) -> None:
+    """Send a FAILED job back to the queue, with its run, in ONE transaction.
+
+    Only FAILED jobs are eligible — requeuing a RUNNING job would double-run
+    it, and DONE is not a failure to retry (the guard is the WHERE clause, so
+    a concurrent state change loses atomically). Completed step progress is
+    kept on purpose: run_job resumes from the first incomplete step, and the
+    ingest step reconciles per document, so already-embedded documents are
+    never paid for twice.
+    """
+    with conn:
+        cursor = conn.execute(
+            "UPDATE jobs SET status = 'QUEUED', error = NULL, updated_at = ?"
+            " WHERE id = ? AND status = 'FAILED'",
+            (now_iso(), job_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"Job {job_id!r} is not FAILED — nothing to retry")
+        conn.execute("UPDATE runs SET status = 'RUNNING', error = NULL WHERE id = ?", (run_id,))
+
+
 def claim_next_job(conn: sqlite3.Connection) -> dict | None:
     """Atomically claim the oldest QUEUED job (compare-and-set via one UPDATE)."""
     with conn:

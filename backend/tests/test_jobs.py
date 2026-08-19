@@ -209,6 +209,39 @@ def test_zero_claim_extraction_fails_the_extract_step(conn, monkeypatch):
         step_extract(PipelineContext(conn, SETTINGS), run_id, {})
 
 
+def test_requeued_failed_job_resumes_without_repeating_done_steps(conn):
+    """The retry path end to end: fail at verify, requeue, finish — ingest and
+    extract must NOT run again (a transient failure must not cost the whole
+    ingest twice), and both rows must end DONE."""
+    run_id, job_id = _job(conn)
+    record: list[str] = []
+    job = dbmod.claim_next_job(conn)
+    run_job(conn, SETTINGS, job, steps=_fake_steps(record, fail_at="verify"))
+    assert dbmod.get_job(conn, job_id)["status"] == "FAILED"
+    assert dbmod.get_run(conn, run_id)["status"] == "FAILED"
+    assert record == ["ingest", "extract"]
+
+    dbmod.requeue_job(conn, job_id, run_id)
+    requeued = dbmod.get_job(conn, job_id)
+    assert requeued["status"] == "QUEUED"
+    assert requeued["error"] is None
+    assert dbmod.get_run(conn, run_id)["status"] == "RUNNING"
+
+    job = dbmod.claim_next_job(conn)
+    run_job(conn, SETTINGS, job, steps=_fake_steps(record))
+    assert dbmod.get_job(conn, job_id)["status"] == "DONE"
+    assert dbmod.get_run(conn, run_id)["status"] == "DONE"
+    assert record == ["ingest", "extract", "verify", "score"]  # no repeats
+
+
+def test_requeue_refuses_non_failed_jobs(conn):
+    run_id, job_id = _job(conn)  # QUEUED
+    import pytest
+
+    with pytest.raises(ValueError, match="not FAILED"):
+        dbmod.requeue_job(conn, job_id, run_id)
+
+
 def test_failure_handler_failing_does_not_propagate(conn):
     """If even recording the failure fails, run_job must swallow it (the
     worker thread survives) and leave the job RUNNING for startup recovery."""

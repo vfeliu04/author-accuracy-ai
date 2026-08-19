@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import ChatPanel, { type ChatMessage } from "./ChatPanel";
 import RatingPanel from "./RatingPanel";
-import { useChat, useReport, useRun } from "../api/queries";
+import { useChat, useReport, useRetryRun, useRun } from "../api/queries";
 import type { ChatMode, Claim, Verdict } from "../api/types";
 
 const PIPELINE_STEPS = ["ingest", "extract", "verify", "score"];
@@ -83,6 +83,7 @@ const ReportDashboard = () => {
   const runQuery = useRun(runId);
   const reportQuery = useReport(runId);
   const chat = useChat(runId ?? "");
+  const retry = useRetryRun(runId);
 
   const [mode, setMode] = useState<ChatMode>("evidence");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -177,6 +178,25 @@ const ReportDashboard = () => {
             <p className="dashboard__status dashboard__status--error">
               This run failed: {run?.error ?? "check the server logs"}
             </p>
+            <div>
+              <button
+                type="button"
+                className="dashboard__refresh-button"
+                disabled={retry.isPending}
+                onClick={() => retry.mutate()}
+              >
+                {retry.isPending ? "Retrying…" : "Retry run"}
+              </button>
+              <p style={{ margin: "0.4rem 0 0", fontSize: "0.85em", opacity: 0.75 }}>
+                Picks up from the first incomplete step — documents that were already
+                ingested are kept.
+              </p>
+              {retry.error ? (
+                <p className="dashboard__status dashboard__status--error">
+                  Retry failed: {retry.error instanceof Error ? retry.error.message : "unknown error"}
+                </p>
+              ) : null}
+            </div>
           </section>
         </main>
       ) : null}
