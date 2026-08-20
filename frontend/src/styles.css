@@ -1686,10 +1686,12 @@ h2 {
   line-height: 1;
 }
 
+/* auto-fit grid: 4-across when the column is wide, 2x2 when narrow — the
+   fixed-width flex row used to push the fourth ring past the card edge. */
 .rating__cards {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   gap: 0.5rem;
-  justify-content: space-between;
   padding: 0.5rem 0;
 }
 
@@ -2047,9 +2049,62 @@ h2 {
 }
 
 @media (max-width: 780px) {
-  .dashboard__content {
-    grid-template-columns: 1fr;
+  /* The page scrolls as one column: the root's 100vh lock plus the
+     content's flex:1 gave the card stack a fixed height, so the cards
+     compressed and their contents painted over each other. */
+  .dashboard {
     height: auto;
+    min-height: 100vh;
+  }
+
+  /* Flex column instead of grid: no spans, no stretch, no track math —
+     every card stacks at its natural height. */
+  .dashboard__content {
+    display: flex;
+    flex-direction: column;
+    flex: initial;
+    height: auto;
+    overflow: visible;
+    padding: 1.25rem;
+  }
+
+  .dashboard__column,
+  .dashboard__column--center,
+  .dashboard__column--stacked-left,
+  .dashboard__column--stacked-right {
+    height: auto;
+    overflow: visible;
+  }
+
+  .dashboard__column--stacked-left .card,
+  .dashboard__column--stacked-right .card,
+  .card--chat {
+    flex: initial;
+    height: auto;
+    max-height: none;
+  }
+
+  .card--chat {
+    min-height: 420px;
+  }
+
+  /* Long lists (46 claims) scroll inside their card instead of making the
+     page arbitrarily tall. */
+  .dashboard__column--stacked-left .upload__list,
+  .dashboard__column--stacked-right .upload__list {
+    max-height: 420px;
+    overflow-y: auto;
+  }
+
+  /* The title block takes the full row; the action buttons wrap below it.
+     Squeezed between the buttons, the subtitle used to wrap one word per
+     line. */
+  .dashboard__header {
+    flex-wrap: wrap;
+  }
+
+  .dashboard__title-block {
+    flex-basis: 100%;
   }
 
   .source-detail__body {
@@ -2070,8 +2125,24 @@ h2 {
     padding: 1.25rem 1.5rem;
   }
 
-  .dashboard__content {
-    padding: 1.25rem;
+  /* Workspace: panes stack — claim list on top, then the two PDF panes at
+     a usable reading height. */
+  .workspace {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .workspace__panes {
+    flex-direction: column;
+  }
+
+  .workspace__list {
+    width: 100%;
+    max-height: 45vh;
+  }
+
+  .workspace__pane {
+    min-height: 60vh;
   }
 }
 

@@ -53,6 +53,11 @@ describe("ComparePage", () => {
     expect(screen.getByText("-20%")).toBeInTheDocument();
     expect(screen.getByText("+3")).toBeInTheDocument();
     expect(screen.getByText("-1")).toBeInTheDocument();
+    // Scores keep valence colors; counts must stay neutral — fewer
+    // unverifiable claims is not "bad", so no red/green on count deltas.
+    expect(screen.getByText("+20%").className).toContain("compare__delta--up");
+    expect(screen.getByText("+3").className).toContain("compare__delta--flat");
+    expect(screen.getByText("-1").className).toContain("compare__delta--flat");
   });
 
   it("keeps the delta consistent with the two displayed cells", async () => {

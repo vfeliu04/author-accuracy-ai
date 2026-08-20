@@ -21,14 +21,27 @@ function fmtPct(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : `${Math.round(value * 100)}%`;
 }
 
-function Delta({ a, b, asPct }: { a: number | null; b: number | null; asPct: boolean }) {
+function Delta({
+  a,
+  b,
+  asPct,
+  valenced = true
+}: {
+  a: number | null;
+  b: number | null;
+  asPct: boolean;
+  // Counts (total/supported/contradicted/unverifiable) have no inherent
+  // good/bad direction — coloring their deltas green/red implied a judgment
+  // the numbers don't carry. Only the four scores keep valence colors.
+  valenced?: boolean;
+}) {
   if (a === null || b === null) {
     return <span className="compare__delta compare__delta--flat">—</span>;
   }
   // Round each side first so the delta always equals the difference of the two
   // displayed cells (never off-by-one against them).
   const raw = asPct ? Math.round(b * 100) - Math.round(a * 100) : b - a;
-  const cls = raw > 0 ? "up" : raw < 0 ? "down" : "flat";
+  const cls = !valenced ? "flat" : raw > 0 ? "up" : raw < 0 ? "down" : "flat";
   const sign = raw > 0 ? "+" : "";
   return (
     <span className={`compare__delta compare__delta--${cls}`}>
@@ -107,7 +120,7 @@ const ComparePage = () => {
                     <span className="compare__metric">{metric.label}</span>
                     <span>{ra.stats[metric.key]}</span>
                     <span>{rb.stats[metric.key]}</span>
-                    <Delta a={ra.stats[metric.key]} b={rb.stats[metric.key]} asPct={false} />
+                    <Delta a={ra.stats[metric.key]} b={rb.stats[metric.key]} asPct={false} valenced={false} />
                   </FragmentRow>
                 ))}
               </div>
