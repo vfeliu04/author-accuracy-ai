@@ -7,6 +7,45 @@ import type { ChatMode, Claim, Verdict } from "../api/types";
 
 const PIPELINE_STEPS = ["ingest", "extract", "verify", "score"];
 
+// Pending steps have no server-sent entry yet; without this fallback the feed
+// showed raw internal names ("score") below the labeled completed steps.
+const STEP_FALLBACK_LABELS: Record<string, string> = {
+  ingest: "Ingest documents",
+  extract: "Extract claims",
+  verify: "Verify claims against sources",
+  score: "Score the report"
+};
+
+// Raw exception text is for logs; users get the translation (the raw message
+// stays visible in a collapsible block below).
+const ERROR_HINTS: Array<{ match: RegExp; hint: string }> = [
+  {
+    match: /APIConnectionError|Connection error/i,
+    hint: "The server lost its network connection mid-run (laptop sleep or dropped Wi-Fi are the usual causes). Retrying resumes where it stopped."
+  },
+  {
+    match: /TimeoutError.*Batch|still 'in_progress'/i,
+    hint: "The verification batch was still queued on the provider's side when the app stopped waiting. The batch keeps its place — retrying reattaches to it at no extra cost."
+  },
+  {
+    match: /credit balance|billing/i,
+    hint: "The API account looks out of credit — top up at console.anthropic.com, then retry."
+  }
+];
+
+function humanizeError(error: string | null): string | null {
+  if (!error) return null;
+  return ERROR_HINTS.find(({ match }) => match.test(error))?.hint ?? null;
+}
+
+function elapsedLabel(sinceIso: string | undefined): string | null {
+  if (!sinceIso) return null;
+  const started = new Date(sinceIso).getTime();
+  if (Number.isNaN(started)) return null;
+  const minutes = Math.max(0, Math.round((Date.now() - started) / 60000));
+  return minutes < 1 ? "just started" : minutes < 60 ? `running for ${minutes} min` : `running for ${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
 const CHAT_SUGGESTIONS = [
   "Which claims are contradicted?",
   "What is the weakest supported claim?",
@@ -34,8 +73,18 @@ function ProgressFeed({ progress }: { progress: { step: string; label: string; s
         const icon = status === "done" ? "✓" : status === "running" ? "⟳" : status === "failed" ? "✗" : "·";
         return (
           <li key={step} className={`pipeline-progress__step pipeline-progress__step--${status}`}>
-            <span className="pipeline-progress__icon">{icon}</span>
-            <span>{entry?.label ?? step}</span>
+            <span
+              className={`pipeline-progress__icon${status === "running" ? " pipeline-progress__icon--spinning" : ""}`}
+            >
+              {icon}
+            </span>
+            <span>{entry?.label ?? STEP_FALLBACK_LABELS[step] ?? step}</span>
+            {step === "verify" && status === "running" ? (
+              <span className="pipeline-progress__hint">
+                Verification runs through the half-price batch API — usually minutes, but it can
+                queue for longer. This page keeps itself updated.
+              </span>
+            ) : null}
           </li>
         );
       })}
@@ -43,32 +92,38 @@ function ProgressFeed({ progress }: { progress: { step: string; label: string; s
   );
 }
 
+export function ClaimBadges({ claim }: { claim: Claim }) {
+  return (
+    <span className="claim-row__badges">
+      <span
+        className="source-pill__badge"
+        style={{ background: VERDICT_COLOR[claim.verdict], color: "#fff" }}
+      >
+        {claim.verdict}
+      </span>
+      {claim.stance === "disavowed" ? (
+        <span className="source-pill__badge" title="The report itself marks this claim false">
+          disavowed
+        </span>
+      ) : null}
+      {claim.downgraded ? (
+        <span className="source-pill__badge" title="The quote check failed; the verdict was downgraded">
+          downgraded
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function ClaimRow({ claim }: { claim: Claim }) {
   const evidence = claim.evidence_source;
   return (
-    <div className="upload__item" style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-      {/* flex-wrap + a min basis on the text: in the narrow claims column the
-          badges would otherwise squeeze the text to a word-per-line sliver. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", flexWrap: "wrap" }}>
-        <span
-          className="source-pill__badge"
-          style={{ background: VERDICT_COLOR[claim.verdict], color: "#fff" }}
-        >
-          {claim.verdict}
-        </span>
-        {claim.stance === "disavowed" ? (
-          <span className="source-pill__badge" title="The report itself marks this claim false">
-            disavowed
-          </span>
-        ) : null}
-        {claim.downgraded ? <span className="source-pill__badge">downgraded</span> : null}
-        <span className="upload__item-name" style={{ whiteSpace: "normal", flex: "1 1 200px" }}>
-          {claim.text}
-        </span>
-      </div>
-      <p style={{ margin: 0, fontSize: "0.85em", opacity: 0.8 }}>{claim.rationale}</p>
+    <div className="claim-row">
+      <ClaimBadges claim={claim} />
+      <span className="claim-row__text">{claim.text}</span>
+      <p className="claim-row__rationale">{claim.rationale}</p>
       {claim.quote && evidence ? (
-        <p style={{ margin: 0, fontSize: "0.8em", opacity: 0.7 }}>
+        <p className="claim-row__quote">
           “{claim.quote}” — {evidence.title ?? "source"}
           {evidence.page !== null ? ` p.${evidence.page}` : ""}
         </p>
@@ -165,6 +220,7 @@ const ReportDashboard = () => {
             <article className="card">
               <header className="card__header">
                 <h2>Running the pipeline</h2>
+                <span className="dashboard__subtitle">{elapsedLabel(job?.created_at)}</span>
               </header>
               {job ? <ProgressFeed progress={job.progress} /> : <p className="dashboard__status">Queued…</p>}
             </article>
@@ -175,28 +231,40 @@ const ReportDashboard = () => {
       {status === "FAILED" ? (
         <main className="dashboard__content">
           <section className="dashboard__column" style={{ width: "100%", gridColumn: "1 / -1" }}>
-            <p className="dashboard__status dashboard__status--error">
-              This run failed: {run?.error ?? "check the server logs"}
-            </p>
-            <div>
-              <button
-                type="button"
-                className="dashboard__refresh-button"
-                disabled={retry.isPending}
-                onClick={() => retry.mutate()}
-              >
-                {retry.isPending ? "Retrying…" : "Retry run"}
-              </button>
-              <p style={{ margin: "0.4rem 0 0", fontSize: "0.85em", opacity: 0.75 }}>
-                Picks up from the first incomplete step — documents that were already
-                ingested are kept.
-              </p>
-              {retry.error ? (
-                <p className="dashboard__status dashboard__status--error">
-                  Retry failed: {retry.error instanceof Error ? retry.error.message : "unknown error"}
-                </p>
+            <article className="card">
+              <header className="card__header">
+                <h2>This run failed</h2>
+              </header>
+              {humanizeError(run?.error ?? null) ? (
+                <p className="card__body-text">{humanizeError(run?.error ?? null)}</p>
               ) : null}
-            </div>
+              <details style={{ marginBottom: "0.8rem" }}>
+                <summary className="dashboard__status dashboard__status--error" style={{ cursor: "pointer" }}>
+                  Technical detail
+                </summary>
+                <p className="dashboard__status">{run?.error ?? "check the server logs"}</p>
+              </details>
+              {job ? <ProgressFeed progress={job.progress} /> : null}
+              <div style={{ marginTop: "0.8rem" }}>
+                <button
+                  type="button"
+                  className="dashboard__refresh-button"
+                  disabled={retry.isPending}
+                  onClick={() => retry.mutate()}
+                >
+                  {retry.isPending ? "Retrying…" : "Retry run"}
+                </button>
+                <p style={{ margin: "0.4rem 0 0", fontSize: "0.85em", opacity: 0.75 }}>
+                  Picks up from the first incomplete step — documents that were already
+                  ingested are kept.
+                </p>
+                {retry.error ? (
+                  <p className="dashboard__status dashboard__status--error">
+                    Retry failed: {retry.error instanceof Error ? retry.error.message : "unknown error"}
+                  </p>
+                ) : null}
+              </div>
+            </article>
           </section>
         </main>
       ) : null}
@@ -216,9 +284,13 @@ const ReportDashboard = () => {
                     className="upload__item upload__item--with-actions"
                     onClick={() => navigate(`/runs/${runId}/sources/${source.doc_id}`)}
                   >
-                    <span className="upload__item-name">{source.title ?? source.doc_id.slice(0, 8)}</span>
+                    <span className="upload__item-name" title={source.title ?? source.doc_id}>
+                      {source.title ?? source.doc_id.slice(0, 8)}
+                    </span>
                     <span className="source-pill__badge">{source.tier}</span>
-                    <span className="source-pill__badge">{Math.round(source.total)}</span>
+                    <span className="source-pill__badge" title="Credibility score">
+                      {Math.round(source.total)}/100
+                    </span>
                   </button>
                 ))}
               </div>

@@ -160,8 +160,12 @@ const UploadPage = () => {
             {error ? <p className="upload__status upload__status--error">{error}</p> : null}
             {submitting ? <p className="upload__status">Creating run…</p> : null}
 
-            <button type="submit" className="upload__submit" disabled={submitting}>
-              ➤
+            <button
+              type="submit"
+              className="upload__submit"
+              disabled={submitting || !report || sources.length === 0}
+            >
+              {submitting ? "Creating run…" : "Verify report ➤"}
             </button>
           </section>
         </div>

@@ -84,7 +84,8 @@ const HistoryPage = () => {
                 </Link>
                 <button
                   type="button"
-                  className={selected.includes(run.id) ? "pill pill--outlined" : "pill pill--ghost"}
+                  className={`history__compare${selected.includes(run.id) ? " history__compare--selected" : ""}`}
+                  title="Select two runs to compare their scores"
                   onClick={() => toggleCompare(run.id)}
                 >
                   {selected.includes(run.id) ? "✓ compare" : "compare"}

@@ -58,7 +58,10 @@ describe("ClaimsWorkspace", () => {
       </QueryClientProvider>
     );
 
-    await waitFor(() => expect(screen.getByText("hunger fell")).toBeInTheDocument());
+    // The selected claim's text appears twice by design: once in the list row
+    // and once in the detail strip that surfaces rationale + quote.
+    await waitFor(() => expect(screen.getAllByText("hunger fell").length).toBeGreaterThan(0));
+    expect(screen.getByText("verbatim")).toBeInTheDocument(); // rationale is on screen now
     // Report pane deep-links to the claim's page; source pane to the evidence page.
     await waitFor(() =>
       expect(screen.getByTitle("report")).toHaveAttribute("src", "blob:fake#page=1")

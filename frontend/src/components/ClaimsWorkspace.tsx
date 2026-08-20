@@ -1,14 +1,9 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import PdfPane from "./PdfPane";
+import { ClaimBadges } from "./ReportDashboard";
 import { useReport } from "../api/queries";
 import type { Verdict } from "../api/types";
-
-const VERDICT_COLOR: Record<Verdict, string> = {
-  SUPPORTED: "var(--color-success)",
-  CONTRADICTED: "var(--color-danger)",
-  UNVERIFIABLE: "var(--color-warning)"
-};
 
 const FILTERS: Array<Verdict | "ALL"> = ["ALL", "SUPPORTED", "CONTRADICTED", "UNVERIFIABLE"];
 
@@ -53,17 +48,45 @@ const ClaimsWorkspace = () => {
       </header>
 
       <div className="workspace__filters">
-        {FILTERS.map((option) => (
-          <button
-            key={option}
-            type="button"
-            className={`chat__suggestion-chip${option === filter ? " chat__mode-option--active" : ""}`}
-            onClick={() => setFilter(option)}
-          >
-            {option}
-          </button>
-        ))}
+        {FILTERS.map((option) => {
+          const count =
+            option === "ALL"
+              ? report.claims.length
+              : report.claims.filter((c) => c.verdict === option).length;
+          return (
+            <button
+              key={option}
+              type="button"
+              className={`workspace__filter${option === filter ? " workspace__filter--active" : ""}`}
+              onClick={() => setFilter(option)}
+            >
+              {option} ({count})
+            </button>
+          );
+        })}
       </div>
+
+      {/* The rationale and verified quote are the whole point of this screen —
+          they stay visible for whichever claim is selected. */}
+      {selected ? (
+        <div className="workspace__detail">
+          <ClaimBadges claim={selected} />
+          <span className="claim-row__text">{selected.text}</span>
+          <p className="claim-row__rationale">{selected.rationale}</p>
+          {selected.quote ? (
+            <p className="claim-row__quote">
+              “{selected.quote}”
+              {selected.evidence_source
+                ? ` — ${selected.evidence_source.title ?? "source"}${
+                    selected.evidence_source.page !== null
+                      ? ` p.${selected.evidence_source.page}`
+                      : ""
+                  }`
+                : ""}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="workspace__panes">
         <section className="workspace__list">
@@ -71,27 +94,11 @@ const ClaimsWorkspace = () => {
             <button
               key={claim.claim_id}
               type="button"
-              className={`upload__item${selected?.claim_id === claim.claim_id ? " upload__item--report" : ""}`}
-              style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}
+              className={`claim-row${selected?.claim_id === claim.claim_id ? " claim-row--active" : ""}`}
               onClick={() => setSelectedId(claim.claim_id)}
             >
-              <span style={{ display: "flex", gap: 6 }}>
-                <span
-                  className="source-pill__badge"
-                  style={{ background: VERDICT_COLOR[claim.verdict], color: "#fff" }}
-                >
-                  {claim.verdict}
-                </span>
-                {claim.stance === "disavowed" ? (
-                  <span
-                    className="source-pill__badge"
-                    title="The report itself marks this claim false"
-                  >
-                    disavowed
-                  </span>
-                ) : null}
-              </span>
-              <span className="upload__item-name" style={{ whiteSpace: "normal" }}>{claim.text}</span>
+              <ClaimBadges claim={claim} />
+              <span className="claim-row__text">{claim.text}</span>
             </button>
           ))}
           {claims.length === 0 ? <p className="dashboard__status">No claims match this filter.</p> : null}

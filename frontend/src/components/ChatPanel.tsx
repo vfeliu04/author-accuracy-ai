@@ -122,10 +122,23 @@ const ChatPanel = ({
           </div>
         ) : null}
       </div>
+      {messages.length === 0 && !isSending ? (
+        <p className="chat__empty-hint">
+          Ask anything about this run — answers come only from the verified claims, verdicts, and
+          sources below, never from outside knowledge.
+        </p>
+      ) : null}
       {messages.length <= 1 && !isSending && (
         <div className="chat__suggestions">
           {(suggestions ?? []).map((s) => (
-            <button key={s} type="button" className="chat__suggestion-chip" onClick={() => setDraft(s)}>
+            // Chips send immediately — pre-filling the input read as a dead
+            // click (nothing visibly happened).
+            <button
+              key={s}
+              type="button"
+              className="chat__suggestion-chip"
+              onClick={() => onSendMessage(s)}
+            >
               {s}
             </button>
           ))}

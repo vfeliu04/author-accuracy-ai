@@ -290,9 +290,21 @@ h2 {
   gap: 1.5rem;
 }
 
-.dashboard__column--stacked-left > .card:first-child,
+/* The CLAIMS card (last in the left stack) gets the stretch — it holds 40+
+   rows; the sources card above it sits at natural height. Stretching the
+   first card used to leave the product's main output ~one claim tall. */
+.dashboard__column--stacked-left > .card:last-child,
 .dashboard__column--stacked-right > .card:first-child {
   flex: 1;
+  min-height: 0;
+}
+
+/* Sources are context, claims are the product: the sources list caps at a
+   few rows (scrolling for more) so the claims card gets the column. */
+.dashboard__column--stacked-left > .card:first-child .upload__list {
+  max-height: 168px;
+  overflow-y: auto;
+  flex: initial;
 }
 
 .dashboard__column--stacked-left > .card:last-child,
@@ -1132,16 +1144,20 @@ h2 {
   font-size: 0.95rem;
 }
 
+/* The app's primary CTA is a labeled button, not an anonymous arrow. */
 .upload__submit {
   margin-top: 1.5rem;
   align-self: flex-end;
-  width: 3rem;
-  height: 3rem;
-  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.4rem;
+  border-radius: 999px;
   border: none;
+  font-size: 0.95rem;
+  font-weight: 600;
   background: linear-gradient(135deg, #3b82f6, var(--color-accent));
   color: var(--color-text);
-  font-size: 1.1rem;
   cursor: pointer;
   box-shadow: 0 10px 18px -12px rgba(59, 130, 246, 0.65);
 }
@@ -2144,6 +2160,143 @@ h2 {
   .workspace__pane {
     min-height: 60vh;
   }
+}
+
+/* --- v2 claim rows, workspace filters, history actions, progress --- */
+
+/* Claims are dense structured data, not file pills: left-aligned, modest
+   radius, no ellipse blob behind multi-line text. */
+.claim-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  text-align: left;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+button.claim-row {
+  cursor: pointer;
+}
+
+button.claim-row:hover {
+  border-color: var(--color-accent);
+}
+
+.claim-row--active {
+  border-color: var(--color-accent);
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.claim-row__badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.claim-row__text {
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.claim-row__rationale {
+  margin: 0;
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+
+.claim-row__quote {
+  margin: 0;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.workspace__filter {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  padding: 0.35rem 0.9rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+
+.workspace__filter:hover {
+  border-color: var(--color-accent);
+}
+
+.workspace__filter--active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* Selected-claim detail strip above the PDF panes: the rationale and the
+   verified quote are the workspace's whole point — they must be on screen. */
+.workspace__detail {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 0.8rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history__compare {
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 0.3rem 0.9rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--transition), color var(--transition);
+}
+
+.history__compare:hover {
+  border-color: var(--color-accent);
+}
+
+.history__compare--selected {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.chat__empty-hint {
+  margin: auto 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+@keyframes progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.pipeline-progress__icon--spinning {
+  display: inline-block;
+  animation: progress-spin 1.2s linear infinite;
+}
+
+.pipeline-progress__hint {
+  margin: 0.25rem 0 0 1.6rem;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
 }
 
 /* --- v2 claims workspace + PDF panes --- */
