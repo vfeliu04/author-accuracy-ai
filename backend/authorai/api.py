@@ -193,7 +193,12 @@ def retry_run(run_id: str, conn: Conn) -> dict:
             status_code=409,
             detail=f"Run {run_id!r} job is {job['status']} — only FAILED runs can be retried",
         )
-    dbmod.requeue_job(conn, job["id"], run_id)
+    try:
+        dbmod.requeue_job(conn, job["id"], run_id)
+    except ValueError as exc:
+        # Two overlapping retries both read FAILED; the loser's guarded UPDATE
+        # matches nothing. That's a conflict, not a server error.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"run_id": run_id, "job_id": job["id"], "status": "QUEUED"}
 
 

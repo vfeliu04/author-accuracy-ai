@@ -250,6 +250,39 @@ def test_batch_resume_polls_stored_batch_without_creating(monkeypatch):
     assert created == []  # the stored batch was reused — nothing was paid twice
 
 
+def test_batch_resume_rejects_expired_batches(monkeypatch):
+    """An ended batch whose requests expired must NOT resume: every item
+    would fail and funnel through full-price sync retries (~2x the cost of a
+    fresh half-price batch). Falling back to a new submission is cheaper."""
+    from types import SimpleNamespace
+
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    counts = SimpleNamespace(processing=0, succeeded=0, errored=0, canceled=0, expired=2)
+    created: list[int] = []
+    batches = SimpleNamespace(
+        create=lambda requests: (created.append(len(requests)), SimpleNamespace(id="batch-new"))[1],
+        retrieve=lambda batch_id: SimpleNamespace(
+            id=batch_id,
+            processing_status="ended",
+            request_counts=counts
+            if batch_id == "batch-dead"
+            else SimpleNamespace(processing=0, succeeded=2, errored=0, canceled=0, expired=0),
+        ),
+        results=lambda batch_id: iter(
+            [
+                _succeeded("ok", _verdict().model_dump_json()),
+                _succeeded("bad", _verdict().model_dump_json()),
+            ]
+        ),
+    )
+    client._client = SimpleNamespace(messages=SimpleNamespace(batches=batches))
+    results = client.parse_batch(model="m", items=_items(), resume_batch_id="batch-dead")
+    assert set(results) == {"ok", "bad"}
+    assert created == [2]  # the dead batch was NOT resumed — fresh submission
+
+
 def test_batch_resume_falls_back_when_stored_batch_unusable(monkeypatch):
     from authorai.llm import AnthropicClient
 

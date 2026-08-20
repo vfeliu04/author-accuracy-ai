@@ -28,6 +28,12 @@ logger = setup_logger(__name__)
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
+class StaleBatchError(RuntimeError):
+    """A resumed batch does not belong to the current inputs (foreign
+    custom_ids). Callers that PERSISTED the batch id must clear it on this
+    error, or every retry re-resolves the same dead batch forever."""
+
+
 def prompt_fingerprint(*parts: str, output_type: type[BaseModel]) -> str:
     """Canonical hash of a prompt CONTRACT: rendered text + the output schema.
 
@@ -227,9 +233,18 @@ class AnthropicClient:
             )
             return None
         counts = batch.request_counts
-        total = (
-            counts.processing + counts.succeeded + counts.errored + counts.canceled + counts.expired
-        )
+        if counts.expired or counts.canceled:
+            # A dead batch would funnel every item through the full-price
+            # sync-retry path (~2x a fresh half-price batch, serially) —
+            # resubmitting is strictly cheaper and faster.
+            logger.warning(
+                "stored batch %s has %d expired / %d canceled requests — submitting anew",
+                batch_id,
+                counts.expired,
+                counts.canceled,
+            )
+            return None
+        total = counts.processing + counts.succeeded + counts.errored
         if total != expected_count:
             logger.warning(
                 "stored batch %s holds %d requests but %d are needed — submitting anew",
@@ -301,7 +316,7 @@ class AnthropicClient:
                 # Same request count, different ids: the stored batch belongs
                 # to a different claim set. Refuse loudly rather than pairing
                 # verdicts with the wrong claims.
-                raise RuntimeError(
+                raise StaleBatchError(
                     f"Batch {batch_id} returned unknown custom_id {custom_id!r} — the "
                     "stored batch does not match the current claims; rerun verify"
                 )

@@ -31,7 +31,7 @@ from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
-from authorai.llm import AnthropicClient
+from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
@@ -170,16 +170,24 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
         if job is not None:
             dbmod.update_job_payload(context.conn, job["id"], {"verify_batch_id": batch_id})
 
-    summary = verify_run(
-        context.conn,
-        context.embedder,
-        context.llm,
-        run_id,
-        model=context.settings.verdict_model,
-        batch=True,
-        resume_batch_id=payload.get("verify_batch_id"),
-        on_batch_created=remember_batch,
-    )
+    try:
+        summary = verify_run(
+            context.conn,
+            context.embedder,
+            context.llm,
+            run_id,
+            model=context.settings.verdict_model,
+            batch=True,
+            resume_batch_id=payload.get("verify_batch_id"),
+            on_batch_created=remember_batch,
+        )
+    except StaleBatchError:
+        # The stored batch belongs to a different claim set. Clear it, or
+        # every retry re-resolves the same dead batch and fails identically —
+        # with the key gone, the next retry submits fresh.
+        if job is not None:
+            dbmod.update_job_payload(context.conn, job["id"], {"verify_batch_id": None})
+        raise
     counts = summary["counts"]
     return (
         f"Verified {summary['total']} claims "

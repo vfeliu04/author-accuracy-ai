@@ -271,6 +271,26 @@ def test_retry_requeues_only_failed_runs(client):
     conn.close()
 
 
+def test_retry_race_loser_gets_409_not_500(client, monkeypatch):
+    """Two overlapping retries both read the job as FAILED; the loser's
+    guarded UPDATE matches nothing and raises ValueError — which must map to
+    a 409 conflict, not a 500."""
+    from authorai import api as apimod
+
+    conn = dbmod.connect(client.app.state.settings.db_path, DIM)
+    run_id = dbmod.create_run(conn)
+    job_id = dbmod.create_job(conn, run_id, {"report_upload_id": "r", "source_upload_ids": []})
+    dbmod.finish_job_and_run(conn, job_id, run_id, "FAILED", error="boom")
+
+    def racing_requeue(*args, **kwargs):
+        raise ValueError(f"Job {job_id!r} is not FAILED — nothing to retry")
+
+    monkeypatch.setattr(apimod.dbmod, "requeue_job", racing_requeue)
+    response = client.post(f"/api/runs/{run_id}/retry", headers=AUTH)
+    assert response.status_code == 409
+    conn.close()
+
+
 def _seed_scored_run(settings) -> str:
     """A run with one supported + one unverifiable verdict and stored scores.
 

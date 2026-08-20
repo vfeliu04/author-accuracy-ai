@@ -1702,11 +1702,12 @@ h2 {
   line-height: 1;
 }
 
-/* auto-fit grid: 4-across when the column is wide, 2x2 when narrow — the
-   fixed-width flex row used to push the fourth ring past the card edge. */
+/* Always a 2x2 grid: the sidebar is never wide enough for four-across below
+   ~2100px, and auto-fit produced an asymmetric 3+1 wrap on 1920px screens.
+   A stable square beats a layout that reshuffles with the window. */
 .rating__cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.5rem;
   padding: 0.5rem 0;
 }
@@ -2141,25 +2142,6 @@ h2 {
     padding: 1.25rem 1.5rem;
   }
 
-  /* Workspace: panes stack — claim list on top, then the two PDF panes at
-     a usable reading height. */
-  .workspace {
-    height: auto;
-    min-height: 100vh;
-  }
-
-  .workspace__panes {
-    flex-direction: column;
-  }
-
-  .workspace__list {
-    width: 100%;
-    max-height: 45vh;
-  }
-
-  .workspace__pane {
-    min-height: 60vh;
-  }
 }
 
 /* --- v2 claim rows, workspace filters, history actions, progress --- */
@@ -2380,3 +2362,26 @@ button.claim-row:hover {
 .compare__delta--up { color: var(--color-success); }
 .compare__delta--down { color: var(--color-danger); }
 .compare__delta--flat { color: var(--color-text-muted, #888); }
+
+/* Mobile workspace overrides live BELOW the base workspace rules — a media
+   query adds no specificity, so placed above them these were dead
+   declarations and the 100vh lock + 320px list survived on phones. */
+@media (max-width: 780px) {
+  .workspace {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .workspace__panes {
+    flex-direction: column;
+  }
+
+  .workspace__list {
+    width: 100%;
+    max-height: 45vh;
+  }
+
+  .workspace__pane {
+    min-height: 60vh;
+  }
+}

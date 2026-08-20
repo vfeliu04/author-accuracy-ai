@@ -274,6 +274,29 @@ def test_step_verify_resumes_stored_batch_and_persists_new_ids(conn, monkeypatch
     assert dbmod.get_job(conn, job_id)["payload"]["verify_batch_id"] == "msgbatch_new"
 
 
+def test_step_verify_clears_batch_id_on_stale_batch(conn, monkeypatch):
+    """A poisoned verify_batch_id must not wedge the retry loop: when the
+    stored batch turns out to belong to a different claim set, the key is
+    cleared so the NEXT retry submits fresh instead of failing identically
+    forever."""
+    from authorai import jobs as jobsmod
+    from authorai.jobs import step_verify
+    from authorai.llm import StaleBatchError
+
+    run_id, job_id = _job(conn)
+    dbmod.update_job_payload(conn, job_id, {"verify_batch_id": "msgbatch_poisoned"})
+
+    def fake_verify_run(*args, **kwargs):
+        raise StaleBatchError("batch does not match the current claims")
+
+    monkeypatch.setattr(jobsmod, "verify_run", fake_verify_run)
+    import pytest
+
+    with pytest.raises(StaleBatchError):
+        step_verify(PipelineContext(conn, SETTINGS), run_id, dbmod.get_job(conn, job_id)["payload"])
+    assert "verify_batch_id" not in dbmod.get_job(conn, job_id)["payload"]
+
+
 def test_requeue_refuses_non_failed_jobs(conn):
     run_id, job_id = _job(conn)  # QUEUED
     import pytest
