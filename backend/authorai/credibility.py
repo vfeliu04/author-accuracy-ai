@@ -9,6 +9,10 @@ arithmetic. Verification tiers, strongest first:
                   title matches ours exactly (normalized) AND a second field
                   corroborates (year ±1, or first-author family name) — a
                   title-only match on a generic title is a rejection
+  VERIFIED_ISBN   no DOI/title match, but the extracted ISBN (checksum-valid)
+                  resolves at Open Library or Google Books AND the record's
+                  title or publisher corroborates ours — the institutional-
+                  book path Crossref structurally cannot serve
   METADATA_ONLY   metadata extracted but not externally verified
   NONE            nothing extractable
 
@@ -37,7 +41,12 @@ CROSSREF_BASE = "https://api.crossref.org"
 CROSSREF_TIMEOUT = 10.0
 CROSSREF_RETRIES = 2
 
-Tier = Literal["VERIFIED_DOI", "VERIFIED_TITLE", "METADATA_ONLY", "NONE"]
+Tier = Literal["VERIFIED_DOI", "VERIFIED_TITLE", "VERIFIED_ISBN", "METADATA_ONLY", "NONE"]
+
+OPENLIBRARY_BASE = "https://openlibrary.org"
+GOOGLEBOOKS_BASE = "https://www.googleapis.com"
+ISBN_TIMEOUT = 10.0
+ISBN_RETRIES = 2
 
 METADATA_SYSTEM = """\
 You extract bibliographic metadata from excerpts of a document: its opening
@@ -53,9 +62,10 @@ knowledge. A field the text does not state is null.
   journal, agency). Null if not stated.
 - `publication_date`: as printed, ideally ISO (YYYY or YYYY-MM or YYYY-MM-DD).
 - `doi`: the DOCUMENT'S OWN DOI only (10.xxxx/...), without a URL prefix.
+- `isbn`: the DOCUMENT'S OWN ISBN only, as printed (digits, dashes, X).
 
 Reference-list and bibliography entries describe OTHER works — never take
-a DOI, publisher, or date from them.
+a DOI, ISBN, publisher, or date from them.
 """
 
 
@@ -65,6 +75,7 @@ class SourceMetadata(BaseModel):
     publisher: str | None = None
     publication_date: str | None = None
     doi: str | None = None
+    isbn: str | None = None
 
 
 def extract_metadata(llm: LLM, model: str, opening_text: str) -> SourceMetadata:
@@ -90,6 +101,159 @@ def clean_doi(doi: str) -> str | None:
         logger.warning("Malformed DOI %r — skipping DOI lookup", doi)
         return None
     return candidate
+
+
+def clean_isbn(isbn: str) -> str | None:
+    """Normalize an ISBN and validate its check digit; None if it fails.
+
+    The checksum is a real gate, not decoration: a fabricated or mis-copied
+    ISBN almost always fails it, and an invalid identifier in the request
+    path would look up nothing (or the wrong thing) while looking diligent.
+    """
+    # Separators include en/em dashes (PDFs print them); the printed prefix
+    # family ("ISBN", "ISBN:", "ISBN-13:", "ISBN-10:") is stripped AFTER
+    # separator removal, when it reads ISBN13:/ISBN10:/ISBN: — the previous
+    # bare removeprefix("ISBN") left "13:" behind and rejected valid ISBNs.
+    candidate = re.sub(r"[\s\-–—]", "", isbn.strip()).upper()
+    candidate = re.sub(r"^ISBN(?:10|13)?:?", "", candidate)
+    if re.fullmatch(r"\d{9}[\dX]", candidate):
+        total = sum((10 - i) * (10 if ch == "X" else int(ch)) for i, ch in enumerate(candidate))
+        if total % 11 == 0:
+            return candidate
+    elif re.fullmatch(r"\d{13}", candidate):
+        total = sum(int(ch) * (1 if i % 2 == 0 else 3) for i, ch in enumerate(candidate))
+        if total % 10 == 0:
+            return candidate
+    logger.warning("Invalid ISBN %r (checksum/shape) — skipping ISBN lookup", isbn)
+    return None
+
+
+def _isbn_core(isbn: str) -> str | None:
+    """The 9 registration digits shared by an ISBN-10 and its 978- ISBN-13
+    (979-prefixed ISBN-13s have no ISBN-10 form and get no core)."""
+    if len(isbn) == 10:
+        return isbn[:9]
+    if len(isbn) == 13 and isbn.startswith("978"):
+        return isbn[3:12]
+    return None
+
+
+def _same_isbn(ours: str, theirs: str) -> bool:
+    """Identifier equality across the 10/13 divide."""
+    if ours == theirs:
+        return True
+    our_core, their_core = _isbn_core(ours), _isbn_core(theirs)
+    return our_core is not None and our_core == their_core
+
+
+class IsbnClient:
+    """ISBN resolution: Open Library first, Google Books as fallback.
+
+    Both are free and keyless; Open Library is tried first because it is the
+    open, non-profit registry (Google Books limits unauthenticated use to
+    fair-use rates). Records are returned in the Crossref record SHAPE
+    ({"title": [...], "publisher": ..., "published": {"date-parts": [[y]]}})
+    so corroboration and gap-merging reuse the existing machinery unchanged.
+
+    Error semantics mirror CrossrefClient: "not found" falls through to the
+    other provider (the catalogs genuinely cover different books), and a hit
+    anywhere wins — but if ANY provider was unreachable and no hit was found,
+    the lookup RAISES. Returning "not found" while a registry that might hold
+    the book is down would silently downgrade tiers and make credibility
+    non-reproducible, the exact failure mode the Crossref client refuses.
+    """
+
+    def __init__(self, mailto: str | None, timeout: float = ISBN_TIMEOUT):
+        agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
+        self._client = httpx.Client(timeout=timeout, headers={"User-Agent": agent})
+
+    def close(self) -> None:
+        self._client.close()
+
+    def _get_json(self, url: str, params: dict) -> dict | None:
+        failure = ""
+        for attempt in range(ISBN_RETRIES + 1):
+            try:
+                response = self._client.get(url, params=params)
+            except httpx.TransportError as exc:
+                failure = f"{type(exc).__name__}: {exc}"
+            else:
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code != 429 and response.status_code < 500:
+                    logger.info("ISBN lookup %s -> %s (not found)", url, response.status_code)
+                    return None
+                failure = f"HTTP {response.status_code}"
+            if attempt < ISBN_RETRIES:
+                time.sleep(1.0 * (attempt + 1))
+        raise RuntimeError(
+            f"ISBN provider gave no answer after {ISBN_RETRIES + 1} attempts ({url}): {failure}"
+        )
+
+    @staticmethod
+    def _as_record(title: str | None, publisher: str | None, date: str | None) -> dict | None:
+        if not title and not publisher:
+            return None
+        record: dict = {}
+        if title:
+            record["title"] = [title]
+        if publisher:
+            record["publisher"] = publisher
+        year = _year_of(date)
+        if year:
+            record["published"] = {"date-parts": [[year]]}
+        return record
+
+    def _open_library(self, isbn: str) -> dict | None:
+        payload = self._get_json(
+            f"{OPENLIBRARY_BASE}/api/books",
+            {"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"},
+        )
+        entry = (payload or {}).get(f"ISBN:{isbn}")
+        if not entry:
+            return None
+        publishers = [p.get("name") for p in entry.get("publishers", []) if p.get("name")]
+        return self._as_record(
+            entry.get("title"), publishers[0] if publishers else None, entry.get("publish_date")
+        )
+
+    def _google_books(self, isbn: str) -> dict | None:
+        payload = self._get_json(f"{GOOGLEBOOKS_BASE}/books/v1/volumes", {"q": f"isbn:{isbn}"})
+        # q=isbn: is a SEARCH, not a keyed lookup — fuzzy results can leak.
+        # Only an item whose own identifier list contains the queried ISBN
+        # counts; anything else would let a generic-title collision reach the
+        # corroboration gate with the wrong book's record.
+        for item in (payload or {}).get("items") or []:
+            info = item.get("volumeInfo", {})
+            identifiers = {
+                re.sub(r"[\s-]", "", i.get("identifier", "")).upper()
+                for i in info.get("industryIdentifiers", [])
+            }
+            if any(_same_isbn(isbn, candidate) for candidate in identifiers):
+                return self._as_record(
+                    info.get("title"), info.get("publisher"), info.get("publishedDate")
+                )
+        return None
+
+    def by_isbn(self, isbn: str) -> dict | None:
+        cleaned = clean_isbn(isbn)
+        if cleaned is None:
+            return None
+        outages: list[str] = []
+        for provider in (self._open_library, self._google_books):
+            try:
+                record = provider(cleaned)
+            except RuntimeError as exc:
+                outages.append(str(exc))
+                continue
+            if record:
+                return record
+        if outages:
+            raise RuntimeError(
+                "An ISBN provider was unreachable and no other provider had the book — "
+                "refusing to silently downgrade: " + " | ".join(outages)
+            )
+        return None
 
 
 class CrossrefClient:
@@ -250,7 +414,23 @@ def _title_match(metadata: SourceMetadata, record: dict) -> bool:
     return _publishers_agree(metadata.publisher, record.get("publisher"))
 
 
-def resolve_tier(metadata: SourceMetadata, crossref: CrossrefClient) -> tuple[Tier, dict | None]:
+def _isbn_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
+    """An ISBN resolves to exactly one work, but the ISBN itself came from an
+    LLM extraction — corroboration guards against a foreign ISBN (a cited
+    work's, a series ISBN) being adopted as the document's own. Either the
+    registry's title matches ours (normalized-exact) or the publishers agree.
+    """
+    ours = _normalize_title(metadata.title or "")
+    if ours and ours in {_normalize_title(t) for t in _record_titles(record)}:
+        return True
+    return _publishers_agree(metadata.publisher, record.get("publisher"))
+
+
+def resolve_tier(
+    metadata: SourceMetadata,
+    crossref: CrossrefClient,
+    isbn_lookup: "IsbnClient | None" = None,
+) -> tuple[Tier, dict | None]:
     if metadata.doi:
         record = crossref.by_doi(metadata.doi)
         if record:
@@ -259,6 +439,21 @@ def resolve_tier(metadata: SourceMetadata, crossref: CrossrefClient) -> tuple[Ti
         for record in crossref.by_title(metadata.title):
             if _title_match(metadata, record):
                 return "VERIFIED_TITLE", record
+    # The institutional-book path: Crossref is journal/DOI-centric, so an
+    # ISBN'd report that lacks a registered DOI can never do better than
+    # METADATA_ONLY there — Open Library / Google Books can still prove it.
+    if metadata.isbn and isbn_lookup is not None and (metadata.title or metadata.publisher):
+        # Without a title or publisher of our own, no record could ever
+        # corroborate — skip the network spend a priori.
+        record = isbn_lookup.by_isbn(metadata.isbn)
+        if record and _isbn_record_corroborates(metadata, record):
+            return "VERIFIED_ISBN", record
+        if record:
+            logger.warning(
+                "ISBN %r resolved but neither title nor publisher corroborates — "
+                "treating as unverified",
+                metadata.isbn,
+            )
     if metadata.model_dump(exclude_defaults=True):
         return "METADATA_ONLY", None
     return "NONE", None
@@ -279,7 +474,13 @@ def merge_record(metadata: SourceMetadata, record: dict | None) -> SourceMetadat
     return metadata.model_copy(update=updates) if updates else metadata
 
 
-_TIER_POINTS = {"VERIFIED_DOI": 20.0, "VERIFIED_TITLE": 15.0, "METADATA_ONLY": 5.0, "NONE": 0.0}
+_TIER_POINTS = {
+    "VERIFIED_DOI": 20.0,
+    "VERIFIED_TITLE": 15.0,
+    "VERIFIED_ISBN": 12.0,
+    "METADATA_ONLY": 5.0,
+    "NONE": 0.0,
+}
 
 
 def _phrase_tokens(text: str) -> list[str]:

@@ -325,6 +325,195 @@ def test_aggregation_no_sources_is_explicit():
     assert result["method"] == "no_sources"
 
 
+# --- ISBN verification (Wave 2) --------------------------------------------
+
+OPENLIBRARY_URL = "https://openlibrary.org/api/books"
+GOOGLEBOOKS_URL = "https://www.googleapis.com/books/v1/volumes"
+
+
+def test_clean_isbn_validates_checksums():
+    from authorai.credibility import clean_isbn
+
+    # Real ISBNs from live-run sources: the 2025 GHI (13) and IWMI RR19 (10).
+    assert clean_isbn("978-1-9191958-0-3") == "9781919195803"
+    assert clean_isbn("92-9090-354-6") == "9290903546"
+    assert clean_isbn("ISBN 0-9752298-0-X") == "097522980X"  # X check digit
+    # The printed prefix family — imprints write all of these "as printed".
+    assert clean_isbn("ISBN: 92-9090-354-6") == "9290903546"
+    assert clean_isbn("ISBN-13: 978-0-306-40615-7") == "9780306406157"
+    assert clean_isbn("ISBN-10: 0-306-40615-2") == "0306406152"
+    assert clean_isbn("978–0–306–40615–7") == "9780306406157"  # en dashes
+    assert clean_isbn("978-1-9191958-0-4") is None  # checksum off by one
+    assert clean_isbn("12345") is None
+    assert clean_isbn("not-an-isbn") is None
+
+
+def _isbn_client():
+    from authorai.credibility import IsbnClient
+
+    return IsbnClient(mailto="test@example.com")
+
+
+@respx.mock
+def test_isbn_open_library_hit_returns_crossref_shaped_record():
+    respx.get(OPENLIBRARY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "ISBN:9781919195803": {
+                    "title": "2025 Global Hunger Index",
+                    "publishers": [{"name": "Welthungerhilfe"}],
+                    "publish_date": "October 2025",
+                }
+            },
+        )
+    )
+    record = _isbn_client().by_isbn("978-1-9191958-0-3")
+    assert record["title"] == ["2025 Global Hunger Index"]
+    assert record["publisher"] == "Welthungerhilfe"
+    assert record["published"] == {"date-parts": [[2025]]}
+
+
+@respx.mock
+def _gb_item(title, publisher, date, isbn13):
+    return {
+        "volumeInfo": {
+            "title": title,
+            "publisher": publisher,
+            "publishedDate": date,
+            "industryIdentifiers": [{"type": "ISBN_13", "identifier": isbn13}],
+        }
+    }
+
+
+@respx.mock
+def test_isbn_falls_back_to_google_books_on_miss_and_outage(monkeypatch):
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    # Open Library is DOWN (retried, then treated as one provider's outage)...
+    respx.get(OPENLIBRARY_URL).mock(return_value=httpx.Response(503))
+    # ...Google Books answers WITH a matching identifier — the hit wins and
+    # the OL outage never needs to be raised.
+    respx.get(GOOGLEBOOKS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"items": [_gb_item("2025 Global Hunger Index", "WHH", "2025", "9781919195803")]},
+        )
+    )
+    record = _isbn_client().by_isbn("9781919195803")
+    assert record["title"] == ["2025 Global Hunger Index"]
+
+
+@respx.mock
+def test_isbn_google_books_fuzzy_results_without_the_identifier_are_rejected():
+    """q=isbn: is a SEARCH — an unrelated book with a colliding generic title
+    must not be adopted just for being items[0]."""
+    respx.get(OPENLIBRARY_URL).mock(return_value=httpx.Response(200, json={}))
+    respx.get(GOOGLEBOOKS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"items": [_gb_item("Annual Report 2023", "Someone", "2023", "9780306406157")]},
+        )
+    )
+    assert _isbn_client().by_isbn("9781919195803") is None
+
+
+@respx.mock
+def test_isbn_ten_thirteen_equivalence_matches_the_same_book():
+    respx.get(OPENLIBRARY_URL).mock(return_value=httpx.Response(200, json={}))
+    # We ask with the ISBN-10; the registry lists the 978- ISBN-13 form.
+    respx.get(GOOGLEBOOKS_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"items": [_gb_item("Numerical Recipes", "CUP", "1986", "9780306406157")]},
+        )
+    )
+    record = _isbn_client().by_isbn("0-306-40615-2")
+    assert record["title"] == ["Numerical Recipes"]
+
+
+@respx.mock
+def test_isbn_outage_with_no_hit_raises_instead_of_downgrading(monkeypatch):
+    """The reproducibility invariant: 'not found' is only an answer when every
+    provider actually answered. One registry down + no hit elsewhere must be
+    loud, or the same source scores differently across an outage."""
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    respx.get(OPENLIBRARY_URL).mock(return_value=httpx.Response(503))
+    respx.get(GOOGLEBOOKS_URL).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+    with pytest.raises(RuntimeError, match="unreachable"):
+        _isbn_client().by_isbn("9781919195803")
+
+
+@respx.mock
+def test_isbn_both_providers_down_raises_loudly(monkeypatch):
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    respx.get(OPENLIBRARY_URL).mock(return_value=httpx.Response(503))
+    respx.get(GOOGLEBOOKS_URL).mock(return_value=httpx.Response(500))
+    with pytest.raises(RuntimeError, match="unreachable"):
+        _isbn_client().by_isbn("9781919195803")
+
+
+@respx.mock
+def test_isbn_not_found_anywhere_is_an_answer():
+    respx.get(OPENLIBRARY_URL).mock(return_value=httpx.Response(200, json={}))
+    respx.get(GOOGLEBOOKS_URL).mock(return_value=httpx.Response(200, json={"totalItems": 0}))
+    assert _isbn_client().by_isbn("9781919195803") is None
+
+
+@respx.mock
+def test_resolve_tier_isbn_path_requires_corroboration():
+    from authorai.credibility import resolve_tier
+
+    # No DOI; Crossref title search finds nothing.
+    respx.get(f"{CROSSREF_BASE}/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": []}})
+    )
+    respx.get(OPENLIBRARY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "ISBN:9781919195803": {
+                    "title": "A Completely Different Book",
+                    "publishers": [{"name": "Someone Else Press"}],
+                }
+            },
+        )
+    )
+    metadata = META.model_copy(update={"isbn": "978-1-9191958-0-3"})
+    # Resolves, but neither title nor publisher corroborates -> unverified.
+    tier, _ = resolve_tier(metadata, _client(), _isbn_client())
+    assert tier == "METADATA_ONLY"
+
+    # Same lookup with an agreeing publisher -> VERIFIED_ISBN, record merged.
+    respx.get(OPENLIBRARY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "ISBN:9781919195803": {
+                    "title": "A Completely Different Book",
+                    "publishers": [{"name": "Welthungerhilfe e.V."}],
+                    "publish_date": "2025",
+                }
+            },
+        )
+    )
+    tier, record = resolve_tier(metadata, _client(), _isbn_client())
+    assert tier == "VERIFIED_ISBN"
+    assert record["publisher"] == "Welthungerhilfe e.V."
+
+
+def test_verified_isbn_tier_points():
+    from authorai.credibility import score_source
+
+    scored = score_source(
+        META.model_copy(update={"isbn": "978-1-9191958-0-3"}),
+        "VERIFIED_ISBN",
+        tier1_publishers=["Welthungerhilfe"],
+        tier2_publishers=[],
+        current_year=2026,
+    )
+    assert scored["components"]["verification"] == 12.0
+
+
 def test_default_authority_tiers_cover_live_run_publishers():
     """The orgs added 2026-08-21 (observed as publishers in live runs) must
     match at their intended tiers via the DEFAULT config, in both acronym and

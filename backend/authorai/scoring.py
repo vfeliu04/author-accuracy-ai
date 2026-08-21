@@ -23,6 +23,7 @@ from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.credibility import (
     CrossrefClient,
+    IsbnClient,
     aggregate_credibility,
     evidence_usage,
     extract_metadata,
@@ -354,6 +355,7 @@ def score_run(
     run_id: str,
     settings: Settings,
     crossref: CrossrefClient | None = None,
+    isbn_lookup: IsbnClient | None = None,
     allow_stale: bool = False,
 ) -> dict:
     """Compute and persist all three scores for a run. Verdicts must exist.
@@ -390,6 +392,9 @@ def score_run(
     owns_crossref = crossref is None and bool(sources)
     if owns_crossref:
         crossref = CrossrefClient(settings.crossref_mailto)
+    owns_isbn = isbn_lookup is None and bool(sources)
+    if owns_isbn:
+        isbn_lookup = IsbnClient(settings.crossref_mailto)
     per_source: list[dict] = []
     source_years: list[int] = []
     try:
@@ -397,7 +402,7 @@ def score_run(
             metadata = extract_metadata(
                 llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
             )
-            tier, record = resolve_tier(metadata, crossref)
+            tier, record = resolve_tier(metadata, crossref, isbn_lookup)
             merged = merge_record(metadata, record)
             scored = score_source(
                 merged,
@@ -421,6 +426,8 @@ def score_run(
     finally:
         if owns_crossref:
             crossref.close()
+        if owns_isbn:
+            isbn_lookup.close()
     credibility = aggregate_credibility(per_source, evidence_usage(conn, run_id))
 
     # The last failure-prone step (a network LLM call), computed BEFORE any

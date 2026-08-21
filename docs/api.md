@@ -146,7 +146,7 @@ Each entry in `sources` (ordered by credibility, highest first):
 |---|---|
 | `doc_id`, `title` | The source document |
 | `total` | Credibility score 0–100 (no floors — unknown metadata earns nothing) |
-| `tier` | Crossref verification tier: `VERIFIED_DOI` \| `VERIFIED_TITLE` \| `METADATA_ONLY` \| `NONE` |
+| `tier` | Verification tier: `VERIFIED_DOI` \| `VERIFIED_TITLE` \| `VERIFIED_ISBN` \| `METADATA_ONLY` \| `NONE` |
 | `components` | `{"metadata_completeness", "authority", "recency", "verification"}` point breakdown |
 
 ## Document files

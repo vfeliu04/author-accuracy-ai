@@ -43,6 +43,7 @@ For each SOURCE document, an LLM (`claude-haiku-4-5`) extracts bibliographic met
 | --- | --- | --- |
 | `VERIFIED_DOI` | The extracted DOI resolves at Crossref | 20 |
 | `VERIFIED_TITLE` | No DOI, but a Crossref record matches the title exactly (normalized) **and** a second field corroborates (year ±1, author family name, or publisher) — a title-only match on a generic title is rejected | 15 |
+| `VERIFIED_ISBN` | No DOI or title match, but the extracted ISBN (checksum-validated in code first) resolves at Open Library or Google Books **and** the record's title or publisher corroborates — the path for institutional books Crossref doesn't index | 12 |
 | `METADATA_ONLY` | Metadata extracted but not externally verified | 5 |
 | `NONE` | Nothing extractable | 0 |
 
