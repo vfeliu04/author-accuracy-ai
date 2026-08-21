@@ -207,7 +207,7 @@ def test_opening_text_includes_section_headings_and_respects_the_page_window(con
     exact fields metadata extraction exists to find."""
     from authorai import db as dbmod
     from authorai.embeddings import FakeEmbedder
-    from authorai.scoring import _opening_text
+    from authorai.scoring import _metadata_text
 
     run_id = dbmod.create_run(conn)
     doc = dbmod.add_document(conn, run_id, "SOURCE")
@@ -219,21 +219,56 @@ def test_opening_text_includes_section_headings_and_respects_the_page_window(con
     ]
     dbmod.add_chunks(conn, run_id, doc, chunks, embedder.embed([c["text"] for c in chunks]))
 
-    text = _opening_text(conn, doc)
+    text = _metadata_text(conn, run_id, doc)
     assert "## The Real Title" in text  # heading included, once
     assert text.count("## The Real Title") == 1
     assert "First page body" in text and "Second page body." in text
     assert "must NOT appear" not in text  # page window is page <= 2
 
 
+def test_metadata_text_includes_deep_imprint_passages(conn):
+    """The observed live failure: the GHI's publisher/ISBN sit on page 61 —
+    outside any opening-pages window. The marker scan must surface them, and
+    multi-marker imprint chunks must outrank doi-only bibliography entries
+    when the slots run out."""
+    from authorai import db as dbmod
+    from authorai.embeddings import FakeEmbedder
+    from authorai.scoring import _IMPRINT_CHUNK_LIMIT, _metadata_text
+
+    run_id = dbmod.create_run(conn)
+    doc = dbmod.add_document(conn, run_id, "SOURCE")
+    embedder = FakeEmbedder(dim=8)
+    chunks = [
+        {"text": "Opening page text.", "page": 1, "section": "Title"},
+        # Enough doi-only bibliography chunks to fill every imprint slot...
+        *[
+            {"text": f"Reference {i}: Some Author (2020). doi.org/10.1234/x{i}", "page": 40 + i}
+            for i in range(_IMPRINT_CHUNK_LIMIT + 2)
+        ],
+        # ...but the true imprint (many markers at once) must still win a slot.
+        {
+            "text": "Recommended citation: Welthungerhilfe (WHH). ISBN 978-1-9191958-0-3. "
+            "© 2025. All rights reserved.",
+            "page": 61,
+        },
+    ]
+    dbmod.add_chunks(conn, run_id, doc, chunks, embedder.embed([c["text"] for c in chunks]))
+
+    text = _metadata_text(conn, run_id, doc)
+    assert "Opening page text." in text
+    assert "LIKELY IMPRINT / CITATION PASSAGES" in text
+    assert "Recommended citation: Welthungerhilfe" in text
+    assert "ISBN 978-1-9191958-0-3" in text
+
+
 def test_opening_text_is_loud_for_a_document_with_no_text(conn):
     from authorai import db as dbmod
-    from authorai.scoring import _opening_text
+    from authorai.scoring import _metadata_text
 
     run_id = dbmod.create_run(conn)
     doc = dbmod.add_document(conn, run_id, "SOURCE")
     with pytest.raises(ValueError, match="no text chunks"):
-        _opening_text(conn, doc)
+        _metadata_text(conn, run_id, doc)
 
 
 def test_validity_requires_sections():

@@ -13,18 +13,18 @@
     "note": "STANCE-AWARE (Phase 7): accuracy is report-position agreement, so the 0.6 -> 0.95 jump vs the 2026-08-12 reference is the semantics change working as designed — this report LABELS its fabrications, and debunking a falsehood now counts for the author, not against. The 1 incorrect is the 'supply chain disruptions improve food security' claim: the report's weakest falsity marker ('unsupported analyses'), extracted as asserted and judged CONTRADICTED — the designed conservative failure direction. 6 disavowed claims sit UNVERIFIABLE in the coverage bucket (their fabrications reference things the sources never discuss)."
   },
   "credibility": {
-    "score": 50.2,
+    "score": 77.6,
     "method": "usage_weighted_mean",
     "sources": {
-      "GHI synopsis": "37.0 METADATA_ONLY (DOI-less brochure — honest)",
-      "Heliyon review": "92.5 VERIFIED_DOI (live Crossref resolution)"
+      "GHI synopsis": "73.0 METADATA_ONLY (marker-guided extraction found the Welthungerhilfe imprint + 2025 date: authority 30 + recency 20; prior 37.0 saw only pages 1-2)",
+      "Heliyon review": "92.5 VERIFIED_DOI (live Crossref resolution — unchanged)"
     },
-    "note": "50.2 vs prior 50.9: usage weights shifted with the re-verified verdict set (evidence citations moved between sources); method and tiers identical."
+    "note": "RE-RECORDED 2026-08-21 for the Wave-1 credibility fix: _metadata_text now appends marker-located imprint/citation chunks (recommended citation / citation: / ISBN / published by / copyright / doi, weight-thresholded) to the opening pages, and the authority tiers gained WMO/UNCCD (tier 1) + NDMC/IWMI/CGIAR/WCRP (tier 2). Motivating case: the full 2025 GHI scored 37 with its publisher/ISBN sitting unread on page 61; it now scores 73. Accuracy is untouched by construction (pure arithmetic over stored verdicts). Scored with allow_stale: the stored verdicts predate the 2026-08-14 stamp flag-day; their content is unchanged."
   },
   "validity": {
-    "score": 42.8,
+    "score": 42.1,
     "noise_floor": "rubric component noise ±2-3 pts over 3 same-code runs (34.6/39.2/35.1); treat small deltas as noise",
-    "note": "Within rubric noise of the prior 42.0/42.5 readings. Low score is plausibly CORRECT for the fake report — deliberately self-contradicting, no methodology section."
+    "note": "Within rubric noise of the prior 42.8/42.0/42.5 readings. Note: better date extraction can shift validity slightly through the code-side recency component (more sources now have known years). Low score is plausibly CORRECT for the fake report — deliberately self-contradicting, no methodology section."
   },
   "note": "Reference snapshot, not a golden eval — there is no labeled truth for these scores. Exists so future scoring changes have a comparison point. Companion verdict eval on the same run: accuracy 0.86 (32/37), coverage 1.00, within noise of the 0.838 verdict baseline (which was deliberately NOT re-recorded — verdict semantics are untouched by the stance change)."
 }

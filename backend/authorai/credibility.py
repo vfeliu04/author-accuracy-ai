@@ -40,17 +40,22 @@ CROSSREF_RETRIES = 2
 Tier = Literal["VERIFIED_DOI", "VERIFIED_TITLE", "METADATA_ONLY", "NONE"]
 
 METADATA_SYSTEM = """\
-You extract bibliographic metadata from the opening pages of a document.
-Report ONLY what the text actually states — never guess, never infer from
-style, never fill a field from world knowledge. A field the text does not
-state is null.
+You extract bibliographic metadata from excerpts of a document: its opening
+pages, followed by any imprint or citation passages found elsewhere in it
+(institutional reports often print publisher, authors, and ISBN on a
+colophon or "recommended citation" page). Report ONLY what the text actually
+states — never guess, never infer from style, never fill a field from world
+knowledge. A field the text does not state is null.
 
 - `title`: the document's own title (not a chapter or figure title).
 - `authors`: personal names only, as printed. Empty list if none are printed.
 - `publisher`: the publishing organization as printed (imprint, institute,
   journal, agency). Null if not stated.
 - `publication_date`: as printed, ideally ISO (YYYY or YYYY-MM or YYYY-MM-DD).
-- `doi`: the DOI string only (10.xxxx/...), without a URL prefix.
+- `doi`: the DOCUMENT'S OWN DOI only (10.xxxx/...), without a URL prefix.
+
+Reference-list and bibliography entries describe OTHER works — never take
+a DOI, publisher, or date from them.
 """
 
 
@@ -66,7 +71,7 @@ def extract_metadata(llm: LLM, model: str, opening_text: str) -> SourceMetadata:
     return llm.parse(
         model=model,
         system=METADATA_SYSTEM,
-        prompt=f"DOCUMENT OPENING PAGES:\n\n{opening_text}",
+        prompt=f"DOCUMENT EXCERPTS:\n\n{opening_text}",
         output_type=SourceMetadata,
     )
 

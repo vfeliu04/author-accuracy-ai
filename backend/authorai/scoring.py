@@ -223,45 +223,115 @@ def assess_validity(
     }
 
 
-def _opening_text(conn: sqlite3.Connection, doc_id: str, max_chars: int = 6000) -> str:
-    """The document's first pages' text, from its CHUNKS.
+# Lexical markers of imprint/citation blocks, weighted by specificity: the
+# true imprint hits several at once ("Recommended citation … ISBN … ©"), so
+# it outranks bibliography entries that merely contain a DOI. Regexes, not
+# substrings — a bare "doi" substring matched "doing" and let prose outrank
+# real bibliographic text (review 2026-08-21).
+_BIBLIO_MARKERS: tuple[tuple[re.Pattern, int], ...] = (
+    (re.compile(r"recommended citation"), 3),
+    (re.compile(r"suggested citation"), 3),
+    # Bare "citation:" catches imprints that skip the adjective (observed
+    # live: "Citation: WMO & WCRP…, 2025") and is still rare in body text.
+    (re.compile(r"citation:"), 2),
+    (re.compile(r"\bisbn\b"), 2),
+    (re.compile(r"published by"), 2),
+    (re.compile(r"all rights reserved"), 1),
+    (re.compile(r"copyright"), 1),
+    (re.compile(r"©"), 1),
+    (re.compile(r"\bdoi\b|\b10\.\d{4,9}/"), 1),
+)
+_IMPRINT_CHUNK_LIMIT = 4
+_IMPRINT_CHUNK_CHARS = 1200
+# A chunk needs this much summed marker weight to qualify: weight-1 markers
+# alone (a bibliography entry's DOI, a stray "copyright") describe OTHER
+# works or prove nothing — feeding them to the extractor as "likely imprint"
+# invited it to adopt a cited work's DOI as the document's own.
+_IMPRINT_MIN_WEIGHT = 2
+
+
+def _metadata_text(
+    conn: sqlite3.Connection, run_id: str, doc_id: str, max_chars: int = 6000
+) -> str:
+    """The text shown to the metadata extractor: opening pages PLUS the
+    likeliest imprint/citation passages from anywhere in the document.
 
     Chunks are the guaranteed text store (ingestion refuses empty documents);
     the sections in documents.metadata are a convenience that documents
     ingested before Phase 3 don't carry — reading those silently fed the
     metadata extractor an empty string and every source scored tier NONE.
+
+    Opening pages carry the title and date, but institutional reports print
+    their publisher/authors/ISBN on an imprint or recommended-citation page
+    that can sit ANYWHERE (observed live: page 61 of 62 — the GHI scored
+    credibility 37 instead of ~79 because the extractor never saw it). A
+    plain marker scan over the chunk store finds those passages; no model
+    involved in the finding. `max_chars` bounds only the opening segment; the
+    total is bounded at max_chars + limit×chunk chars (~10.9k, fine for a
+    Haiku call).
+
+    Only chunks whose text FULLY made it into the opening segment are
+    excluded from the marker scan — a page-2 imprint sliced off by the cap
+    must stay eligible, or the cap recreates the missed-imprint bug at the
+    front of the document (review 2026-08-21).
     """
     rows = conn.execute(
         """
-        SELECT section, text FROM chunks
-        WHERE doc_id = ? AND kind = 'text' AND (page IS NULL OR page <= 2)
+        SELECT id, section, text FROM chunks
+        WHERE run_id = ? AND doc_id = ? AND kind = 'text' AND (page IS NULL OR page <= 2)
         ORDER BY id LIMIT 8
         """,
-        (doc_id,),
+        (run_id, doc_id),
     ).fetchall()
     if not rows:
         rows = conn.execute(
-            "SELECT section, text FROM chunks WHERE doc_id = ? AND kind = 'text'"
-            " ORDER BY id LIMIT 3",
-            (doc_id,),
+            "SELECT id, section, text FROM chunks WHERE run_id = ? AND doc_id = ?"
+            " AND kind = 'text' ORDER BY id LIMIT 3",
+            (run_id, doc_id),
         ).fetchall()
     # Section headings must be included: for academic PDFs the title and the
     # DOI-bearing header line land in Docling section names, not chunk text —
     # dropping them hid exactly the fields metadata extraction exists to find.
-    parts = []
+    parts: list[str] = []
     seen_sections: set[str] = set()
+    used_ids: set[int] = set()
+    length = 0
     for row in rows:
+        addition: list[str] = []
         section = row["section"]
         if section and section not in seen_sections:
+            addition.append(f"## {section}")
+        addition.append(row["text"])
+        added = sum(len(piece) + 2 for piece in addition)
+        if parts and length + added > max_chars:
+            break  # this chunk would be cut — leave it whole for the marker scan
+        if section and section not in seen_sections:
             seen_sections.add(section)
-            parts.append(f"## {section}")
-        parts.append(row["text"])
+        parts.extend(addition)
+        used_ids.add(row["id"])
+        length += added
     text = "\n\n".join(parts)[:max_chars]
     if not text.strip():
         raise ValueError(
             f"Document {doc_id!r} has no text chunks to extract metadata from — "
             "refusing to score a source that was never ingested properly"
         )
+
+    scored: list[tuple[int, int, str]] = []
+    for row in conn.execute(
+        "SELECT id, text FROM chunks WHERE run_id = ? AND doc_id = ? AND kind = 'text' ORDER BY id",
+        (run_id, doc_id),
+    ):
+        if row["id"] in used_ids:
+            continue
+        lowered = row["text"].lower()
+        score = sum(weight for marker, weight in _BIBLIO_MARKERS if marker.search(lowered))
+        if score >= _IMPRINT_MIN_WEIGHT:
+            scored.append((score, row["id"], row["text"]))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    imprint = [chunk[:_IMPRINT_CHUNK_CHARS] for _, _, chunk in scored[:_IMPRINT_CHUNK_LIMIT]]
+    if imprint:
+        text += "\n\nLIKELY IMPRINT / CITATION PASSAGES:\n\n" + "\n\n".join(imprint)
     return text
 
 
@@ -325,7 +395,7 @@ def score_run(
     try:
         for document in sources:
             metadata = extract_metadata(
-                llm, settings.metadata_model, _opening_text(conn, document["id"])
+                llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
             )
             tier, record = resolve_tier(metadata, crossref)
             merged = merge_record(metadata, record)

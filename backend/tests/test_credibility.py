@@ -325,6 +325,39 @@ def test_aggregation_no_sources_is_explicit():
     assert result["method"] == "no_sources"
 
 
+def test_default_authority_tiers_cover_live_run_publishers():
+    """The orgs added 2026-08-21 (observed as publishers in live runs) must
+    match at their intended tiers via the DEFAULT config, in both acronym and
+    spelled-out forms — and 'UN' must still never match 'University'."""
+    from authorai.config import Settings
+    from authorai.credibility import _publisher_authority
+
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
+    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+
+    for publisher in (
+        "WMO",
+        "World Meteorological Organization",
+        "UNCCD",
+        "United Nations Convention to Combat Desertification",
+        "Welthungerhilfe (WHH), Concern Worldwide, and IFHV",
+        "World Health Organization",
+    ):
+        assert _publisher_authority(publisher, tier1, tier2) == 30.0, publisher
+
+    for publisher in (
+        "United States National Drought Mitigation Center",
+        "NDMC",
+        "International Water Management Institute",
+        "IWMI",
+        "WCRP's Climate and the Cryosphere Project",
+    ):
+        assert _publisher_authority(publisher, tier1, tier2) == 22.5, publisher
+
+    assert _publisher_authority("Unseen University Press", tier1, tier2) == 15.0
+
+
 def test_metadata_extraction_prompt_carries_opening_text():
     from authorai.credibility import extract_metadata
     from tests.conftest import FakeLLM

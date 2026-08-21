@@ -23,7 +23,7 @@
     "coverage": 0.8387,
     "credibility": 51.9,
     "validity": 44.1,
-    "note": "Stance-aware accuracy demonstrates the designed discrimination: the dev report (labels its fabrications) scores 0.95, this holdout (asserts them straight) scores 0.81 — the 5 incorrect are asserted falsehoods the sources contradict, still fully punished."
+    "note": "Stance-aware accuracy demonstrates the designed discrimination: the dev report (labels its fabrications) scores 0.95, this holdout (asserts them straight) scores 0.81 — the 5 incorrect are asserted falsehoods the sources contradict, still fully punished. Historical: the credibility figure predates the 2026-08-21 marker-guided metadata extraction (see score_reference.json) — re-scoring under current code would raise credibility; accuracy/coverage are unaffected by that change."
   },
   "note": "Holdout reference at the Phase 7 close, re-recorded after the stance-aware extraction prompt. Recall/precision byte-identical to the Phase 5 reference (1.00/0.87, same 31-claim profile; the 4 precision-count misses remain prose+table duplicate coverage). Stance agreement 27/27 — PERFECT: the extractor disavowed exactly the 4 table rows under the 'Circulating counter-claim (fabricated)' column and kept every neutral relay ('contrary press coverage has claimed', 'some outlooks report') and every straight-stated fabrication asserted, so the narrow falsity-marker rule generalized instead of keying on the dev report's flag words. The document-level disclaimer disavows nothing (not claim-attached) — policy holds here too. Policy: score at phase boundaries only; never tune against this set."
 }

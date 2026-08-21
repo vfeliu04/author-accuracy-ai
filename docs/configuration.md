@@ -58,8 +58,8 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity components. Parsed loudly: unknown names, duplicates, non-finite/negative weights, or a sum ≠ 1 raise instead of falling back |
-| `AUTHORAI_AUTHORITY_TIER1` | `FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow |
-| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier` | Second-tier publishers, same matching rules |
+| `AUTHORAI_AUTHORITY_TIER1` | `FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow |
+| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,International Water Management Institute,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
 | `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers) |
 
 ## Jobs

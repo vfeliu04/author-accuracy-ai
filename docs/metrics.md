@@ -37,7 +37,7 @@ The verdict judge (`claude-opus-5`) sees only retrieved SOURCE excerpts and must
 
 ## Credibility (per source, 0–100, aggregated per run)
 
-For each SOURCE document, an LLM (`claude-haiku-4-5`) extracts bibliographic metadata from the opening chunks; code verifies it against **live Crossref** and assigns a tier:
+For each SOURCE document, an LLM (`claude-haiku-4-5`) extracts bibliographic metadata from the opening chunks **plus any imprint/citation passages found anywhere in the document** (a weighted marker scan — "recommended citation", "citation:", ISBN, "published by", copyright/©, DOI, and similar — locates them, requiring more than a lone weak marker so bibliography entries about *other* works don't qualify; institutional reports often print their publisher and ISBN on a colophon page deep in the PDF). Code then verifies the metadata against **live Crossref** and assigns a tier:
 
 | Tier | Meaning | Points |
 | --- | --- | --- |

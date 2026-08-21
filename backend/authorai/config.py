@@ -47,8 +47,20 @@ class Settings(BaseSettings):
     validity_model: str = "claude-opus-5"
     validity_weights: str = "coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1"
     # Word-boundary matched against source publishers (see credibility.py).
-    authority_tier1: str = "FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe"
-    authority_tier2: str = "Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier"
+    # Tier 1: intergovernmental bodies and their agencies (WMO/UNCCD added
+    # 2026-08-21 — both published sources in live runs and are peers of
+    # WHO/FAO, which were already listed).
+    authority_tier1: str = (
+        "FAO,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,"
+        "WHO,World Health Organization,UNICEF,OECD,Welthungerhilfe,"
+        "WMO,World Meteorological Organization,UNCCD"
+    )
+    # Tier 2: established research institutions and publishers.
+    authority_tier2: str = (
+        "Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,"
+        "National Drought Mitigation Center,NDMC,International Water Management Institute,"
+        "IWMI,CGIAR,World Climate Research Programme,WCRP"
+    )
     crossref_mailto: str | None = None
     job_poll_seconds: float = 2.0
     # HTTP layer. api_key unset means the app REFUSES to start (fail-closed —
