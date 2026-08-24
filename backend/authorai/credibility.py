@@ -146,6 +146,35 @@ def _same_isbn(ours: str, theirs: str) -> bool:
     return our_core is not None and our_core == their_core
 
 
+def _get_json_with_retries(
+    client: httpx.Client, url: str, params: dict | None, *, retries: int, provider: str
+) -> dict | None:
+    """The one registry-GET policy, shared by every provider client: 200 is a
+    payload, 4xx (except 429) is an ANSWER ("not found") and returns None,
+    429/5xx and transport failures retry with backoff and then RAISE —
+    treating a throttled or down registry as "not found" would silently
+    downgrade verification tiers and make credibility scores non-reproducible
+    between runs of identical inputs."""
+    failure = ""
+    for attempt in range(retries + 1):
+        try:
+            response = client.get(url, params=params)
+        except httpx.TransportError as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+        else:
+            if response.status_code == 200:
+                return response.json()
+            if response.status_code != 429 and response.status_code < 500:
+                logger.info(
+                    "%s %s -> %s (an answer: not found)", provider, url, response.status_code
+                )
+                return None
+            failure = f"HTTP {response.status_code}"
+        if attempt < retries:
+            time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"{provider} gave no answer after {retries + 1} attempts ({url}): {failure}")
+
+
 class IsbnClient:
     """ISBN resolution: Open Library first, Google Books as fallback.
 
@@ -171,23 +200,8 @@ class IsbnClient:
         self._client.close()
 
     def _get_json(self, url: str, params: dict) -> dict | None:
-        failure = ""
-        for attempt in range(ISBN_RETRIES + 1):
-            try:
-                response = self._client.get(url, params=params)
-            except httpx.TransportError as exc:
-                failure = f"{type(exc).__name__}: {exc}"
-            else:
-                if response.status_code == 200:
-                    return response.json()
-                if response.status_code != 429 and response.status_code < 500:
-                    logger.info("ISBN lookup %s -> %s (not found)", url, response.status_code)
-                    return None
-                failure = f"HTTP {response.status_code}"
-            if attempt < ISBN_RETRIES:
-                time.sleep(1.0 * (attempt + 1))
-        raise RuntimeError(
-            f"ISBN provider gave no answer after {ISBN_RETRIES + 1} attempts ({url}): {failure}"
+        return _get_json_with_retries(
+            self._client, url, params, retries=ISBN_RETRIES, provider="ISBN provider"
         )
 
     @staticmethod
@@ -282,26 +296,10 @@ class CrossrefClient:
         self._client.close()
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
-        failure = ""
-        for attempt in range(CROSSREF_RETRIES + 1):
-            try:
-                response = self._client.get(path, params=params)
-            except httpx.TransportError as exc:
-                failure = f"{type(exc).__name__}: {exc}"
-            else:
-                if response.status_code == 200:
-                    return response.json().get("message")
-                if response.status_code != 429 and response.status_code < 500:
-                    logger.info(
-                        "Crossref %s -> %s (an answer: not found)", path, response.status_code
-                    )
-                    return None
-                failure = f"HTTP {response.status_code}"
-            if attempt < CROSSREF_RETRIES:
-                time.sleep(1.0 * (attempt + 1))
-        raise RuntimeError(
-            f"Crossref gave no answer after {CROSSREF_RETRIES + 1} attempts ({path}): {failure}"
+        payload = _get_json_with_retries(
+            self._client, path, params, retries=CROSSREF_RETRIES, provider="Crossref"
         )
+        return payload.get("message") if payload else None
 
     def by_doi(self, doi: str) -> dict | None:
         cleaned = clean_doi(doi)
@@ -383,6 +381,15 @@ def _publishers_agree(ours: str | None, theirs: str | None) -> bool:
     return a in b or b in a
 
 
+def _matched_title(metadata: SourceMetadata, record: dict) -> str | None:
+    """The normalized-exact title comparison every corroboration path shares;
+    returns the normalized title on a match so callers can inspect it."""
+    ours = _normalize_title(metadata.title or "")
+    if ours and ours in {_normalize_title(t) for t in _record_titles(record)}:
+        return ours
+    return None
+
+
 def _title_match(metadata: SourceMetadata, record: dict) -> bool:
     """Normalized-exact title match PLUS one corroborating field.
 
@@ -394,8 +401,8 @@ def _title_match(metadata: SourceMetadata, record: dict) -> bool:
     reject — those titles must corroborate via authors or publisher (NGO
     reports with year-bearing titles usually print no personal authors).
     """
-    ours = _normalize_title(metadata.title or "")
-    if not ours or ours not in {_normalize_title(t) for t in _record_titles(record)}:
+    ours = _matched_title(metadata, record)
+    if ours is None:
         return False
     year_in_title = re.search(r"\b(19|20)\d{2}\b", ours)
     our_year, record_year = _year_of(metadata.publication_date), _record_year(record)
@@ -420,8 +427,7 @@ def _isbn_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
     work's, a series ISBN) being adopted as the document's own. Either the
     registry's title matches ours (normalized-exact) or the publishers agree.
     """
-    ours = _normalize_title(metadata.title or "")
-    if ours and ours in {_normalize_title(t) for t in _record_titles(record)}:
+    if _matched_title(metadata, record):
         return True
     return _publishers_agree(metadata.publisher, record.get("publisher"))
 
