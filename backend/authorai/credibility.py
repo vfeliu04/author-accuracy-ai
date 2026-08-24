@@ -163,7 +163,17 @@ def _get_json_with_retries(
             failure = f"{type(exc).__name__}: {exc}"
         else:
             if response.status_code == 200:
-                return response.json()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    # A 200 whose body is not a JSON object is a malfunction
+                    # (proxy/CDN interference), not an answer — both registries
+                    # always envelope in an object. Treating it as "not found"
+                    # would silently downgrade tiers.
+                    raise RuntimeError(
+                        f"{provider} returned 200 with a non-object body ({url}) — "
+                        "malformed registry response"
+                    )
+                return payload
             if response.status_code != 429 and response.status_code < 500:
                 logger.info(
                     "%s %s -> %s (an answer: not found)", provider, url, response.status_code
