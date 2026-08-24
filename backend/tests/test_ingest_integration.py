@@ -9,7 +9,12 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-EXAMPLE = Path(__file__).resolve().parents[2] / "example_sources" / "2025_world_hunger.pdf"
+EXAMPLE = (
+    Path(__file__).resolve().parents[2]
+    / "example_sources"
+    / "example source one"
+    / "2025_world_hunger.pdf"
+)
 
 
 @pytest.mark.skipif(not EXAMPLE.exists(), reason="example PDF not present")

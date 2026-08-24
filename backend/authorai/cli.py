@@ -1,7 +1,7 @@
 """Command-line interface: ingest PDFs into a run and search it.
 
 Usage (inside the conda env, from backend/):
-    python -m authorai.cli ingest ../example_sources/*.pdf
+    python -m authorai.cli ingest "../example_sources/example source one/"*.pdf
     python -m authorai.cli search <run_id> hunger 735 million
 """
 

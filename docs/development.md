@@ -62,7 +62,7 @@ Set `VITE_API_BASE_URL` (default `http://localhost:8000`) and `VITE_API_KEY` (mu
 All pipeline stages are runnable by hand (from `backend/`, inside the conda env):
 
 ```bash
-python -m authorai.cli ingest ../example_sources/*.pdf            # new run, kind=SOURCE
+python -m authorai.cli ingest "../example_sources/example source one/"*.pdf   # new run, kind=SOURCE
 python -m authorai.cli ingest report.pdf --run <run_id> --kind REPORT
 python -m authorai.cli extract <run_id>                           # claims from the run's REPORT
 python -m authorai.cli eval-extract <run_id> [--golden PATH] [--allow-stale]
@@ -111,7 +111,7 @@ Also: the server is **single-process by design** — startup recovery re-queues 
 
 ## Trying it end to end
 
-Sample PDFs live in `example_sources/`. Upload `World_Hunger_Fake.pdf` as the report and the real PDFs (`2025_world_hunger.pdf`, `disruptions_in_the_food_supply_chain.pdf`, …) as sources — via the UI at `:5173`, or `POST /api/runs` directly. The pipeline runs as one background job; the dashboard polls the progress feed and flips to the full report on DONE. A real run makes paid Anthropic + OpenAI calls proportional to document size.
+Sample PDFs live in `example_sources/`, one folder per test set. From `example source one/`, upload `World_Hunger_Fake.pdf` as the report and the real PDFs (`2025_world_hunger.pdf`, `disruptions_in_the_food_supply_chain.pdf`, …) as sources — via the UI at `:5173`, or `POST /api/runs` directly. `example source two/` holds a second set (six real water/drought sources for `Water_Stress_Fake_Report.pdf`, which sits at the `example_sources/` root next to its answer key). The pipeline runs as one background job; the dashboard polls the progress feed and flips to the full report on DONE. A real run makes paid Anthropic + OpenAI calls proportional to document size.
 
 ## Related docs
 

@@ -58,7 +58,7 @@ frontend/
   src/                 React SPA: upload, run dashboard, claims workspace,
                        run history, compare view, grounded chat
 docs/                  full documentation (see below)
-example_sources/       sample PDFs to try the app with
+example_sources/       sample PDFs to try the app with, one folder per test set
 .github/workflows/     ci.yml (lint, backend tests, frontend build + tests),
                        eval.yml (manually dispatched golden-eval run)
 ```
@@ -86,7 +86,7 @@ cp .env.example .env         # VITE_API_BASE_URL + VITE_API_KEY (must match AUTH
 npm run dev                  # http://localhost:5173
 ```
 
-Try it with the bundled PDFs: upload `example_sources/World_Hunger_Fake.pdf` as the report, with `2025_world_hunger.pdf` and `disruptions_in_the_food_supply_chain.pdf` as sources.
+Try it with the bundled PDFs: upload `example_sources/example source one/World_Hunger_Fake.pdf` as the report, with `2025_world_hunger.pdf` and `disruptions_in_the_food_supply_chain.pdf` from the same folder as sources. A second test set (a fake water-stress report with six real sources) lives in `example_sources/example source two/` with its report and answer key at the `example_sources/` root.
 
 ![Upload page with report and source dropzones](docs/screenshots/upload.png)
 
@@ -108,8 +108,8 @@ cd frontend && npm run test
 The pipeline is also driveable step by step from the command line (from `backend/`):
 
 ```bash
-python -m authorai.cli ingest ../example_sources/2025_world_hunger.pdf     # prints the run id
-python -m authorai.cli ingest ../example_sources/World_Hunger_Fake.pdf --run <run_id> --kind REPORT
+python -m authorai.cli ingest "../example_sources/example source one/2025_world_hunger.pdf"   # prints the run id
+python -m authorai.cli ingest "../example_sources/example source one/World_Hunger_Fake.pdf" --run <run_id> --kind REPORT
 python -m authorai.cli extract <run_id>                                    # claims + stance
 python -m authorai.cli verify <run_id>                                     # Batch API; --sync for immediate
 python -m authorai.cli score <run_id>                                      # accuracy / credibility / validity
