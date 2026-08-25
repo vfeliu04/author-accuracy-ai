@@ -110,6 +110,29 @@ export default function RunView() {
             </div>
           </main>
         </div>
+      ) : reportQuery.error ? (
+        // Polling deliberately stops on a query error — without this branch a
+        // DONE run whose /report fetch failed would sit on the progress feed
+        // forever with no message (review 2026-08-25).
+        <div className="panels">
+          <main className="panel panel--main">
+            <div className="panel__body">
+              <p className="error-text">
+                Could not load this run&rsquo;s analysis:{" "}
+                {reportQuery.error instanceof Error
+                  ? reportQuery.error.message
+                  : "unknown error"}
+              </p>
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => reportQuery.refetch()}
+              >
+                Try again
+              </button>
+            </div>
+          </main>
+        </div>
       ) : focus && report && runId ? (
         <div className="panels">
           {focus === "claims" ? <FocusClaims report={report} runId={runId} /> : null}
@@ -197,7 +220,7 @@ export default function RunView() {
             <div className="chat-bottom">
               <div className="chat-input chat-input--disabled">
                 <input placeholder="Chat unlocks when verification completes…" disabled />
-                <button type="button" className="chat-input__send" disabled aria-hidden>
+                <button type="button" className="chat-input__send" disabled tabIndex={-1}>
                   ➤
                 </button>
               </div>

@@ -129,6 +129,40 @@ describe("RunView", () => {
     await waitFor(() => expect(retry).toHaveBeenCalledWith("r"));
   });
 
+  it("shows a report-load error with a retry affordance instead of a stuck progress feed", async () => {
+    vi.spyOn(v2, "getRun").mockResolvedValue({
+      ...runningDetail,
+      run: { ...runningDetail.run, status: "DONE" }
+    });
+    vi.spyOn(v2, "getReport").mockRejectedValue(new Error("database is locked"));
+    renderAt("r");
+    await waitFor(
+      () => expect(screen.getByText(/Could not load this run/)).toBeInTheDocument(),
+      { timeout: 4000 }
+    );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(
+      screen.queryByText("Verifying this report against its sources")
+    ).not.toBeInTheDocument();
+  }, 10000);
+
+  it("keeps chat errors out of the message history", async () => {
+    vi.spyOn(v2, "getRun").mockResolvedValue({
+      ...runningDetail,
+      run: { ...runningDetail.run, status: "DONE" }
+    });
+    vi.spyOn(v2, "getReport").mockResolvedValue(doneReport);
+    vi.spyOn(v2, "postChat").mockRejectedValue(new Error("chat service down"));
+    renderAt("r");
+    const input = await screen.findByPlaceholderText("Ask about this verification…");
+    fireEvent.change(input, { target: { value: "why?" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.getByText(/chat service down/)).toBeInTheDocument());
+    // The user's turn renders; no fabricated assistant reply joins the history.
+    expect(screen.getByText("why?")).toBeInTheDocument();
+    expect(document.querySelectorAll(".msg--assistant")).toHaveLength(0);
+  });
+
   it("shows sources with credibility, chat, and rings together when done", async () => {
     vi.spyOn(v2, "getRun").mockResolvedValue({
       ...runningDetail,

@@ -490,7 +490,16 @@ def list_run_uploads(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     job = get_run_job(conn, run_id)
     if job is None:
         return []
-    ids = [job["payload"]["report_upload_id"], *job["payload"]["source_upload_ids"]]
+    # .get() keeps the "degrades, never 500" promise structural even for a
+    # payload missing keys (unreachable via production writers, cheap to hold).
+    payload = job["payload"]
+    ids = [
+        upload_id
+        for upload_id in [payload.get("report_upload_id"), *payload.get("source_upload_ids", [])]
+        if upload_id
+    ]
+    if not ids:
+        return []
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
         f"SELECT id, kind, file_name FROM uploads WHERE id IN ({placeholders})", ids

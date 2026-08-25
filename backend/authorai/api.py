@@ -146,7 +146,11 @@ def create_run(
         _validate_pdf(upload, settings.max_upload_bytes)
     # The run's display title: the dialog's Name field when given, else the
     # report filename stem (filename is validated non-empty by _validate_pdf).
-    title = (title or "").strip() or Path(report.filename).stem or report.filename
+    # Capped explicitly — the only other bound is starlette's incidental 1MB
+    # part limit, which would let a megabyte of title ride every gallery load.
+    if title is not None and len(title.strip()) > 200:
+        raise HTTPException(status_code=400, detail="title is limited to 200 characters")
+    title = ((title or "").strip() or Path(report.filename).stem or report.filename)[:200]
 
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

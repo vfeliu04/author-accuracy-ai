@@ -169,6 +169,13 @@ def test_run_title_defaults_to_report_filename_stem(tmp_path):
         ).json()["run_id"]
         assert client.get(f"/api/runs/{blank}", headers=AUTH).json()["run"]["title"] == "report"
 
+        # A megabyte of title must not ride every future gallery load.
+        too_long = client.post(
+            "/api/runs", headers=AUTH, files=_upload_files(), data={"title": "x" * 201}
+        )
+        assert too_long.status_code == 400
+        assert "200 characters" in too_long.json()["detail"]
+
 
 def test_report_exposes_stored_score_details(tmp_path):
     settings = _settings(tmp_path)

@@ -82,6 +82,11 @@ export default function RunCard({
             >
               {retry.isPending ? "Retrying…" : "↻ Retry"}
             </button>
+            {retry.error ? (
+              <span className="error-text">
+                {retry.error instanceof Error ? retry.error.message : "Retry failed"}
+              </span>
+            ) : null}
           </>
         ) : (
           <StatusChip status={run.status} />

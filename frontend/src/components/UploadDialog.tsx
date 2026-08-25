@@ -118,6 +118,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             id="run-name"
             className="name-input"
             value={name}
+            maxLength={200}
             placeholder="Named after the report unless you change it"
             onChange={(event) => {
               setName(event.target.value);

@@ -82,6 +82,15 @@ describe("HomePage", () => {
     await waitFor(() => expect(retry).toHaveBeenCalledWith("fail9012aabbccdd"));
   });
 
+  it("surfaces a failed retry on the card instead of failing silently", async () => {
+    vi.spyOn(v2, "listRuns").mockResolvedValue(RUNS);
+    vi.spyOn(v2, "retryRun").mockRejectedValue(new Error("has no job to retry"));
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run fail9012")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "↻ Retry" }));
+    await waitFor(() => expect(screen.getByText(/has no job to retry/)).toBeInTheDocument());
+  });
+
   it("opens the upload dialog from the create card", async () => {
     vi.spyOn(v2, "listRuns").mockResolvedValue([]);
     renderPage();
