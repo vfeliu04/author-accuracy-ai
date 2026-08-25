@@ -1,7 +1,8 @@
 import type { Report, RunUpload } from "../api/types";
+import { scoreBand } from "../lib/score";
 
 function credClass(total: number): string {
-  return total >= 70 ? "cred-badge--hi" : total >= 40 ? "cred-badge--mid" : "cred-badge--lo";
+  return `cred-badge--${scoreBand(total)}`;
 }
 
 export const TIER_LABELS: Record<string, string> = {

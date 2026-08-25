@@ -1,12 +1,11 @@
-import { useSearchParams } from "react-router-dom";
 import type { Report } from "../api/types";
+import FocusToolbar from "./FocusToolbar";
 
 const COMPONENT_ORDER = ["coverage", "consistency", "methodology", "context", "recency"];
 
 // Full-width validity rubric: each component's score, justification, and the
 // illustrative quote (flagged when code could not find it in the report).
 export default function FocusValidity({ report }: { report: Report }) {
-  const [, setSearchParams] = useSearchParams();
   const detail = report.validity_detail;
   const components = detail?.components ?? null;
   const weights = detail?.weights_used ?? null;
@@ -20,16 +19,9 @@ export default function FocusValidity({ report }: { report: Report }) {
 
   return (
     <main className="panel panel--main">
-      <div className="claims-toolbar">
-        <button
-          type="button"
-          className="btn btn--ghost btn--small"
-          onClick={() => setSearchParams({})}
-        >
-          ✕ Close
-        </button>
+      <FocusToolbar>
         <span className="muted">Validity · rubric with quotes</span>
-      </div>
+      </FocusToolbar>
       <div className="detail-body">
         {components && keys.length > 0 ? (
           <div className="component-grid">

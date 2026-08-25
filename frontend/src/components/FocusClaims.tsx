@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { Report, Verdict } from "../api/types";
 import ClaimBadges from "./ClaimBadges";
+import FocusToolbar from "./FocusToolbar";
 import PdfPane from "./PdfPane";
 
 const FILTERS: Array<Verdict | "ALL"> = ["ALL", "SUPPORTED", "CONTRADICTED", "UNVERIFIABLE"];
@@ -48,14 +49,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
 
   return (
     <main className="panel panel--main">
-      <div className="claims-toolbar">
-        <button
-          type="button"
-          className="btn btn--ghost btn--small"
-          onClick={() => setSearchParams({})}
-        >
-          ✕ Close
-        </button>
+      <FocusToolbar>
         {FILTERS.map((option) => {
           const count =
             option === "ALL"
@@ -81,7 +75,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
             onChange={(event) => setSearch(event.target.value)}
           />
         </label>
-      </div>
+      </FocusToolbar>
       <div className="claims-split">
         <div className="claims-list">
           {claims.map((claim) => (

@@ -1,12 +1,10 @@
+import { BAND_COLORS, scoreBand } from "../lib/score";
+
 // The animated SVG score donut (extracted from the old RatingPanel so every
 // surface renders scores identically). `value` is a 0–1 fraction or null.
 function ringColor(pct: number | null): string {
   if (pct === null) return "var(--color-border)";
-  return pct >= 70
-    ? "var(--color-success)"
-    : pct >= 40
-      ? "var(--color-warning)"
-      : "var(--color-danger)";
+  return BAND_COLORS[scoreBand(pct)];
 }
 
 export default function ScoreRing({

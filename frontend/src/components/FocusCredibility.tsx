@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import type { Report } from "../api/types";
+import FocusToolbar from "./FocusToolbar";
 import { TIER_LABELS } from "./SourcesPanel";
 
 const COMPONENT_META: Array<{ key: string; label: string; max: number }> = [
@@ -40,16 +41,9 @@ export default function FocusCredibility({ report }: { report: Report }) {
 
   return (
     <main className="panel panel--main">
-      <div className="claims-toolbar">
-        <button
-          type="button"
-          className="btn btn--ghost btn--small"
-          onClick={() => setSearchParams({})}
-        >
-          ✕ Close
-        </button>
+      <FocusToolbar>
         <span className="muted">Credibility · score per source</span>
-      </div>
+      </FocusToolbar>
       <div className="claims-split">
         <div className="detail-list">
           {sources.map((source) => (
