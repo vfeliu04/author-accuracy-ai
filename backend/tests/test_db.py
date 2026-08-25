@@ -152,6 +152,7 @@ def test_migration_4_to_5_adds_prompt_hash(tmp_path):
         "DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
         " ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
+        " ALTER TABLE runs DROP COLUMN title;"
         " ALTER TABLE verdicts DROP COLUMN prompt_hash; PRAGMA user_version = 4;"
     )
     conn.close()
@@ -190,6 +191,7 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
         DROP TABLE jobs;
         ALTER TABLE claims DROP COLUMN stance;
         ALTER TABLE claims DROP COLUMN extraction_prompt_hash;
+        ALTER TABLE runs DROP COLUMN title;
         PRAGMA user_version = 5;
         """
     )
@@ -210,6 +212,29 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
     conn.close()
 
 
+def test_migration_9_to_10_adds_run_title(tmp_path):
+    path = tmp_path / "db.sqlite"
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    # Rewind: a v9 database has no runs.title.
+    conn.executescript("ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;")
+    conn.close()
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+    conn.execute("SELECT title FROM runs")  # column exists again
+    conn.close()
+
+
+def test_create_run_with_uploads_stores_title(conn):
+    run_id, _job_id = dbmod.create_run_with_uploads_and_job(
+        conn, [("REPORT", "r.pdf", "/tmp/r.pdf")], title="My Study"
+    )
+    assert dbmod.get_run(conn, run_id)["title"] == "My Study"
+    untitled_id, _ = dbmod.create_run_with_uploads_and_job(
+        conn, [("REPORT", "r.pdf", "/tmp/r.pdf")]
+    )
+    assert dbmod.get_run(conn, untitled_id)["title"] is None
+
+
 def test_add_chunks_rejects_unknown_document(conn):
     run_id = dbmod.create_run(conn)
     with pytest.raises(ValueError, match="Unknown document"):
@@ -223,7 +248,8 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     conn.executescript(
         "DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
         " DROP TABLE jobs; ALTER TABLE claims DROP COLUMN stance;"
-        " ALTER TABLE claims DROP COLUMN extraction_prompt_hash; PRAGMA user_version = 3;"
+        " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
+        " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 3;"
     )
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)

@@ -17,7 +17,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "FAILED")
 
@@ -397,6 +397,22 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 10:
+        conn.executescript(
+            """
+            BEGIN;
+
+            -- User-facing run title (from the upload dialog's Name field,
+            -- falling back to the report filename stem at the API layer).
+            -- Nullable: pre-redesign runs keep NULL and the frontend falls
+            -- back to a short run id.
+            ALTER TABLE runs ADD COLUMN title TEXT;
+
+            PRAGMA user_version = 10;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -662,7 +678,7 @@ def create_job(
 
 
 def create_run_with_uploads_and_job(
-    conn: sqlite3.Connection, uploads: list[tuple[str, str, str]]
+    conn: sqlite3.Connection, uploads: list[tuple[str, str, str]], title: str | None = None
 ) -> tuple[str, str]:
     """Create a run, its upload rows, and its pipeline job in ONE transaction.
 
@@ -676,7 +692,9 @@ def create_run_with_uploads_and_job(
     now = now_iso()
     run_id = new_id()
     with conn:
-        conn.execute("INSERT INTO runs(id, created_at) VALUES (?, ?)", (run_id, now))
+        conn.execute(
+            "INSERT INTO runs(id, created_at, title) VALUES (?, ?, ?)", (run_id, now, title)
+        )
         for kind, file_name, path in uploads:
             upload_id = new_id()
             conn.execute(

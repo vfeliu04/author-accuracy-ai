@@ -17,7 +17,7 @@ import sqlite3
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -126,6 +126,7 @@ def create_run(
     report: Annotated[UploadFile, File()],
     sources: Annotated[list[UploadFile], File()],
     conn: Conn,
+    title: Annotated[str | None, Form()] = None,
 ) -> dict:
     """Accept a report + its sources and queue the full pipeline.
 
@@ -143,6 +144,9 @@ def create_run(
     uploads = [("REPORT", report)] + [("SOURCE", s) for s in sources]
     for _kind, upload in uploads:
         _validate_pdf(upload, settings.max_upload_bytes)
+    # The run's display title: the dialog's Name field when given, else the
+    # report filename stem (filename is validated non-empty by _validate_pdf).
+    title = (title or "").strip() or Path(report.filename).stem or report.filename
 
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -157,7 +161,7 @@ def create_run(
                 shutil.copyfileobj(upload.file, handle, length=1024 * 1024)
             written.append(path)
             rows.append((kind, upload.filename, str(path)))
-        run_id, job_id = dbmod.create_run_with_uploads_and_job(conn, rows)
+        run_id, job_id = dbmod.create_run_with_uploads_and_job(conn, rows, title=title)
     except Exception:
         for path in written:
             path.unlink(missing_ok=True)
@@ -354,6 +358,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
 
     return {
         "run_id": run_id,
+        "title": run["title"],
         "status": run["status"],
         "report_doc_id": report_doc_id,
         "scores": scores,

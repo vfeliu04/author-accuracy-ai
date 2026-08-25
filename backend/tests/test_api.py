@@ -150,6 +150,26 @@ def test_startup_requeues_running_jobs(tmp_path):
     assert any(p["step"] == "recovered" for p in job["progress"])
 
 
+def test_run_title_defaults_to_report_filename_stem(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        # No title given -> the report filename stem.
+        run_id = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        detail = client.get(f"/api/runs/{run_id}", headers=AUTH).json()
+        assert detail["run"]["title"] == "report"
+        assert client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()["title"] == "report"
+
+        # An explicit title wins; whitespace-only falls back to the stem.
+        titled = client.post(
+            "/api/runs", headers=AUTH, files=_upload_files(), data={"title": "My Study"}
+        ).json()["run_id"]
+        assert client.get(f"/api/runs/{titled}", headers=AUTH).json()["run"]["title"] == "My Study"
+        blank = client.post(
+            "/api/runs", headers=AUTH, files=_upload_files(), data={"title": "   "}
+        ).json()["run_id"]
+        assert client.get(f"/api/runs/{blank}", headers=AUTH).json()["run"]["title"] == "report"
+
+
 def test_post_runs_queues_job_and_worker_completes_it(tmp_path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:

@@ -145,9 +145,7 @@ def test_malformed_200_body_raises_instead_of_reading_as_not_found():
     """A 200 whose body is not a JSON object (proxy/CDN interference) is a
     malfunction, not an answer — reading it as 'not found' would silently
     downgrade tiers, the exact failure the retry policy exists to refuse."""
-    respx.get(f"{CROSSREF_BASE}/works/10.1000/xyz").mock(
-        return_value=httpx.Response(200, json=[])
-    )
+    respx.get(f"{CROSSREF_BASE}/works/10.1000/xyz").mock(return_value=httpx.Response(200, json=[]))
     with pytest.raises(RuntimeError, match="non-object body"):
         _client().by_doi("10.1000/xyz")
 
