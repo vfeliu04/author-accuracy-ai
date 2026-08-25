@@ -1,9 +1,13 @@
 import type { ReactNode } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { useReport } from "../api/queries";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useReport, useRuns } from "../api/queries";
 import type { Report } from "../api/types";
+import AppShell from "./AppShell";
 
-const SCORE_METRICS: Array<{ key: "accuracy" | "coverage" | "credibility" | "validity"; label: string }> = [
+const SCORE_METRICS: Array<{
+  key: "accuracy" | "coverage" | "credibility" | "validity";
+  label: string;
+}> = [
   { key: "accuracy", label: "Accuracy" },
   { key: "coverage", label: "Coverage" },
   { key: "credibility", label: "Credibility" },
@@ -52,17 +56,22 @@ function Delta({
   );
 }
 
-const GRID_STYLE = { display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 0.9fr", gap: "0.5rem 1rem", alignItems: "center" } as const;
-
 // Because v2 retains every run, two can be diffed side by side. Scores are
 // 0–1 fractions (or null before scoring); stats are integer counts.
 const ComparePage = () => {
+  const navigate = useNavigate();
   const [params] = useSearchParams();
   const a = params.get("a") ?? undefined;
   const b = params.get("b") ?? undefined;
 
+  const runsQuery = useRuns();
   const reportA = useReport(a);
   const reportB = useReport(b);
+
+  const titleOf = (id: string | undefined): string => {
+    if (!id) return "—";
+    return runsQuery.data?.find((run) => run.id === id)?.title ?? `Run ${id.slice(0, 8)}`;
+  };
 
   const missing = !a || !b;
   const loading = reportA.isLoading || reportB.isLoading;
@@ -71,48 +80,50 @@ const ComparePage = () => {
   const rb = reportB.data;
 
   return (
-    <div className="dashboard">
-      <header className="dashboard__header">
-        <div className="dashboard__title-block">
+    <AppShell
+      title={
+        <>
+          <button
+            type="button"
+            className="back-btn"
+            onClick={() => navigate("/")}
+            aria-label="Back to all runs"
+          >
+            ←
+          </button>
           <h1>Compare runs</h1>
-          <p className="dashboard__subtitle">
-            {a ? a.slice(0, 8) : "—"} vs {b ? b.slice(0, 8) : "—"}
-          </p>
-        </div>
-        <div className="dashboard__meta">
-          <Link to="/runs" className="dashboard__refresh-button">
-            ← All runs
-          </Link>
-        </div>
-      </header>
-      <main className="dashboard__content">
-        <section className="dashboard__column" style={{ width: "100%", gridColumn: "1 / -1" }}>
+        </>
+      }
+    >
+      <div className="compare-body">
+        <div className="compare-inner">
           {missing ? (
-            <p className="dashboard__status">Pick two runs from the history to compare.</p>
+            <p className="muted">Pick two runs from the gallery to compare.</p>
           ) : loading ? (
-            <p className="dashboard__status">Loading runs…</p>
+            <p className="muted">Loading runs…</p>
           ) : failed ? (
-            <p className="dashboard__status dashboard__status--error">
+            <p className="error-text">
               {(reportA.error ?? reportB.error) instanceof Error
                 ? (reportA.error ?? reportB.error)!.message
                 : "One of the runs could not be loaded."}
             </p>
           ) : ra && rb ? (
-            <article className="card">
-              <header className="card__header">
-                <h2>Scores</h2>
-              </header>
-              <div style={GRID_STYLE}>
+            <div className="compare-card">
+              <div className="compare-grid">
                 <span className="compare__metric">Metric</span>
-                <span>{a?.slice(0, 8)}</span>
-                <span>{b?.slice(0, 8)}</span>
+                <span className="compare-col-head">{titleOf(a)}</span>
+                <span className="compare-col-head">{titleOf(b)}</span>
                 <span>Δ</span>
                 {SCORE_METRICS.map((metric) => (
                   <FragmentRow key={metric.key}>
                     <span className="compare__metric">{metric.label}</span>
                     <span>{fmtPct(ra.scores?.[metric.key] ?? null)}</span>
                     <span>{fmtPct(rb.scores?.[metric.key] ?? null)}</span>
-                    <Delta a={ra.scores?.[metric.key] ?? null} b={rb.scores?.[metric.key] ?? null} asPct />
+                    <Delta
+                      a={ra.scores?.[metric.key] ?? null}
+                      b={rb.scores?.[metric.key] ?? null}
+                      asPct
+                    />
                   </FragmentRow>
                 ))}
                 {STAT_METRICS.map((metric) => (
@@ -120,25 +131,30 @@ const ComparePage = () => {
                     <span className="compare__metric">{metric.label}</span>
                     <span>{ra.stats[metric.key]}</span>
                     <span>{rb.stats[metric.key]}</span>
-                    <Delta a={ra.stats[metric.key]} b={rb.stats[metric.key]} asPct={false} valenced={false} />
+                    <Delta
+                      a={ra.stats[metric.key]}
+                      b={rb.stats[metric.key]}
+                      asPct={false}
+                      valenced={false}
+                    />
                   </FragmentRow>
                 ))}
               </div>
               {ra.scores === null || rb.scores === null ? (
-                <p className="dashboard__status">
+                <p className="muted" style={{ marginBottom: 0 }}>
                   One of these runs is not scored yet — its score cells show “—”.
                 </p>
               ) : null}
-              <p style={{ margin: "0.5rem 0 0", fontSize: "0.8em", opacity: 0.7 }}>
+              <p className="panel-note">
                 Accuracy is report-position agreement: contradicted claims the report itself
                 disavows count as correct, so a run can show contradicted claims and high
                 accuracy at once.
               </p>
-            </article>
+            </div>
           ) : null}
-        </section>
-      </main>
-    </div>
+        </div>
+      </div>
+    </AppShell>
   );
 };
 
