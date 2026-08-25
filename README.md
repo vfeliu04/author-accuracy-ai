@@ -3,9 +3,9 @@
 [![CI](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its source PDFs; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained, browsable in a run history, and comparable side by side with any other run.
+Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its source PDFs; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
 
-![Run dashboard: verdict stats, score rings, grounded chat](docs/screenshots/dashboard.png)
+![Run view: sources with credibility tiers, grounded chat, score rings](docs/screenshots/run.png)
 
 ## How it works
 
@@ -55,8 +55,8 @@ backend/
     holdout/           held-out eval set (scored only at phase boundaries)
   pyproject.toml       pinned dependencies
 frontend/
-  src/                 React SPA: upload, run dashboard, claims workspace,
-                       run history, compare view, grounded chat
+  src/                 React SPA: run gallery + upload dialog, three-panel
+                       run view, focus modes, compare view, grounded chat
 docs/                  full documentation (see below)
 example_sources/       sample PDFs to try the app with, one folder per test set
 .github/workflows/     ci.yml (lint, backend tests, frontend build + tests),
@@ -88,11 +88,11 @@ npm run dev                  # http://localhost:5173
 
 Try it with the bundled PDFs: upload `example_sources/example source one/World_Hunger_Fake.pdf` as the report, with `2025_world_hunger.pdf` and `disruptions_in_the_food_supply_chain.pdf` from the same folder as sources. A second test set (a fake water-stress report with six real sources) lives in `example_sources/example source two/` with its report and answer key at the `example_sources/` root.
 
-![Upload page with report and source dropzones](docs/screenshots/upload.png)
+![Home gallery of verifications with score pills](docs/screenshots/home.png)
 
-Every run is kept — revisit any past run from the history page, or diff two runs metric by metric:
+Every claim opens a focus view with the report page and the cited source page side by side; every run stays in the gallery and can be diffed metric by metric against any other:
 
-![Run history](docs/screenshots/history.png)
+![Claims focus: report and source pages side by side](docs/screenshots/claims.png)
 
 ![Compare view with per-metric deltas](docs/screenshots/compare.png)
 

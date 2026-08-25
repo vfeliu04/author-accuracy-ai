@@ -21,7 +21,7 @@ flowchart TD
     D --> E["verify<br/>per-claim SOURCE-only hybrid retrieval →<br/>Batch API verdicts → code-side quote check → verdicts"]
     E --> F["score<br/>stance-aware accuracy (code) + Crossref credibility<br/>+ validity rubric → run_scores"]
     F --> G["finish_job_and_run<br/>job DONE + run DONE in one transaction"]
-    G --> H["Frontend polls /api/runs/:id + /report<br/>dashboard, claims workspace, chat"]
+    G --> H["Frontend polls /api/runs/:id + /report<br/>run view, claims forkspace, chat"]
 ```
 
 Each step is recorded in the job's `progress` JSON (`{step, label, status, ts}`, upserted by step name). A restart re-queues any `RUNNING` job and resumes from its first incomplete step — see [Jobs](#jobs-jobspy).
