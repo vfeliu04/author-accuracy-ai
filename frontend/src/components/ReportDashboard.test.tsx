@@ -20,7 +20,7 @@ function renderAt(runId: string) {
 }
 
 const runningDetail: RunDetail = {
-  run: { id: "r", status: "RUNNING", created_at: "t", error: null },
+  run: { id: "r", status: "RUNNING", created_at: "t", error: null, title: null, source_count: null, scores: null },
   job: {
     id: "j",
     run_id: "r",
@@ -34,14 +34,19 @@ const runningDetail: RunDetail = {
     error: null,
     created_at: "t",
     updated_at: "t"
-  }
+  },
+  uploads: []
 };
 
 const doneReport: Report = {
   run_id: "r",
+  title: null,
   status: "DONE",
   report_doc_id: "d",
   scores: { accuracy: 1, coverage: 0.5, credibility: 0.8, validity: 0.6 },
+  accuracy_detail: null,
+  validity_detail: null,
+  credibility_detail: null,
   stats: { claims_total: 1, claims_supported: 1, claims_contradicted: 0, claims_unverifiable: 0 },
   claims: [
     {
@@ -77,8 +82,9 @@ describe("ReportDashboard", () => {
 
   it("offers a retry on a failed run and calls the endpoint", async () => {
     vi.spyOn(v2, "getRun").mockResolvedValue({
-      run: { id: "r", status: "FAILED", created_at: "t", error: "Connection error." },
-      job: null
+      run: { id: "r", status: "FAILED", created_at: "t", error: "Connection error.", title: null, source_count: null, scores: null },
+      job: null,
+      uploads: []
     });
     vi.spyOn(v2, "getReport").mockResolvedValue({ ...doneReport, status: "FAILED", scores: null });
     const retry = vi
@@ -92,8 +98,9 @@ describe("ReportDashboard", () => {
 
   it("shows claims, sources, and rating when the run is done", async () => {
     vi.spyOn(v2, "getRun").mockResolvedValue({
-      run: { id: "r", status: "DONE", created_at: "t", error: null },
-      job: null
+      run: { id: "r", status: "DONE", created_at: "t", error: null, title: null, source_count: null, scores: null },
+      job: null,
+      uploads: []
     });
     vi.spyOn(v2, "getReport").mockResolvedValue(doneReport);
     renderAt("r");

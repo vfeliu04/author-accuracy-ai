@@ -2,7 +2,7 @@
 // so a finished run isn't refetched forever; mutations invalidate the run list.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { ChatMode, ChatTurn, RunDetail, Report } from "./types";
+import type { ChatMode, ChatTurn, Report, RunDetail, RunListItem } from "./types";
 import { isTerminal } from "./types";
 import {
   createRun,
@@ -23,8 +23,15 @@ export const queryKeys = {
   pdf: (runId?: string, docId?: string | null) => ["pdf", runId, docId] as const
 };
 
+// The gallery polls only while some run is still moving — otherwise a card
+// stuck on "Running" would never flip without a manual reload.
 export function useRuns() {
-  return useQuery({ queryKey: queryKeys.runs, queryFn: listRuns });
+  return useQuery({
+    queryKey: queryKeys.runs,
+    queryFn: listRuns,
+    refetchInterval: (query: { state: { data?: RunListItem[] } }) =>
+      query.state.data?.some((run) => !isTerminal(run.status)) ? POLL_MS : false
+  });
 }
 
 // Stop polling once the run reaches a terminal status OR the query itself
@@ -57,8 +64,8 @@ export function useReport(runId: string | undefined) {
 export function useCreateRun() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ report, sources }: { report: File; sources: File[] }) =>
-      createRun(report, sources),
+    mutationFn: ({ report, sources, title }: { report: File; sources: File[]; title?: string }) =>
+      createRun(report, sources, title),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.runs })
   });
 }

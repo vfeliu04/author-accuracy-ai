@@ -9,9 +9,13 @@ import ComparePage from "./ComparePage";
 function reportFor(id: string, overrides: Partial<Report>): Report {
   return {
     run_id: id,
+    title: null,
     status: "DONE",
     report_doc_id: "d",
     scores: { accuracy: 0.6, coverage: 0.5, credibility: 0.8, validity: 0.6 },
+    accuracy_detail: null,
+    validity_detail: null,
+    credibility_detail: null,
     stats: { claims_total: 10, claims_supported: 6, claims_contradicted: 2, claims_unverifiable: 2 },
     claims: [],
     sources: [],

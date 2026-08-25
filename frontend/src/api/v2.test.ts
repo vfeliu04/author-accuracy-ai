@@ -44,6 +44,25 @@ describe("v2 fetchers", () => {
     expect(form).toBeInstanceOf(FormData);
     expect((form.get("report") as File).name).toBe("r.pdf");
     expect(form.getAll("sources")).toHaveLength(1);
+    expect(form.get("title")).toBeNull(); // omitted when not provided
+  });
+
+  it("createRun sends a trimmed title and omits blank ones", async () => {
+    // A fresh Response per call — a shared one errors on the second body read.
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(jsonResponse({ run_id: "r", job_id: "j" })));
+    vi.stubGlobal("fetch", fetchMock);
+    const report = new File([new Uint8Array([1])], "r.pdf", { type: "application/pdf" });
+    const source = new File([new Uint8Array([2])], "s.pdf", { type: "application/pdf" });
+
+    await createRun(report, [source], "  My Study  ");
+    let form = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
+    expect(form.get("title")).toBe("My Study");
+
+    await createRun(report, [source], "   ");
+    form = (fetchMock.mock.calls[1][1] as RequestInit).body as FormData;
+    expect(form.get("title")).toBeNull();
   });
 
   it("throws the server error text on a non-2xx response", async () => {

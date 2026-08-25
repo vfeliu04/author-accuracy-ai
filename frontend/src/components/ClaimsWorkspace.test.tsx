@@ -7,9 +7,13 @@ import * as v2 from "../api/v2";
 
 const report: Report = {
   run_id: "r",
+  title: null,
   status: "DONE",
   report_doc_id: "reportdoc",
   scores: { accuracy: 1, coverage: 1, credibility: 0.8, validity: 0.6 },
+  accuracy_detail: null,
+  validity_detail: null,
+  credibility_detail: null,
   stats: { claims_total: 1, claims_supported: 1, claims_contradicted: 0, claims_unverifiable: 0 },
   claims: [
     {

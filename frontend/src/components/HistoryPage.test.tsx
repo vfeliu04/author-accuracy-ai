@@ -21,8 +21,8 @@ afterEach(() => vi.restoreAllMocks());
 describe("HistoryPage", () => {
   it("lists runs with a status label and links to the run", async () => {
     vi.spyOn(v2, "listRuns").mockResolvedValue([
-      { id: "abcdef1234567890", status: "DONE", created_at: "2026-08-13T10:00:00Z", error: null },
-      { id: "0987654321fedcba", status: "RUNNING", created_at: "2026-08-13T09:00:00Z", error: null }
+      { id: "abcdef1234567890", status: "DONE", created_at: "2026-08-13T10:00:00Z", error: null, title: null, source_count: null, scores: null },
+      { id: "0987654321fedcba", status: "RUNNING", created_at: "2026-08-13T09:00:00Z", error: null, title: null, source_count: null, scores: null }
     ]);
 
     renderPage();

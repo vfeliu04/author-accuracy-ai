@@ -8,6 +8,9 @@ export type RunListItem = {
   created_at: string;
   status: RunStatus;
   error: string | null;
+  title: string | null;
+  source_count: number | null; // null for runs without a job row
+  scores: Scores;
 };
 
 export type JobProgressStep = {
@@ -29,10 +32,17 @@ export type Job = {
   updated_at: string;
 };
 
+export type RunUpload = {
+  id: string;
+  kind: "REPORT" | "SOURCE";
+  file_name: string;
+};
+
 // GET /api/runs/{id}
 export type RunDetail = {
   run: RunListItem;
   job: Job | null;
+  uploads: RunUpload[]; // report first, then sources; empty for job-less runs
 };
 
 export type Verdict = "SUPPORTED" | "CONTRADICTED" | "UNVERIFIABLE";
@@ -87,12 +97,45 @@ export type ReportStats = {
   claims_unverifiable: number;
 };
 
+// Stored-score detail blocks — null before scoring; individual keys null on
+// runs scored by older versions that didn't store them.
+export type AccuracyDetail = {
+  supported: number | null;
+  contradicted: number | null;
+  unverifiable: number | null;
+  total: number | null;
+  correct: number | null;
+  incorrect: number | null;
+  disavowed: number | null;
+};
+
+export type ValidityComponent = {
+  score: number | null;
+  justification: string;
+  quote: string | null;
+  quote_verified: number | null;
+};
+
+export type ValidityDetail = {
+  components: Record<string, ValidityComponent> | null;
+  weights_used: Record<string, number> | null;
+};
+
+export type CredibilityDetail = {
+  method: string | null;
+  sources: { doc_id: string; total: number; tier: string; usage: number }[] | null;
+};
+
 // GET /api/runs/{id}/report
 export type Report = {
   run_id: string;
+  title: string | null;
   status: RunStatus;
   report_doc_id: string | null;
   scores: Scores;
+  accuracy_detail: AccuracyDetail | null;
+  validity_detail: ValidityDetail | null;
+  credibility_detail: CredibilityDetail | null;
   stats: ReportStats;
   claims: Claim[];
   sources: SourceCredibility[];

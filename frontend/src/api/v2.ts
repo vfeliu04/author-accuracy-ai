@@ -37,10 +37,17 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function createRun(report: File, sources: File[]): Promise<CreateRunResponse> {
+export async function createRun(
+  report: File,
+  sources: File[],
+  title?: string
+): Promise<CreateRunResponse> {
   const form = new FormData();
   form.append("report", report, report.name);
   sources.forEach((file) => form.append("sources", file, file.name));
+  if (title && title.trim()) {
+    form.append("title", title.trim());
+  }
   // Content-Type is set by the browser for FormData (with the boundary).
   return apiJson<CreateRunResponse>("/api/runs", { method: "POST", body: form });
 }
