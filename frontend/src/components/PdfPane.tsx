@@ -17,14 +17,14 @@ const PdfPane = ({
   const { url, isLoading, error } = usePdfBlob(runId, docId ?? undefined);
 
   if (!docId) {
-    return <div className="pdf-pane pdf-pane--empty">No document for this pane.</div>;
+    return <div className="pdf-pane__empty">No document for this pane.</div>;
   }
   if (isLoading) {
-    return <div className="pdf-pane pdf-pane--empty">Loading {title}…</div>;
+    return <div className="pdf-pane__empty">Loading {title}…</div>;
   }
   if (error || !url) {
     return (
-      <div className="pdf-pane pdf-pane--empty">
+      <div className="pdf-pane__empty">
         Could not load {title}: {error?.message ?? "unavailable"}
       </div>
     );

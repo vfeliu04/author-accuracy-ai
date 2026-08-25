@@ -1,14 +1,21 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useChat, useReport, useRetryRun, useRun } from "../api/queries";
 import type { ChatMode } from "../api/types";
 import { humanizeError } from "../lib/errors";
 import AnalysisPanel from "./AnalysisPanel";
 import AppShell from "./AppShell";
 import ChatPanel, { type ChatMessage } from "./ChatPanel";
+import FocusClaims from "./FocusClaims";
+import FocusCredibility from "./FocusCredibility";
+import FocusReport from "./FocusReport";
+import FocusValidity from "./FocusValidity";
 import ProgressFeed from "./ProgressFeed";
 import SourcesPanel from "./SourcesPanel";
 import StatusChip from "./StatusChip";
+
+const FOCUS_MODES = ["claims", "report", "credibility", "validity"] as const;
+type FocusMode = (typeof FOCUS_MODES)[number];
 
 const CHAT_SUGGESTIONS = [
   "Which claims are contradicted?",
@@ -22,6 +29,7 @@ const CHAT_SUGGESTIONS = [
 export default function RunView() {
   const { runId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const runQuery = useRun(runId);
   const reportQuery = useReport(runId);
   const chat = useChat(runId ?? "");
@@ -62,7 +70,16 @@ export default function RunView() {
 
   const title = run?.title ?? (runId ? `Run ${runId.slice(0, 8)}` : "Run");
 
-  const openSource = () => navigate(`/runs/${runId}/sources/${report?.sources[0]?.doc_id ?? ""}`);
+  // Focus modes render full-width in place of the three panels. Opening one
+  // PUSHES the param so the browser Back button closes it; an invalid value
+  // or a not-yet-DONE run simply ignores the param.
+  const focusParam = searchParams.get("focus");
+  const focus: FocusMode | null =
+    status === "DONE" && report && (FOCUS_MODES as readonly string[]).includes(focusParam ?? "")
+      ? (focusParam as FocusMode)
+      : null;
+  const openFocus = (mode: FocusMode, extra: Record<string, string> = {}) =>
+    setSearchParams({ focus: mode, ...extra });
 
   return (
     <AppShell
@@ -93,12 +110,19 @@ export default function RunView() {
             </div>
           </main>
         </div>
+      ) : focus && report && runId ? (
+        <div className="panels">
+          {focus === "claims" ? <FocusClaims report={report} runId={runId} /> : null}
+          {focus === "report" ? <FocusReport report={report} runId={runId} /> : null}
+          {focus === "credibility" ? <FocusCredibility report={report} /> : null}
+          {focus === "validity" ? <FocusValidity report={report} /> : null}
+        </div>
       ) : status === "DONE" && report ? (
         <div className="panels">
           <SourcesPanel
             uploads={uploads}
             report={report}
-            onOpenSource={(docId) => navigate(`/runs/${runId}/sources/${docId}`)}
+            onOpenSource={(docId) => openFocus("credibility", { source: docId })}
           />
           <ChatPanel
             messages={messages}
@@ -111,9 +135,10 @@ export default function RunView() {
           />
           <AnalysisPanel
             report={report}
-            onOpenClaims={() => navigate(`/runs/${runId}/workspace`)}
-            onOpenReport={() => navigate(`/runs/${runId}/report`)}
-            onOpenCredibility={openSource}
+            onOpenClaims={() => openFocus("claims")}
+            onOpenReport={() => openFocus("report")}
+            onOpenCredibility={() => openFocus("credibility")}
+            onOpenValidity={() => openFocus("validity")}
           />
         </div>
       ) : status === "FAILED" ? (

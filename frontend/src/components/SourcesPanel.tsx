@@ -4,7 +4,7 @@ function credClass(total: number): string {
   return total >= 70 ? "cred-badge--hi" : total >= 40 ? "cred-badge--mid" : "cred-badge--lo";
 }
 
-const TIER_LABELS: Record<string, string> = {
+export const TIER_LABELS: Record<string, string> = {
   VERIFIED_DOI: "verified DOI",
   VERIFIED_TITLE: "verified title",
   VERIFIED_ISBN: "verified ISBN",
