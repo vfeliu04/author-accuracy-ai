@@ -54,7 +54,9 @@ export default function AnalysisPanel({
                     <span className="verdict-bar__u" style={{ flex: stats.claims_unverifiable }} />
                   </div>
                 ) : null}
-                <span className="tile__sub">{stats?.claims_total ?? 0} claims</span>
+                <span className="tile__sub">
+                  {stats?.claims_total ?? 0} claim{stats?.claims_total === 1 ? "" : "s"}
+                </span>
               </button>
               <button type="button" className="tile" onClick={onOpenReport}>
                 <div className="tile__row">

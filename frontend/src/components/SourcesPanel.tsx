@@ -45,7 +45,11 @@ export default function SourcesPanel({
             <div className="src-row__name">
               {reportUpload?.file_name ?? report?.title ?? "Report"}
             </div>
-            {claimCount > 0 ? <div className="src-row__sub">{claimCount} claims</div> : null}
+            {claimCount > 0 ? (
+              <div className="src-row__sub">
+                {claimCount} claim{claimCount === 1 ? "" : "s"}
+              </div>
+            ) : null}
           </div>
         </div>
 

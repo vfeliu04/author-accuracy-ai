@@ -145,8 +145,9 @@ describe("RunView", () => {
     expect(screen.getByPlaceholderText("Ask about this verification…")).toBeEnabled();
     expect(screen.getByText("Accuracy")).toBeInTheDocument();
     expect(screen.getByText("100")).toBeInTheDocument();
-    // The claims tile advertises the count; no composite "Overall" anywhere.
-    expect(screen.getByText("1 claims")).toBeInTheDocument();
+    // The claim count shows on the report row and the Claims tile; no
+    // composite "Overall" anywhere.
+    expect(screen.getAllByText("1 claim").length).toBeGreaterThan(0);
     expect(screen.queryByText(/overall/i)).not.toBeInTheDocument();
   });
 });
