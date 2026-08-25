@@ -170,6 +170,58 @@ def test_run_title_defaults_to_report_filename_stem(tmp_path):
         assert client.get(f"/api/runs/{blank}", headers=AUTH).json()["run"]["title"] == "report"
 
 
+def test_report_exposes_stored_score_details(tmp_path):
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        report = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()
+        assert report["accuracy_detail"]["correct"] == 1
+        assert report["accuracy_detail"]["disavowed"] == 0
+        assert report["credibility_detail"]["method"] == "usage_weighted_mean"
+        assert report["credibility_detail"]["sources"][0]["usage"] == 1
+        component = report["validity_detail"]["components"]["coverage"]
+        assert component["justification"] == "treats its stated scope"
+        assert report["validity_detail"]["weights_used"] == {"coverage": 1.0}
+
+
+def test_report_details_tolerate_minimal_legacy_shapes(tmp_path):
+    """Rows scored before a field existed lack the key — the endpoint must
+    return None-filled details, never 500."""
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    dbmod.save_run_scores(
+        conn,
+        run_id,
+        accuracy={
+            "supported": 1,
+            "contradicted": 0,
+            "unverifiable": 1,
+            "total": 2,
+            "accuracy": 1.0,
+            "coverage": 0.5,
+        },
+        credibility={"score": 62.5, "weighting": "usage"},
+        validity={"score": 71.0, "components": {}},
+    )
+    conn.close()
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        report = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()
+        assert report["accuracy_detail"]["correct"] is None
+        assert report["credibility_detail"]["method"] is None
+        assert report["validity_detail"]["weights_used"] is None
+        assert report["scores"]["accuracy"] == 1.0
+
+
+def test_report_details_null_when_unscored(client):
+    run_id = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+    report = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()
+    assert report["scores"] is None
+    assert report["accuracy_detail"] is None
+    assert report["validity_detail"] is None
+    assert report["credibility_detail"] is None
+
+
 def test_runs_list_is_enriched(tmp_path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
@@ -423,11 +475,29 @@ def _seed_scored_run(settings) -> str:
             "contradicted": 0,
             "unverifiable": 1,
             "total": 2,
+            "correct": 1,
+            "incorrect": 0,
+            "disavowed": 0,
             "accuracy": 1.0,
             "coverage": 0.5,
         },
-        credibility={"score": 62.5, "weighting": "usage"},
-        validity={"score": 71.0, "components": {}},
+        credibility={
+            "score": 62.5,
+            "method": "usage_weighted_mean",
+            "sources": [{"doc_id": source, "total": 62.5, "tier": "VERIFIED_DOI", "usage": 1}],
+        },
+        validity={
+            "score": 71.0,
+            "components": {
+                "coverage": {
+                    "score": 70,
+                    "justification": "treats its stated scope",
+                    "quote": "hunger fell",
+                    "quote_verified": 1,
+                }
+            },
+            "weights_used": {"coverage": 1.0},
+        },
     )
     dbmod.save_source_credibility(
         conn,

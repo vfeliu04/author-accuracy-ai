@@ -330,12 +330,35 @@ def get_report(run_id: str, conn: Conn) -> dict:
     }
 
     scores = None
+    accuracy_detail = validity_detail = credibility_detail = None
     if stored is not None:
         scores = {
             "accuracy": stored["accuracy"]["accuracy"],
             "coverage": stored["accuracy"]["coverage"],
             "credibility": _fraction(stored["credibility"]["score"]),
             "validity": _fraction(stored["validity"]["score"]),
+        }
+        # Read-only exposure of what scoring already stored — .get()-safe
+        # because rows scored before a field existed simply lack the key.
+        accuracy_detail = {
+            key: stored["accuracy"].get(key)
+            for key in (
+                "supported",
+                "contradicted",
+                "unverifiable",
+                "total",
+                "correct",
+                "incorrect",
+                "disavowed",
+            )
+        }
+        validity_detail = {
+            "components": stored["validity"].get("components"),
+            "weights_used": stored["validity"].get("weights_used"),
+        }
+        credibility_detail = {
+            "method": stored["credibility"].get("method"),
+            "sources": stored["credibility"].get("sources"),
         }
 
     claims = [
@@ -383,6 +406,9 @@ def get_report(run_id: str, conn: Conn) -> dict:
         "status": run["status"],
         "report_doc_id": report_doc_id,
         "scores": scores,
+        "accuracy_detail": accuracy_detail,
+        "validity_detail": validity_detail,
+        "credibility_detail": credibility_detail,
         "stats": stats,
         "claims": claims,
         "sources": sources,

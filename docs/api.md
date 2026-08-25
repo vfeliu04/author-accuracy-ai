@@ -62,12 +62,13 @@ All errors are JSON with a `detail` key.
 
 ### `POST /api/runs` → 202
 
-Multipart form with two fields:
+Multipart form:
 
 | Field | Type | Rules |
 |---|---|---|
 | `report` | one file | Required. `.pdf` extension, `%PDF-` magic bytes, ≤ `max_upload_bytes` |
 | `sources` | list of files | Required. Same per-file rules; at most `max_source_files` |
+| `title` | text | Optional display title for the run; whitespace-only or absent falls back to the report filename stem |
 
 Every file is validated (extension, size, magic bytes — without reading it into memory) before any file is written. Files are stored under `uploads_dir` with server-generated names; the client filename is kept only as display metadata and never touches a path. The run, its upload rows, and a `full_pipeline` job commit in **one transaction** — a failure anywhere deletes the written files and leaves no rows.
 
@@ -83,10 +84,13 @@ Response: `{"run_id": "<hex>", "job_id": "<hex>"}`. The job starts `QUEUED`; a s
 | `created_at` | ISO-8601 UTC timestamp |
 | `status` | `CREATED` \| `RUNNING` \| `DONE` \| `FAILED` |
 | `error` | Failure message, else `null` |
+| `title` | Display title (`null` on runs created before titles existed) |
+| `source_count` | Number of source files, from the latest job's payload (`null` for runs without a job) |
+| `scores` | `null` until scored, else the same 0–1 shape as the report payload: `{accuracy, coverage, credibility, validity}` |
 
 ### `GET /api/runs/{run_id}`
 
-`{"run": <run>, "job": <job> | null}` — the run plus its most recent job. 404 `Unknown run '<id>'` otherwise.
+`{"run": <run>, "job": <job> | null, "uploads": [<upload>, ...]}` — the run plus its most recent job and the uploaded files (`{id, kind, file_name}`, report first, then sources in upload order; empty for runs without a job). 404 `Unknown run '<id>'` otherwise.
 
 A job object:
 
@@ -114,9 +118,13 @@ The job object above, or 404 `Unknown job '<id>'`.
 ```json
 {
   "run_id": "…",
+  "title": "Water Stress Report",
   "status": "DONE",
   "report_doc_id": "…",          // the report's document id (for the file endpoint), or null
   "scores": { "accuracy": 0.84, "coverage": 0.97, "credibility": 0.509, "validity": 0.42 },
+  "accuracy_detail": { "supported": 12, "contradicted": 9, "unverifiable": 16, "total": 37, "correct": 19, "incorrect": 2, "disavowed": 7 },
+  "validity_detail": { "components": { "coverage": { "score": 70, "justification": "…", "quote": "…", "quote_verified": 1 }, … }, "weights_used": { … } },
+  "credibility_detail": { "method": "usage_weighted_mean", "sources": [ { "doc_id": "…", "total": 62.5, "tier": "VERIFIED_DOI", "usage": 4 } ] },
   "stats": { "claims_total": 37, "claims_supported": 30, "claims_contradicted": 3, "claims_unverifiable": 4 },
   "claims": [ … ],
   "sources": [ … ]
@@ -124,6 +132,8 @@ The job object above, or 404 `Unknown job '<id>'`.
 ```
 
 `scores` values are all 0–1 fractions (credibility and validity are stored 0–100 and divided by 100 here); `accuracy` and `coverage` can be `null` when no claim was decided. `accuracy` is report-position agreement over decided claims; UNVERIFIABLE claims count only against `coverage`, never against `accuracy`.
+
+The three `*_detail` blocks expose what scoring stored, read-only: `accuracy_detail` is the decided-claims arithmetic (`correct`/`incorrect`/`disavowed`), `validity_detail` carries the per-component rubric (score, justification, illustrative quote, and whether code found the quote in the report), and `credibility_detail` carries the aggregation method plus each source's evidence-usage weight. All three are `null` before scoring, and individual keys are `null` on runs scored by older versions that didn't store them.
 
 Each entry in `claims` (ordered by report page, then id):
 
