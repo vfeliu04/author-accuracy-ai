@@ -170,6 +170,53 @@ def test_run_title_defaults_to_report_filename_stem(tmp_path):
         assert client.get(f"/api/runs/{blank}", headers=AUTH).json()["run"]["title"] == "report"
 
 
+def test_runs_list_is_enriched(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        run_id = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=_upload_files(source_count=2),
+            data={"title": "Fresh"},
+        ).json()["run_id"]
+        [item] = client.get("/api/runs", headers=AUTH).json()["runs"]
+        assert item["id"] == run_id
+        assert item["title"] == "Fresh"
+        assert item["source_count"] == 2
+        assert item["scores"] is None
+
+
+def test_runs_list_scores_match_report_and_jobless_run_degrades(tmp_path):
+    settings = _settings(tmp_path)
+    seeded = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        [item] = client.get("/api/runs", headers=AUTH).json()["runs"]
+        report = client.get(f"/api/runs/{seeded}/report", headers=AUTH).json()
+        assert item["scores"] == report["scores"]
+        # The seeded run has no jobs row: source_count and title degrade, not 500.
+        assert item["source_count"] is None
+        assert item["title"] is None
+
+
+def test_run_detail_includes_uploads_report_first(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        run_id = client.post("/api/runs", headers=AUTH, files=_upload_files(source_count=2)).json()[
+            "run_id"
+        ]
+        uploads = client.get(f"/api/runs/{run_id}", headers=AUTH).json()["uploads"]
+        assert [u["kind"] for u in uploads] == ["REPORT", "SOURCE", "SOURCE"]
+        assert uploads[0]["file_name"] == "report.pdf"
+        assert [u["file_name"] for u in uploads[1:]] == ["source0.pdf", "source1.pdf"]
+
+
+def test_run_detail_uploads_empty_for_jobless_run(tmp_path):
+    settings = _settings(tmp_path)
+    seeded = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        assert client.get(f"/api/runs/{seeded}", headers=AUTH).json()["uploads"] == []
+
+
 def test_post_runs_queues_job_and_worker_completes_it(tmp_path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:

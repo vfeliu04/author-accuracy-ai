@@ -171,7 +171,24 @@ def create_run(
 
 @router.get("/runs")
 def list_runs(conn: Conn) -> dict:
-    return {"runs": dbmod.list_runs(conn)}
+    """Run list enriched for the gallery: title, source count, and a scores
+    summary in the same 0–1 shape the report endpoint uses (null until
+    scored)."""
+    items = []
+    for item in dbmod.list_runs_enriched(conn):
+        stored = item.pop("scores")
+        item["scores"] = (
+            {
+                "accuracy": stored["accuracy"]["accuracy"],
+                "coverage": stored["accuracy"]["coverage"],
+                "credibility": _fraction(stored["credibility"]["score"]),
+                "validity": _fraction(stored["validity"]["score"]),
+            }
+            if stored is not None
+            else None
+        )
+        items.append(item)
+    return {"runs": items}
 
 
 @router.get("/runs/{run_id}")
@@ -179,7 +196,11 @@ def get_run(run_id: str, conn: Conn) -> dict:
     run = dbmod.get_run(conn, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Unknown run {run_id!r}")
-    return {"run": run, "job": dbmod.get_run_job(conn, run_id)}
+    return {
+        "run": run,
+        "job": dbmod.get_run_job(conn, run_id),
+        "uploads": dbmod.list_run_uploads(conn, run_id),
+    }
 
 
 @router.post("/runs/{run_id}/retry", status_code=202)

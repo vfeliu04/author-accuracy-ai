@@ -446,6 +446,59 @@ def list_runs(conn: sqlite3.Connection) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def list_runs_enriched(conn: sqlite3.Connection) -> list[dict]:
+    """Run rows plus what the gallery needs, in one statement: the latest
+    job's source count (NULL for job-less runs — hand-seeded test fixtures
+    have no jobs row) and the stored score JSONs (NULL until scored). The
+    LEFT JOIN cannot fan out (run_id is run_scores' PRIMARY KEY); the
+    correlated subquery mirrors get_run_job's latest-job-wins semantics.
+    """
+    rows = conn.execute(
+        """
+        SELECT r.*, s.accuracy AS accuracy_json, s.credibility AS credibility_json,
+               s.validity AS validity_json,
+               (SELECT json_array_length(j.payload, '$.source_upload_ids')
+                  FROM jobs j WHERE j.run_id = r.id
+                  ORDER BY j.created_at DESC LIMIT 1) AS source_count
+        FROM runs r LEFT JOIN run_scores s ON s.run_id = r.id
+        ORDER BY r.created_at DESC
+        """
+    ).fetchall()
+    items: list[dict] = []
+    for row in rows:
+        item = {key: row[key] for key in ("id", "created_at", "status", "error", "title")}
+        item["source_count"] = row["source_count"]
+        item["scores"] = (
+            {
+                "accuracy": json.loads(row["accuracy_json"]),
+                "credibility": json.loads(row["credibility_json"]),
+                "validity": json.loads(row["validity_json"]),
+            }
+            if row["accuracy_json"] is not None
+            else None
+        )
+        items.append(item)
+    return items
+
+
+def list_run_uploads(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """The run's uploaded files, report first then sources in payload order.
+
+    Resolved through the latest job's payload — uploads has no run_id
+    column, and before ingest the payload is the only run→upload link.
+    Job-less runs (hand-seeded fixtures) return an empty list."""
+    job = get_run_job(conn, run_id)
+    if job is None:
+        return []
+    ids = [job["payload"]["report_upload_id"], *job["payload"]["source_upload_ids"]]
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT id, kind, file_name FROM uploads WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    by_id = {row["id"]: dict(row) for row in rows}
+    return [by_id[upload_id] for upload_id in ids if upload_id in by_id]
+
+
 def set_run_status(
     conn: sqlite3.Connection, run_id: str, status: str, error: str | None = None
 ) -> None:
