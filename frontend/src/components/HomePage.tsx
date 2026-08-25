@@ -1,0 +1,139 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useRuns } from "../api/queries";
+import type { RunListItem } from "../api/types";
+import AppShell from "./AppShell";
+import RunCard from "./RunCard";
+import UploadDialog from "./UploadDialog";
+
+type Filter = "ALL" | "DONE" | "RUNNING" | "FAILED";
+
+const FILTERS: Array<{ key: Filter; label: string }> = [
+  { key: "ALL", label: "All" },
+  { key: "DONE", label: "Done" },
+  { key: "RUNNING", label: "Running" },
+  { key: "FAILED", label: "Failed" }
+];
+
+function matches(run: RunListItem, filter: Filter): boolean {
+  if (filter === "ALL") return true;
+  if (filter === "RUNNING") return run.status === "RUNNING" || run.status === "CREATED";
+  return run.status === filter;
+}
+
+export default function HomePage() {
+  const navigate = useNavigate();
+  const runsQuery = useRuns();
+  const [filter, setFilter] = useState<Filter>("ALL");
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [pickMode, setPickMode] = useState(false);
+  const [picks, setPicks] = useState<string[]>([]);
+
+  const runs = runsQuery.data ?? [];
+  const visible = runs.filter((run) => matches(run, filter));
+
+  const openCard = (run: RunListItem) => {
+    if (!pickMode) {
+      navigate(`/runs/${run.id}`);
+      return;
+    }
+    const next = picks.includes(run.id)
+      ? picks.filter((id) => id !== run.id)
+      : [...picks, run.id];
+    if (next.length === 2) {
+      navigate(`/compare?a=${next[0]}&b=${next[1]}`);
+      return;
+    }
+    setPicks(next);
+  };
+
+  const togglePickMode = () => {
+    setPickMode((prev) => !prev);
+    setPicks([]);
+  };
+
+  return (
+    <AppShell
+      actions={
+        <>
+          <button type="button" className="btn btn--ghost" onClick={togglePickMode}>
+            {pickMode ? "✕ Cancel compare" : "⇄ Compare runs"}
+          </button>
+          <button type="button" className="btn btn--primary" onClick={() => setDialogOpen(true)}>
+            ＋ New verification
+          </button>
+        </>
+      }
+    >
+      <div className="home-body">
+        <div className="home-inner">
+          <div className="home-controls">
+            {FILTERS.map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                className={`filter-chip${filter === key ? " active" : ""}`}
+                onClick={() => setFilter(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="section-title">
+            <h2>Recent verifications</h2>
+            {pickMode ? (
+              <span className="muted">Pick two runs to compare ({picks.length}/2)</span>
+            ) : null}
+          </div>
+
+          {runsQuery.isLoading ? (
+            <p className="muted">Loading…</p>
+          ) : runsQuery.error ? (
+            <p className="error-text">
+              {runsQuery.error instanceof Error
+                ? runsQuery.error.message
+                : "Could not load your verifications."}
+            </p>
+          ) : (
+            <div className="cards">
+              <div
+                className="card card--create"
+                role="button"
+                tabIndex={0}
+                aria-label="Start a new verification"
+                onClick={() => setDialogOpen(true)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setDialogOpen(true);
+                  }
+                }}
+              >
+                <div className="plus" aria-hidden>
+                  ＋
+                </div>
+                <span>New verification</span>
+              </div>
+              {visible.map((run) => (
+                <RunCard
+                  key={run.id}
+                  run={run}
+                  picked={picks.includes(run.id)}
+                  onOpen={() => openCard(run)}
+                />
+              ))}
+            </div>
+          )}
+
+          {!runsQuery.isLoading && !runsQuery.error && runs.length === 0 ? (
+            <p className="empty-state">
+              No verifications yet — upload a report and its sources to start.
+            </p>
+          ) : null}
+        </div>
+      </div>
+      {dialogOpen ? <UploadDialog onClose={() => setDialogOpen(false)} /> : null}
+    </AppShell>
+  );
+}
