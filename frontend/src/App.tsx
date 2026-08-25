@@ -1,6 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import HomePage from "./components/HomePage";
-import ReportDashboard from "./components/ReportDashboard";
+import RunView from "./components/RunView";
 import ClaimsWorkspace from "./components/ClaimsWorkspace";
 import ComparePage from "./components/ComparePage";
 import SourceDetail from "./components/SourceDetail";
@@ -10,7 +10,7 @@ const App = () => {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
-      <Route path="/runs/:runId" element={<ReportDashboard />} />
+      <Route path="/runs/:runId" element={<RunView />} />
       <Route path="/runs/:runId/report" element={<ReportDetail />} />
       <Route path="/runs/:runId/sources/:sourceId" element={<SourceDetail />} />
       <Route path="/runs/:runId/workspace" element={<ClaimsWorkspace />} />

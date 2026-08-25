@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import PdfPane from "./PdfPane";
-import { ClaimBadges } from "./ReportDashboard";
+import ClaimBadges from "./ClaimBadges";
 import { useReport } from "../api/queries";
 import type { Verdict } from "../api/types";
 

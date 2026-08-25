@@ -520,6 +520,10 @@ a {
   cursor: default;
 }
 
+.src-row--static {
+  cursor: default;
+}
+
 .src-row__icon {
   font-size: 1.05rem;
   flex-shrink: 0;
