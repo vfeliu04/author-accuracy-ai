@@ -57,10 +57,45 @@ export default function HomePage() {
       actions={
         <>
           <button type="button" className="btn btn--ghost" onClick={togglePickMode}>
-            {pickMode ? "✕ Cancel compare" : "⇄ Compare runs"}
+            {pickMode ? (
+              "✕ Cancel compare"
+            ) : (
+              <>
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <path d="M8 3 4 7l4 4" />
+                  <path d="M4 7h16" />
+                  <path d="m16 21 4-4-4-4" />
+                  <path d="M20 17H4" />
+                </svg>
+                Compare runs
+              </>
+            )}
           </button>
           <button type="button" className="btn btn--primary" onClick={() => setDialogOpen(true)}>
-            ＋ New verification
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              aria-hidden
+            >
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            New verification
           </button>
         </>
       }

@@ -1,6 +1,8 @@
 import { useSearchParams } from "react-router-dom";
 import type { Report } from "../api/types";
+import { BAND_COLORS, scoreBand } from "../lib/score";
 import FocusToolbar from "./FocusToolbar";
+import ScoreRing from "./ScoreRing";
 import { TIER_LABELS } from "./SourcesPanel";
 
 const COMPONENT_META: Array<{ key: string; label: string; max: number }> = [
@@ -53,11 +55,15 @@ export default function FocusCredibility({ report }: { report: Report }) {
               className={`claim-item${selected?.doc_id === source.doc_id ? " selected" : ""}`}
               onClick={() => selectSource(source.doc_id)}
             >
+              <span
+                className={`cred-badge cred-badge--${scoreBand(source.total)}`}
+                title="Credibility score"
+              >
+                {Math.round(source.total)}
+              </span>
               <div>
                 <div className="claim-item__text">{source.title ?? source.doc_id.slice(0, 8)}</div>
-                <div className="claim-item__cite">
-                  {Math.round(source.total)}/100 · {TIER_LABELS[source.tier] ?? source.tier}
-                </div>
+                <div className="claim-item__cite">{TIER_LABELS[source.tier] ?? source.tier}</div>
               </div>
             </button>
           ))}
@@ -65,35 +71,50 @@ export default function FocusCredibility({ report }: { report: Report }) {
         </div>
         <div className="detail-body">
           {selected ? (
-            <>
-              <div className="detail-section">
-                <h3>{selected.title ?? selected.doc_id.slice(0, 8)}</h3>
-                <p className="muted" style={{ margin: 0 }}>
-                  {Math.round(selected.total)}/100 · {TIER_LABELS[selected.tier] ?? selected.tier}
-                  {usage !== null
-                    ? ` · cited by ${usage} verified verdict${usage === 1 ? "" : "s"}`
-                    : ""}
-                </p>
+            <div className="detail-inner">
+              <div className="focus-summary">
+                <ScoreRing value={selected.total / 100} label="Score" size={88} />
+                <div className="focus-summary__text">
+                  <h3>{selected.title ?? selected.doc_id.slice(0, 8)}</h3>
+                  <p>
+                    {TIER_LABELS[selected.tier] ?? selected.tier}
+                    {usage !== null
+                      ? ` · cited by ${usage} verified verdict${usage === 1 ? "" : "s"}`
+                      : ""}
+                  </p>
+                </div>
               </div>
-              <div className="detail-section">
-                <h4>Components</h4>
-                <div className="component-grid">
-                  {COMPONENT_META.map(({ key, label, max }) => (
+              <div className="rubric-grid">
+                {COMPONENT_META.map(({ key, label, max }) => {
+                  const value = selected.components[key];
+                  const known = value !== undefined;
+                  const pct = known ? (value / max) * 100 : 0;
+                  return (
                     <div key={key} className="component-card">
                       <div className="component-card__row">
                         <span className="component-card__name">{label}</span>
                         <span className="component-card__score">
-                          {selected.components[key] !== undefined
-                            ? `${Math.round(selected.components[key] * 10) / 10}/${max}`
-                            : "—"}
+                          {known ? `${Math.round(value * 10) / 10}/${max}` : "—"}
                         </span>
                       </div>
+                      <div className="component-bar">
+                        <span
+                          style={{
+                            width: `${Math.min(pct, 100)}%`,
+                            background: known ? BAND_COLORS[scoreBand(pct)] : "transparent"
+                          }}
+                        />
+                      </div>
                     </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
-              {methodLine ? <p className="muted">{methodLine}</p> : null}
-            </>
+              {methodLine ? (
+                <p className="muted" style={{ marginTop: "1rem", fontSize: "0.82rem" }}>
+                  {methodLine}
+                </p>
+              ) : null}
+            </div>
           ) : (
             <p className="muted">No sources were scored for this run.</p>
           )}

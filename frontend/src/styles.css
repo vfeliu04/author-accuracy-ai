@@ -1163,6 +1163,13 @@ a {
   border-color: rgba(99, 102, 241, 0.3);
 }
 
+/* min-width + overflow-wrap: an unbreakable token (a long snake_case
+   filename) must wrap inside the box, never run out of it. */
+.claim-item > div {
+  flex: 1;
+  min-width: 0;
+}
+
 .claim-item__text {
   font-size: 0.84rem;
   line-height: 1.4;
@@ -1170,12 +1177,14 @@ a {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .claim-item__cite {
   font-size: 0.72rem;
   color: var(--color-text-muted);
   margin-top: 0.2rem;
+  overflow-wrap: anywhere;
 }
 
 .claim-compare {
@@ -1189,6 +1198,14 @@ a {
   flex-shrink: 0;
   padding: 0.85rem 1.1rem 0.8rem;
   border-bottom: 1px solid var(--color-border);
+}
+
+/* The claim/evidence strip sits BELOW the two PDF pages. */
+.compare-head--below {
+  border-bottom: none;
+  border-top: 1px solid var(--color-border);
+  max-height: 32vh;
+  overflow-y: auto;
 }
 
 .compare-head__badges {
@@ -1302,7 +1319,60 @@ a {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 1.1rem 1.4rem;
+  padding: 1.4rem 2rem 2rem;
+  background: var(--color-surface-2);
+}
+
+.detail-inner {
+  max-width: 1040px;
+}
+
+.focus-summary {
+  display: flex;
+  align-items: center;
+  gap: 1.3rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 1rem 1.3rem;
+  margin-bottom: 1.1rem;
+}
+
+.focus-summary__text {
+  min-width: 0;
+}
+
+.focus-summary__text h3 {
+  font-size: 1.1rem;
+  margin-bottom: 0.15rem;
+  overflow-wrap: anywhere;
+}
+
+.focus-summary__text p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.rubric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0.9rem;
+}
+
+.component-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  overflow: hidden;
+  margin: 0.5rem 0 0.2rem;
+}
+
+.component-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
 }
 
 .detail-section {
@@ -1353,6 +1423,12 @@ a {
 .component-card__score {
   font-size: 0.95rem;
   font-weight: 700;
+}
+
+.component-card__weight {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
 }
 
 .component-card__text {
@@ -1491,6 +1567,26 @@ a {
 .file-row__remove:hover {
   background: var(--color-surface-2);
   color: var(--color-danger);
+}
+
+.file-slot {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.45rem;
+  color: var(--color-text-muted);
+  font-size: 0.84rem;
+  text-align: left;
+}
+
+.file-slot:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  background: rgba(99, 102, 241, 0.04);
 }
 
 .dropzone {

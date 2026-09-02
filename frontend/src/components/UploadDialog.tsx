@@ -143,10 +143,31 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
                 ✕
               </button>
             </div>
-          ) : null}
+          ) : (
+            <button
+              type="button"
+              className="file-slot"
+              onClick={() => inputRef.current?.click()}
+            >
+              <span className="file-row__icon" aria-hidden>
+                📄
+              </span>
+              The report PDF — the first file you add lands here
+            </button>
+          )}
 
-          {sources.length > 0 ? (
-            <span className="field-label">Sources ({sources.length})</span>
+          <span className="field-label">Sources ({sources.length})</span>
+          {sources.length === 0 ? (
+            <button
+              type="button"
+              className="file-slot"
+              onClick={() => inputRef.current?.click()}
+            >
+              <span className="file-row__icon" aria-hidden>
+                📘
+              </span>
+              The source PDFs the report will be checked against
+            </button>
           ) : null}
           {sources.map((file, index) => (
             <div className="file-row" key={`${file.name}-${index}`}>
