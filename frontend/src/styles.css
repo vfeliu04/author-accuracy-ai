@@ -1474,6 +1474,13 @@ a {
   margin: 0.55rem 0 0;
 }
 
+.component-card__quote--clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .quote-flag {
   color: var(--color-warning);
   font-style: normal;

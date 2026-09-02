@@ -5,6 +5,12 @@ import ScoreRing from "./ScoreRing";
 
 const COMPONENT_ORDER = ["coverage", "consistency", "methodology", "context", "recency"];
 
+// Quotes come verbatim from the parsed report, markdown markers and all —
+// strip heading/emphasis noise for display only.
+function displayQuote(quote: string): string {
+  return quote.replace(/^[#>*\s]+/, "").trim();
+}
+
 // Full-width validity rubric: an overall summary, then each component's
 // score, justification, and the illustrative quote (flagged when code could
 // not find it in the report).
@@ -79,8 +85,8 @@ export default function FocusValidity({ report }: { report: Report }) {
                         <p className="component-card__text">{component.justification}</p>
                       ) : null}
                       {component.quote ? (
-                        <p className="component-card__quote">
-                          “{component.quote}”
+                        <p className="component-card__quote component-card__quote--clamped">
+                          “{displayQuote(component.quote)}”
                           {component.quote_verified === 0 ? (
                             <span className="quote-flag"> · quote not found in the report</span>
                           ) : null}
