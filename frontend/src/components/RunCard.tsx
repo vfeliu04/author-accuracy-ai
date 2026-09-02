@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import { useRetryRun } from "../api/queries";
 import type { RunListItem } from "../api/types";
@@ -25,14 +26,29 @@ function ScorePill({
 export default function RunCard({
   run,
   picked = false,
-  onOpen
+  onOpen,
+  onDelete
 }: {
   run: RunListItem;
   picked?: boolean;
   onOpen: () => void;
+  onDelete: () => void;
 }) {
   const retry = useRetryRun(run.id);
   const title = run.title ?? `Run ${run.id.slice(0, 8)}`;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (event: globalThis.MouseEvent) => {
+      if (menuRef.current && event.target instanceof Node && !menuRef.current.contains(event.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [menuOpen]);
 
   const handleRetry = (event: MouseEvent) => {
     event.stopPropagation();
@@ -46,6 +62,9 @@ export default function RunCard({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(event) => {
+        // Only the card itself — bubbled keydowns from the kebab/menu/retry
+        // buttons must keep their native activation, not navigate.
+        if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           onOpen();
@@ -56,6 +75,34 @@ export default function RunCard({
         <span className="card__emoji" aria-hidden>
           {emojiFor(run.title ?? run.id)}
         </span>
+        <div className="card__menu-holder" ref={menuRef}>
+          <button
+            type="button"
+            className="card__kebab"
+            aria-label="Run options"
+            onClick={(event) => {
+              event.stopPropagation();
+              setMenuOpen((open) => !open);
+            }}
+          >
+            ⋮
+          </button>
+          {menuOpen ? (
+            <div className="card-menu">
+              <button
+                type="button"
+                className="card-menu__item card-menu__item--danger"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMenuOpen(false);
+                  onDelete();
+                }}
+              >
+                Delete verification…
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
       <div className="card__title">{title}</div>
       <div className="card__meta">

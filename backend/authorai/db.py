@@ -441,6 +441,91 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+class RunBusyError(RuntimeError):
+    """The run's job is queued or running — deletion would race the worker."""
+
+
+def delete_run_data(conn: sqlite3.Connection, run_id: str) -> list[str]:
+    """Delete EVERY database trace of a run in one transaction; return the
+    upload file paths that backed it for the caller to unlink AFTER commit
+    (a crash between commit and unlink leaves harmless orphan files — the
+    reverse order would leave DB rows pointing at missing files).
+
+    BEGIN IMMEDIATE takes the write lock up front so the busy-job guard and
+    the deletion are one atomic unit against the worker claiming the job.
+    Children go before parents (foreign_keys=ON): verdicts→claims,
+    chunks→figures (chunks reference figures), then documents; deleting
+    chunks fires the triggers that clean chunks_fts and chunks_vec row by
+    row. Upload rows are found through the job payload AND documents.upload_id
+    (belt and braces — CLI runs have no job; pre-jobs-era runs may have
+    neither, and their uploads are simply unrecoverable orphans)."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone() is None:
+            raise ValueError(f"Unknown run {run_id!r}")
+        # ANY active job blocks deletion (not just the latest — structural,
+        # even though production creates exactly one job per run).
+        busy = conn.execute(
+            "SELECT status FROM jobs WHERE run_id = ? AND status IN ('QUEUED', 'RUNNING') LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if busy is not None:
+            raise RunBusyError(
+                f"Run {run_id!r} has a {busy['status']} job — wait for it to finish or fail first"
+            )
+        job = conn.execute(
+            "SELECT payload FROM jobs WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        upload_ids: set[str] = set()
+        if job is not None:
+            # A corrupted payload must never make a run undeletable (the
+            # poisoned-payload wedge class) — documents.upload_id below still
+            # finds the uploads.
+            try:
+                payload = json.loads(job["payload"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            upload_ids.update(
+                upload_id
+                for upload_id in [
+                    payload.get("report_upload_id"),
+                    *payload.get("source_upload_ids", []),
+                ]
+                if upload_id
+            )
+        for row in conn.execute(
+            "SELECT upload_id FROM documents WHERE run_id = ? AND upload_id IS NOT NULL",
+            (run_id,),
+        ):
+            upload_ids.add(row["upload_id"])
+        paths: list[str] = []
+        placeholders = ",".join("?" * len(upload_ids))
+        if upload_ids:
+            paths = [
+                row["path"]
+                for row in conn.execute(
+                    f"SELECT path FROM uploads WHERE id IN ({placeholders})", list(upload_ids)
+                )
+            ]
+        conn.execute("DELETE FROM verdicts WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM claims WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM chunks WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM figures WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM source_credibility WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM run_scores WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM documents WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM jobs WHERE run_id = ?", (run_id,))
+        if upload_ids:
+            conn.execute(f"DELETE FROM uploads WHERE id IN ({placeholders})", list(upload_ids))
+        conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        conn.commit()
+        return paths
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def list_runs(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
     return [dict(row) for row in rows]

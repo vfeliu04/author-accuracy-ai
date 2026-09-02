@@ -91,6 +91,20 @@ describe("HomePage", () => {
     await waitFor(() => expect(screen.getByText(/has no job to retry/)).toBeInTheDocument());
   });
 
+  it("deletes a run through the kebab menu with confirmation", async () => {
+    vi.spyOn(v2, "listRuns").mockResolvedValue(RUNS);
+    const del = vi.spyOn(v2, "deleteRun").mockResolvedValue(undefined);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Water Stress Report")).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: "Run options" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Delete verification…" }));
+    // The confirmation names the run and requires an explicit click.
+    expect(screen.getByRole("dialog", { name: "Delete verification" })).toBeInTheDocument();
+    expect(del).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Delete verification" }));
+    await waitFor(() => expect(del).toHaveBeenCalledWith("done1234deadbeef"));
+  });
+
   it("opens the upload dialog from the create card", async () => {
     vi.spyOn(v2, "listRuns").mockResolvedValue([]);
     renderPage();

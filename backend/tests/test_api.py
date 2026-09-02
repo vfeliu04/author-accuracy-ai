@@ -5,6 +5,8 @@ TestClient is always used as a context manager — otherwise the lifespan
 against an app that can't actually start.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -227,6 +229,95 @@ def test_report_details_null_when_unscored(client):
     assert report["accuracy_detail"] is None
     assert report["validity_detail"] is None
     assert report["credibility_detail"] is None
+
+
+def test_delete_run_removes_every_trace(tmp_path):
+    """The destructive path: every table, both search indexes, and the files."""
+    settings = _settings(tmp_path)
+    keeper = _seed_scored_run(settings)  # proves isolation
+    target = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    target_files = [
+        row["path"]
+        for row in conn.execute(
+            "SELECT u.path FROM uploads u JOIN documents d ON d.upload_id = u.id"
+            " WHERE d.run_id = ?",
+            (target,),
+        )
+    ]
+    conn.close()
+    assert target_files and all(Path(p).exists() for p in target_files)
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        assert client.delete(f"/api/runs/{target}", headers=AUTH).status_code == 204
+        # Gone from the API…
+        assert client.get(f"/api/runs/{target}", headers=AUTH).status_code == 404
+        remaining = client.get("/api/runs", headers=AUTH).json()["runs"]
+        assert [run["id"] for run in remaining] == [keeper]
+
+    # …and from every table, both search indexes, and the disk.
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    for table in (
+        "runs",
+        "documents",
+        "chunks",
+        "claims",
+        "verdicts",
+        "run_scores",
+        "source_credibility",
+        "jobs",
+    ):
+        count = conn.execute(
+            f"SELECT count(*) FROM {table} WHERE {'id' if table == 'runs' else 'run_id'} = ?",
+            (target,),
+        ).fetchone()[0]
+        assert count == 0, f"{table} still has rows for the deleted run"
+    assert (
+        conn.execute("SELECT count(*) FROM chunks_vec WHERE run_id = ?", (target,)).fetchone()[0]
+        == 0
+    )
+    # The keeper run's data survives untouched.
+    assert conn.execute("SELECT count(*) FROM chunks WHERE run_id = ?", (keeper,)).fetchone()[0]
+    conn.close()
+    assert all(not Path(p).exists() for p in target_files)
+
+
+def test_delete_refuses_active_jobs_and_unknown_runs(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        run_id = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        # QUEUED job → refuse.
+        assert client.delete(f"/api/runs/{run_id}", headers=AUTH).status_code == 409
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        dbmod.claim_next_job(conn)  # job now RUNNING → still refuse
+        conn.close()
+        assert client.delete(f"/api/runs/{run_id}", headers=AUTH).status_code == 409
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        job = dbmod.get_run_job(conn, run_id)
+        dbmod.finish_job_and_run(conn, job["id"], run_id, "FAILED", error="boom")
+        conn.close()
+        # FAILED → deletable, files included.
+        assert client.delete(f"/api/runs/{run_id}", headers=AUTH).status_code == 204
+        assert not any(Path(settings.uploads_dir).glob("*.pdf"))
+        assert client.delete("/api/runs/nope", headers=AUTH).status_code == 404
+
+        # A corrupted job payload must never wedge deletion (404-forever class).
+        poisoned = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        job = dbmod.get_run_job(conn, poisoned)
+        dbmod.finish_job_and_run(conn, job["id"], poisoned, "FAILED", error="boom")
+        conn.execute("UPDATE jobs SET payload = 'not json' WHERE run_id = ?", (poisoned,))
+        conn.commit()
+        conn.close()
+        assert client.delete(f"/api/runs/{poisoned}", headers=AUTH).status_code == 204
+
+
+def test_report_sources_include_extracted_metadata(tmp_path):
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        [source] = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()["sources"]
+        assert source["metadata"] == {"title": "The Source Report"}
 
 
 def test_runs_list_is_enriched(tmp_path):

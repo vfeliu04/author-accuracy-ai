@@ -74,12 +74,22 @@ export type Claim = {
   evidence_source: EvidenceSource | null;
 };
 
+export type SourceBiblio = {
+  title?: string | null;
+  authors?: string[];
+  publisher?: string | null;
+  publication_date?: string | null;
+  doi?: string | null;
+  isbn?: string | null;
+};
+
 export type SourceCredibility = {
   doc_id: string;
   title: string | null;
   total: number; // 0–100
   tier: string;
   components: Record<string, number>;
+  metadata: SourceBiblio;
 };
 
 // All 0–1 fractions, or null before the run is scored.

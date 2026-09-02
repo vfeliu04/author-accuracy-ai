@@ -195,6 +195,25 @@ def list_runs(conn: Conn) -> dict:
     return {"runs": items}
 
 
+@router.delete("/runs/{run_id}", status_code=204)
+def delete_run(run_id: str, request: Request, conn: Conn) -> None:
+    """Permanently delete a run: every database row plus the uploaded PDFs
+    and figure images behind it. Refused (409) while its job is queued or
+    running — the worker would otherwise write into deleted rows mid-step."""
+    settings: Settings = request.app.state.settings
+    try:
+        upload_paths = dbmod.delete_run_data(conn, run_id)
+    except dbmod.RunBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # Files AFTER the commit: a crash here leaves harmless orphan files,
+    # never database rows pointing at missing ones.
+    for path in upload_paths:
+        Path(path).unlink(missing_ok=True)
+    shutil.rmtree(Path(settings.figures_dir) / run_id, ignore_errors=True)
+
+
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, conn: Conn) -> dict:
     run = dbmod.get_run(conn, run_id)
@@ -400,6 +419,9 @@ def get_report(run_id: str, conn: Conn) -> dict:
             "total": row["total"],
             "tier": row["tier"],
             "components": row["components"],
+            # The extracted bibliographic fields — what the completeness /
+            # authority / recency points were actually computed from.
+            "metadata": row["metadata"],
         }
         for row in source_rows
     ]

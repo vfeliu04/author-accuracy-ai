@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useRuns } from "../api/queries";
+import { useDeleteRun, useRuns } from "../api/queries";
 import type { RunListItem } from "../api/types";
 import AppShell from "./AppShell";
 import RunCard from "./RunCard";
@@ -28,6 +28,8 @@ export default function HomePage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [pickMode, setPickMode] = useState(false);
   const [picks, setPicks] = useState<string[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<RunListItem | null>(null);
+  const deletion = useDeleteRun();
 
   const runs = runsQuery.data ?? [];
   const visible = runs.filter((run) => matches(run, filter));
@@ -156,6 +158,10 @@ export default function HomePage() {
                   run={run}
                   picked={picks.includes(run.id)}
                   onOpen={() => openCard(run)}
+                  onDelete={() => {
+                    deletion.reset();
+                    setDeleteTarget(run);
+                  }}
                 />
               ))}
             </div>
@@ -169,6 +175,62 @@ export default function HomePage() {
         </div>
       </div>
       {dialogOpen ? <UploadDialog onClose={() => setDialogOpen(false)} /> : null}
+      {deleteTarget ? (
+        <div
+          className="modal-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setDeleteTarget(null);
+          }}
+        >
+          <div className="modal modal--confirm" role="dialog" aria-modal="true" aria-label="Delete verification">
+            <div className="modal__head">
+              <h2>Delete verification</h2>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => setDeleteTarget(null)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal__body">
+              <p style={{ margin: "0.4rem 0 0.9rem" }}>
+                This permanently removes{" "}
+                <strong>“{deleteTarget.title ?? `Run ${deleteTarget.id.slice(0, 8)}`}”</strong> —
+                its analysis, verdicts, and uploaded PDFs. It can&rsquo;t be undone.
+              </p>
+              {deletion.error ? (
+                <p className="modal__error">
+                  {deletion.error instanceof Error
+                    ? deletion.error.message
+                    : "The deletion failed."}
+                </p>
+              ) : null}
+            </div>
+            <div className="modal__foot">
+              <span />
+              <div className="modal__actions">
+                <button type="button" className="btn btn--ghost" onClick={() => setDeleteTarget(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--danger"
+                  disabled={deletion.isPending}
+                  onClick={() =>
+                    deletion.mutate(deleteTarget.id, {
+                      onSuccess: () => setDeleteTarget(null)
+                    })
+                  }
+                >
+                  {deletion.isPending ? "Deleting…" : "Delete verification"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

@@ -6,6 +6,7 @@ import type { ChatMode, ChatTurn, Report, RunDetail, RunListItem } from "./types
 import { isTerminal } from "./types";
 import {
   createRun,
+  deleteRun,
   fetchPdfBlob,
   getReport,
   getRun,
@@ -74,6 +75,21 @@ export function useChat(runId: string) {
   return useMutation({
     mutationFn: (body: { question: string; history: ChatTurn[]; mode: ChatMode }) =>
       postChat(runId, body)
+  });
+}
+
+// Deleting drops the run everywhere: refresh the gallery and forget any
+// cached data for it.
+export function useDeleteRun() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) => deleteRun(runId),
+    onSuccess: (_data, runId) => {
+      client.removeQueries({ queryKey: queryKeys.run(runId) });
+      client.removeQueries({ queryKey: queryKeys.report(runId) });
+      client.removeQueries({ queryKey: ["pdf", runId] });
+      client.invalidateQueries({ queryKey: queryKeys.runs });
+    }
   });
 }
 

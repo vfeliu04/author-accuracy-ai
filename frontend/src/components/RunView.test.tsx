@@ -77,7 +77,7 @@ const doneReport: Report = {
       evidence_source: { doc_id: "s", title: "Src", page: 3 }
     }
   ],
-  sources: [{ doc_id: "s", title: "Src", total: 80, tier: "VERIFIED_DOI", components: {} }]
+  sources: [{ doc_id: "s", title: "Src", total: 80, tier: "VERIFIED_DOI", components: {}, metadata: {} }]
 };
 
 afterEach(() => vi.restoreAllMocks());

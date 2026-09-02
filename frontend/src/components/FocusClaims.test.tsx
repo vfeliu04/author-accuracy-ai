@@ -64,7 +64,7 @@ const report: Report = {
       evidence_source: null
     }
   ],
-  sources: [{ doc_id: "sourcedoc", title: "Src", total: 80, tier: "VERIFIED_DOI", components: {} }]
+  sources: [{ doc_id: "sourcedoc", title: "Src", total: 80, tier: "VERIFIED_DOI", components: {}, metadata: {} }]
 };
 
 function renderAt(url: string) {

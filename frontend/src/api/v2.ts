@@ -67,6 +67,16 @@ export function retryRun(runId: string): Promise<{ run_id: string; job_id: strin
   return apiJson(`/api/runs/${runId}/retry`, { method: "POST" });
 }
 
+export async function deleteRun(runId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/runs/${runId}`, {
+    method: "DELETE",
+    headers: authHeaders()
+  });
+  if (!response.ok) {
+    await raise(response);
+  }
+}
+
 export function getReport(runId: string): Promise<Report> {
   return apiJson<Report>(`/api/runs/${runId}/report`);
 }
