@@ -97,7 +97,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                   {claim.evidence_source
                     ? `${claim.evidence_source.title ?? "Source"}${
                         claim.evidence_source.page !== null
-                          ? ` · PDF p.${claim.evidence_source.page}`
+                          ? ` · p.${claim.evidence_source.page}`
                           : ""
                       }`
                     : "No source coverage"}
@@ -126,7 +126,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                   <div className="pdf-pane__head">
                     <span className="pdf-pane__doc">
                       <strong>Report</strong>
-                      {selected.page !== null ? ` · PDF p.${selected.page}` : ""}
+                      {selected.page !== null ? ` · p.${selected.page}` : ""}
                     </span>
                   </div>
                   <div className="pdf-pane__frame">
@@ -145,7 +145,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                       {selected.evidence_source
                         ? ` · ${selected.evidence_source.title ?? "untitled"}${
                             selected.evidence_source.page !== null
-                              ? ` · PDF p.${selected.evidence_source.page}`
+                              ? ` · p.${selected.evidence_source.page}`
                               : ""
                           }`
                         : ""}
