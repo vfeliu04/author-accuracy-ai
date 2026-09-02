@@ -10,11 +10,13 @@ function ringColor(pct: number | null): string {
 export default function ScoreRing({
   value,
   label,
-  size = 76
+  size = 76,
+  hint
 }: {
   value: number | null;
   label: string;
   size?: number;
+  hint?: string;
 }) {
   const pct = value === null ? null : Math.round(value * 100);
   const r = (size - 10) / 2;
@@ -22,7 +24,7 @@ export default function ScoreRing({
   const filled = pct === null ? 0 : (Math.min(pct, 100) / 100) * circ;
   const color = ringColor(pct);
   return (
-    <div className="ring">
+    <div className="ring" title={hint}>
       <div
         className="ring__donut"
         style={{

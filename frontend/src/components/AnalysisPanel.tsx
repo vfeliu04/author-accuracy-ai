@@ -2,10 +2,26 @@ import type { Report } from "../api/types";
 import ScoreRing from "./ScoreRing";
 
 const RING_METRICS = [
-  { key: "accuracy", label: "Accuracy" },
-  { key: "credibility", label: "Credibility" },
-  { key: "validity", label: "Validity" },
-  { key: "coverage", label: "Coverage" }
+  {
+    key: "accuracy",
+    label: "Accuracy",
+    hint: "How often the report's stated positions agree with the sources. A claim the report itself debunks counts as correct when the sources contradict it; unverifiable claims never count against it."
+  },
+  {
+    key: "credibility",
+    label: "Credibility",
+    hint: "How trustworthy the sources are: metadata completeness, publisher authority, recency, and external verification (Crossref, ISBN registries) — weighted by how often each source is cited by verified verdicts."
+  },
+  {
+    key: "validity",
+    label: "Validity",
+    hint: "How the report itself holds up: coverage, consistency, methodology, and context judged from the report text, plus source recency — a weighted rubric out of 100."
+  },
+  {
+    key: "coverage",
+    label: "Coverage",
+    hint: "The share of extracted claims the sources could actually decide — supported or contradicted — rather than leave unverifiable."
+  }
 ] as const;
 
 // Right panel: the four score rings plus tiles that open the focus modes.
@@ -35,8 +51,8 @@ export default function AnalysisPanel({
       </div>
       <div className="panel__body">
         <div className="rings">
-          {RING_METRICS.map(({ key, label }) => (
-            <ScoreRing key={key} label={label} value={scores ? scores[key] : null} />
+          {RING_METRICS.map(({ key, label, hint }) => (
+            <ScoreRing key={key} label={label} hint={hint} value={scores ? scores[key] : null} />
           ))}
         </div>
         {ready ? (
@@ -82,10 +98,6 @@ export default function AnalysisPanel({
                 </button>
               ) : null}
             </div>
-            <p className="panel-note">
-              Accuracy measures agreement with the report&rsquo;s stated positions: a claim the
-              report itself disavows counts as correct when the sources contradict it.
-            </p>
           </>
         ) : (
           <div className="locked-note">

@@ -845,6 +845,10 @@ a {
   gap: 0.35rem;
 }
 
+.ring[title] {
+  cursor: help;
+}
+
 .ring__label {
   font-size: 0.72rem;
   color: var(--color-text-muted);
