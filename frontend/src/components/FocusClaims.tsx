@@ -111,6 +111,16 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
         <div className="claim-compare">
           {selected ? (
             <>
+              <div className="compare-head compare-head--centered">
+                <div className="compare-head__badges">
+                  <ClaimBadges claim={selected} showYearFlag />
+                </div>
+                <p className="compare-head__claim">“{selected.text}”</p>
+                <p className="compare-head__why">{selected.rationale}</p>
+                {selected.quote ? (
+                  <p className="compare-head__quote">“{selected.quote}”</p>
+                ) : null}
+              </div>
               <div className="pdf-duo">
                 <div className="pdf-pane">
                   <div className="pdf-pane__head">
@@ -156,21 +166,6 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                     </div>
                   )}
                 </div>
-              </div>
-              <div className="compare-head compare-head--below">
-                <div className="compare-head__badges">
-                  <ClaimBadges claim={selected} showYearFlag />
-                </div>
-                <p className="compare-head__claim">“{selected.text}”</p>
-                <p className="compare-head__why">{selected.rationale}</p>
-                {selected.quote ? (
-                  <p className="compare-head__quote">
-                    “{selected.quote}”
-                    {selected.quote_verified === 1 ? (
-                      <span className="muted"> · quote verified ✓</span>
-                    ) : null}
-                  </p>
-                ) : null}
               </div>
             </>
           ) : (

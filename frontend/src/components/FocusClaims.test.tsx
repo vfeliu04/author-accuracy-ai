@@ -102,9 +102,10 @@ describe("FocusClaims (via ?focus=claims)", () => {
     expect(screen.getByTitle("source")).toHaveAttribute("src", "blob:fake#page=3");
     expect(blob).toHaveBeenCalledWith("r", "reportdoc");
     expect(blob).toHaveBeenCalledWith("r", "sourcedoc");
-    // The selected claim's rationale and verified quote sit in the header.
+    // The selected claim's rationale and quote sit in the strip below (the
+    // fixture's claim text equals its quote, so both render "“hunger fell”").
     expect(screen.getByText("verbatim")).toBeInTheDocument();
-    expect(screen.getByText(/quote verified ✓/)).toBeInTheDocument();
+    expect(screen.getAllByText("“hunger fell”").length).toBeGreaterThan(0);
   });
 
   it("honors verdict and claim params, and Close returns to the panels", async () => {

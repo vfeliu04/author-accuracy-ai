@@ -12,14 +12,6 @@ const COMPONENT_META: Array<{ key: string; label: string; max: number }> = [
   { key: "verification", label: "Verification", max: 20 }
 ];
 
-const METHOD_LINES: Record<string, string> = {
-  usage_weighted_mean:
-    "The run-level score weights each source by how many verified verdicts cite it.",
-  unweighted_mean_no_usage:
-    "No verdict cites any source, so the run-level score is a plain average.",
-  no_sources: "This run has no sources."
-};
-
 // Full-width per-source credibility breakdown. The selected source can be
 // deep-linked via ?source=<doc_id> (the sources panel links here).
 export default function FocusCredibility({ report }: { report: Report }) {
@@ -31,9 +23,6 @@ export default function FocusCredibility({ report }: { report: Report }) {
   const usage =
     report.credibility_detail?.sources?.find((entry) => entry.doc_id === selected?.doc_id)
       ?.usage ?? null;
-  const methodLine = report.credibility_detail?.method
-    ? METHOD_LINES[report.credibility_detail.method]
-    : null;
 
   const selectSource = (docId: string) => {
     const next = new URLSearchParams(searchParams);
@@ -63,7 +52,6 @@ export default function FocusCredibility({ report }: { report: Report }) {
               </span>
               <div>
                 <div className="claim-item__text">{source.title ?? source.doc_id.slice(0, 8)}</div>
-                <div className="claim-item__cite">{TIER_LABELS[source.tier] ?? source.tier}</div>
               </div>
             </button>
           ))}
@@ -109,11 +97,6 @@ export default function FocusCredibility({ report }: { report: Report }) {
                   );
                 })}
               </div>
-              {methodLine ? (
-                <p className="muted" style={{ marginTop: "1rem", fontSize: "0.82rem" }}>
-                  {methodLine}
-                </p>
-              ) : null}
             </div>
           ) : (
             <p className="muted">No sources were scored for this run.</p>

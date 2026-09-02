@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useReport, useRuns } from "../api/queries";
 import type { Report } from "../api/types";
@@ -109,13 +108,15 @@ const ComparePage = () => {
             </p>
           ) : ra && rb ? (
             <div className="compare-card">
-              <div className="compare-grid">
-                <span className="compare__metric">Metric</span>
+              <div className="compare-row compare-row--head">
+                <span className="compare-row__label">Metric</span>
                 <span className="compare-col-head">{titleOf(a)}</span>
                 <span className="compare-col-head">{titleOf(b)}</span>
-                <span>Δ</span>
+                <span className="compare-row__label">Δ</span>
+              </div>
+              <div className="compare-section">
                 {SCORE_METRICS.map((metric) => (
-                  <FragmentRow key={metric.key}>
+                  <div className="compare-row" key={metric.key}>
                     <span className="compare__metric">{metric.label}</span>
                     <span>{fmtPct(ra.scores?.[metric.key] ?? null)}</span>
                     <span>{fmtPct(rb.scores?.[metric.key] ?? null)}</span>
@@ -124,10 +125,12 @@ const ComparePage = () => {
                       b={rb.scores?.[metric.key] ?? null}
                       asPct
                     />
-                  </FragmentRow>
+                  </div>
                 ))}
+              </div>
+              <div className="compare-section">
                 {STAT_METRICS.map((metric) => (
-                  <FragmentRow key={metric.key}>
+                  <div className="compare-row" key={metric.key}>
                     <span className="compare__metric">{metric.label}</span>
                     <span>{ra.stats[metric.key]}</span>
                     <span>{rb.stats[metric.key]}</span>
@@ -137,7 +140,7 @@ const ComparePage = () => {
                       asPct={false}
                       valenced={false}
                     />
-                  </FragmentRow>
+                  </div>
                 ))}
               </div>
               {ra.scores === null || rb.scores === null ? (
@@ -157,10 +160,5 @@ const ComparePage = () => {
     </AppShell>
   );
 };
-
-// Grid cells must be direct children of the grid, so rows are fragments.
-function FragmentRow({ children }: { children: ReactNode }) {
-  return <>{children}</>;
-}
 
 export default ComparePage;
