@@ -29,7 +29,13 @@ const PdfPane = ({
       </div>
     );
   }
-  const src = page ? `${url}#page=${page}` : url;
+  // Chromium's viewer honors these fragment options: no toolbar/side panel
+  // (our pane header already names the document and page) and fit-to-width.
+  // Other engines ignore what they don't support and still render the PDF.
+  const options = [page ? `page=${page}` : null, "toolbar=0", "navpanes=0", "view=FitH"]
+    .filter(Boolean)
+    .join("&");
+  const src = `${url}#${options}`;
   return (
     <iframe
       key={`${docId}-${page ?? 0}`}

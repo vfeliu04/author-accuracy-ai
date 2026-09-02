@@ -97,9 +97,15 @@ describe("FocusClaims (via ?focus=claims)", () => {
 
     renderAt("/runs/r?focus=claims");
     await waitFor(() => expect(screen.getByTitle("report")).toBeInTheDocument());
-    expect(screen.getByTitle("report")).toHaveAttribute("src", "blob:fake#page=1");
+    expect(screen.getByTitle("report")).toHaveAttribute(
+      "src",
+      "blob:fake#page=1&toolbar=0&navpanes=0&view=FitH"
+    );
     await waitFor(() => expect(screen.getByTitle("source")).toBeInTheDocument());
-    expect(screen.getByTitle("source")).toHaveAttribute("src", "blob:fake#page=3");
+    expect(screen.getByTitle("source")).toHaveAttribute(
+      "src",
+      "blob:fake#page=3&toolbar=0&navpanes=0&view=FitH"
+    );
     expect(blob).toHaveBeenCalledWith("r", "reportdoc");
     expect(blob).toHaveBeenCalledWith("r", "sourcedoc");
     // The selected claim's rationale and quote sit in the strip below (the
