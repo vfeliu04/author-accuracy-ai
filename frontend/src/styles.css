@@ -3,16 +3,19 @@
    from one palette; all colors live HERE, never as literals in components. */
 
 :root {
-  --color-canvas: #f1f3f8;
-  --color-bg: #f1f3f8;
+  --color-canvas: #f6f5f1;
+  --color-bg: #f6f5f1;
   --color-surface: #ffffff;
-  --color-surface-2: #f1f5f9;
-  --color-border: #e2e8f0;
-  --color-text: #0f172a;
-  --color-text-muted: #64748b;
-  --color-accent: #6366f1;
-  --color-accent-hover: #4f46e5;
-  --color-accent-soft: rgba(99, 102, 241, 0.08);
+  --color-surface-2: #f2f1ec;
+  --color-border: #e4e2da;
+  --color-text: #1f2b38;
+  --color-text-muted: #67707c;
+  --color-accent: #2f5daa;
+  --color-accent-hover: #264d8c;
+  --color-accent-soft: rgba(47, 93, 170, 0.08);
+  --color-mark: #ffe86b;
+  --color-mark-soft: rgba(255, 232, 107, 0.38);
+  --color-mark-border: #e3c94a;
   --color-success: #16a34a;
   --color-success-soft: rgba(34, 197, 94, 0.13);
   --color-warning: #d97706;
@@ -25,7 +28,10 @@
   --shadow-hover: 0 10px 28px rgba(15, 23, 42, 0.12);
   --transition: 0.18s ease;
 
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+
+  font-family: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--color-text);
   background-color: var(--color-canvas);
   line-height: 1.55;
@@ -104,14 +110,16 @@ a {
   border-radius: 9px;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, var(--color-accent), #a855f7);
+  background: linear-gradient(135deg, #2f5daa, #1c3a6b);
   font-size: 0.85rem;
   font-weight: 700;
   color: #fff;
 }
 
 .brand__name {
-  font-size: 1.05rem;
+  font-size: 1.1rem;
+  font-family: var(--font-display);
+  font-weight: 600;
 }
 
 .topbar__title {
@@ -123,7 +131,8 @@ a {
 }
 
 .topbar__title h1 {
-  font-size: 1.05rem;
+  font-size: 1.1rem;
+  font-family: var(--font-display);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -224,7 +233,7 @@ a {
 }
 
 .chip--running {
-  background: rgba(99, 102, 241, 0.13);
+  background: rgba(47, 93, 170, 0.12);
   color: var(--color-accent-hover);
 }
 
@@ -302,7 +311,10 @@ a {
 }
 
 .section-title h2 {
-  font-size: 1.5rem;
+  font-size: 1.6rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .cards {
@@ -384,7 +396,7 @@ a {
 }
 
 .score-pill--c {
-  background: rgba(99, 102, 241, 0.12);
+  background: rgba(47, 93, 170, 0.11);
   color: var(--color-accent-hover);
 }
 
@@ -414,7 +426,7 @@ a {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(47, 93, 170, 0.1);
   font-size: 1.5rem;
   color: var(--color-accent-hover);
 }
@@ -516,7 +528,7 @@ a {
 
 .src-row--report {
   background: var(--color-accent-soft);
-  border-color: rgba(99, 102, 241, 0.25);
+  border-color: rgba(47, 93, 170, 0.25);
   cursor: default;
 }
 
@@ -598,7 +610,7 @@ a {
 
 .msg--user {
   align-self: flex-end;
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(47, 93, 170, 0.1);
   border-radius: 16px 16px 4px 16px;
   padding: 0.7rem 1rem;
 }
@@ -634,7 +646,8 @@ a {
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   padding: 0.6rem 0.85rem;
   margin: 0.6rem 0;
-  font-size: 0.86rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
 }
 
 .chat-empty {
@@ -971,7 +984,7 @@ a {
 }
 
 .step--running .step__glyph {
-  background: rgba(99, 102, 241, 0.13);
+  background: rgba(47, 93, 170, 0.12);
   color: var(--color-accent-hover);
 }
 
@@ -1159,8 +1172,8 @@ a {
 }
 
 .claim-item.selected {
-  background: var(--color-accent-soft);
-  border-color: rgba(99, 102, 241, 0.3);
+  background: var(--color-mark-soft);
+  border-color: var(--color-mark-border);
 }
 
 /* min-width + overflow-wrap: an unbreakable token (a long snake_case
@@ -1213,7 +1226,7 @@ a {
 }
 
 .compare-head--centered .compare-head__claim {
-  font-size: 1.05rem;
+  font-size: 1.2rem;
   max-width: 900px;
   margin: 0 auto 0.35rem;
 }
@@ -1243,6 +1256,7 @@ a {
   font-size: 0.95rem;
   font-weight: 600;
   line-height: 1.45;
+  font-family: var(--font-display);
 }
 
 .compare-head__why {
@@ -1253,11 +1267,12 @@ a {
 
 .compare-head__quote {
   margin: 0.45rem 0 0;
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
   border-left: 3px solid var(--color-accent);
   background: var(--color-surface-2);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  padding: 0.45rem 0.7rem;
+  padding: 0.5rem 0.75rem;
 }
 
 .pdf-duo {
@@ -1371,7 +1386,9 @@ a {
 }
 
 .focus-summary__text h3 {
-  font-size: 1.1rem;
+  font-size: 1.25rem;
+  font-family: var(--font-display);
+  font-weight: 600;
   margin-bottom: 0.15rem;
   overflow-wrap: anywhere;
 }
@@ -1466,9 +1483,9 @@ a {
 }
 
 .component-card__quote {
-  font-size: 0.86rem;
-  line-height: 1.55;
-  font-style: italic;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  font-family: var(--font-mono);
   border-left: 3px solid var(--color-accent);
   padding-left: 0.65rem;
   margin: 0.55rem 0 0;
@@ -1569,7 +1586,7 @@ a {
 
 .file-row--report {
   background: var(--color-accent-soft);
-  border-color: rgba(99, 102, 241, 0.25);
+  border-color: rgba(47, 93, 170, 0.25);
 }
 
 .file-row__icon {
@@ -1622,7 +1639,7 @@ a {
 .file-slot:hover {
   border-color: var(--color-accent);
   color: var(--color-text);
-  background: rgba(99, 102, 241, 0.04);
+  background: rgba(47, 93, 170, 0.04);
 }
 
 .dropzone {
@@ -1640,7 +1657,7 @@ a {
 .dropzone--active {
   border-color: var(--color-accent);
   color: var(--color-text);
-  background: rgba(99, 102, 241, 0.04);
+  background: rgba(47, 93, 170, 0.04);
 }
 
 .dropzone b {
@@ -1845,5 +1862,15 @@ a {
 
   .topbar {
     flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
