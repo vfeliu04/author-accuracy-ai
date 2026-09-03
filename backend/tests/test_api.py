@@ -176,6 +176,80 @@ def test_upload_rows_carry_sha256_content_hash(tmp_path):
     assert hashes and all(h == expected for h in hashes)
 
 
+def test_second_identical_upload_reuses_ingest_end_to_end(tmp_path, monkeypatch):
+    """The API seam for dedup: POST identical files twice; run 2's REAL
+    ingest step reuses run 1's rows — its progress label says so, and no
+    parser, embedder, or LLM client is even constructed — yet run 2 still
+    serves its own PDF after run 1 is deleted (copy-never-share over HTTP)."""
+    from authorai import jobs as jobsmod
+    from authorai.embeddings import FakeEmbedder
+    from authorai.jobs import step_ingest
+
+    settings = _settings(tmp_path)
+
+    def fake_ingest_pdf(
+        conn, embedder, run_id, path, *, kind, figures_dir, upload_id, describe, fallback_title
+    ):
+        doc_id = dbmod.add_document(conn, run_id, kind, upload_id=upload_id, title=fallback_title)
+        png = Path(figures_dir) / run_id / doc_id / "fig-1.png"
+        png.parent.mkdir(parents=True)
+        png.write_bytes(b"png bytes")
+        figure_id = dbmod.add_figure(conn, run_id, doc_id, str(png), page=1)
+        texts = ["alpha wheat facts", "figure about crops"]
+        chunks = [{"text": texts[0]}, {"text": texts[1], "kind": "figure", "figure_id": figure_id}]
+        dbmod.add_chunks(conn, run_id, doc_id, chunks, FakeEmbedder(dim=DIM).embed(texts))
+        return doc_id
+
+    def _fake(name):
+        def step(context, run_id, payload):
+            return f"{name} ok"
+
+        return step
+
+    steps = {
+        "ingest": step_ingest,
+        "extract": _fake("extract"),
+        "verify": _fake("verify"),
+        "score": _fake("score"),
+    }
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        first = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        monkeypatch.setattr(jobsmod, "ingest_pdf", fake_ingest_pdf)
+        assert Worker(settings, steps=steps).run_pending(conn) == 1
+
+        second = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
+        monkeypatch.setattr(
+            jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
+        )
+        monkeypatch.setattr(
+            jobsmod, "AnthropicClient", lambda *a, **k: pytest.fail("constructed an LLM client")
+        )
+        assert Worker(settings, steps=steps).run_pending(conn) == 1
+        report_doc = conn.execute(
+            "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT'", (second,)
+        ).fetchone()["id"]
+        conn.close()
+
+        detail = client.get(f"/api/runs/{second}", headers=AUTH).json()
+        ingest = next(p for p in detail["job"]["progress"] if p["step"] == "ingest")
+        assert ingest["label"] == "Ingested 2 documents (2 reused)"
+        assert detail["run"]["status"] == "DONE"
+
+        # Run 1's report and source were ALSO the same bytes, so within-run
+        # reuse already fired there: the source copied the report's ingest.
+        first_detail = client.get(f"/api/runs/{first}", headers=AUTH).json()
+        first_ingest = next(p for p in first_detail["job"]["progress"] if p["step"] == "ingest")
+        assert first_ingest["label"] == "Ingested 2 documents (1 reused)"
+
+        assert client.delete(f"/api/runs/{first}", headers=AUTH).status_code == 204
+        served = client.get(f"/api/runs/{second}/documents/{report_doc}/file", headers=AUTH)
+        assert served.status_code == 200
+        assert served.content == PDF_BYTES
+
+
 def test_run_title_defaults_to_report_filename_stem(tmp_path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:

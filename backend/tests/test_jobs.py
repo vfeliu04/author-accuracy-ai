@@ -402,9 +402,9 @@ def _dedup_settings(tmp_path):
     return Settings(anthropic_api_key="x", openai_api_key="x", figures_dir=tmp_path / "figures")
 
 
-def _ingested_upload(conn, tmp_path, *, kind="SOURCE", content_hash="feed01"):
+def _ingested_upload(conn, tmp_path, *, kind="SOURCE", content_hash="feed01", run_id=None):
     """A COMPLETE prior ingest at the jobs level: rows plus a PNG on disk."""
-    run_id = dbmod.create_run(conn)
+    run_id = run_id or dbmod.create_run(conn)
     pdf = tmp_path / f"{dbmod.new_id()}.pdf"
     pdf.write_bytes(b"%PDF-donor")
     upload_id = dbmod.add_upload(conn, kind, "donor.pdf", str(pdf), content_hash)
@@ -585,6 +585,100 @@ def test_step_ingest_label_counts_reuse(conn, tmp_path, monkeypatch):
     fresh_b = dbmod.add_upload(conn, "SOURCE", "b.pdf", str(source_pdf), "bbbb02")
     payload = {"report_upload_id": fresh_a, "source_upload_ids": [fresh_b]}
     assert step_ingest(context, other_run, payload) == "Ingested 2 documents"
+
+
+def _api_style_delete(conn, settings, run_id):
+    """Exactly what DELETE /runs/{id} does: rows in one txn, then the files."""
+    import shutil
+
+    for path in dbmod.delete_run_data(conn, run_id):
+        Path(path).unlink(missing_ok=True)
+    shutil.rmtree(Path(settings.figures_dir) / run_id, ignore_errors=True)
+
+
+def test_deleting_the_donor_run_leaves_the_copy_whole(conn, tmp_path, monkeypatch):
+    """Copy-never-share, proven from the copy's side: after the donor run is
+    FULLY deleted (rows, its PDF, its PNGs), the copy keeps its rows, its
+    byte-identical vectors, its own PNG, its own PDF — and both indexes
+    still answer."""
+    from authorai.search import keyword_search
+
+    donor_run, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="c0de01")
+    _no_recompute(monkeypatch)
+    settings = _dedup_settings(tmp_path)
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "mine.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "mine.pdf", str(pdf), "c0de01")
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, upload_id) is True
+    copy_doc = conn.execute("SELECT id FROM documents WHERE run_id = ?", (run_id,)).fetchone()["id"]
+    blob_sql = (
+        "SELECT v.embedding FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id"
+        " WHERE c.doc_id = ? ORDER BY c.id"
+    )
+    donor_blobs = [r["embedding"] for r in conn.execute(blob_sql, (donor_doc,))]
+
+    _api_style_delete(conn, settings, donor_run)
+
+    assert conn.execute("SELECT count(*) FROM runs WHERE id = ?", (donor_run,)).fetchone()[0] == 0
+    assert [r["embedding"] for r in conn.execute(blob_sql, (copy_doc,))] == donor_blobs
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (copy_doc,)).fetchone()
+    assert Path(figure["image_path"]).read_bytes() == b"donor png bytes"
+    assert pdf.exists()  # the copy's upload PDF was its own, not the donor's
+    assert keyword_search(conn, run_id, "wheat") != []
+
+
+def test_deleting_the_copy_leaves_the_donor_a_valid_donor(conn, tmp_path, monkeypatch):
+    donor_run, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="c0de02")
+    _no_recompute(monkeypatch)
+    settings = _dedup_settings(tmp_path)
+    first = dbmod.create_run(conn)
+    first_pdf = tmp_path / "first.pdf"
+    first_pdf.write_bytes(b"%PDF-donor")
+    first_upload = dbmod.add_upload(conn, "SOURCE", "first.pdf", str(first_pdf), "c0de02")
+    assert _reconcile_upload(PipelineContext(conn, settings), first, first_upload) is True
+
+    _api_style_delete(conn, settings, first)
+
+    donor_figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (donor_doc,)).fetchone()
+    assert Path(donor_figure["image_path"]).read_bytes() == b"donor png bytes"
+    assert conn.execute("SELECT count(*) FROM runs WHERE id = ?", (donor_run,)).fetchone()[0] == 1
+    # ... and it still serves the NEXT identical upload.
+    second = dbmod.create_run(conn)
+    second_pdf = tmp_path / "second.pdf"
+    second_pdf.write_bytes(b"%PDF-donor")
+    second_upload = dbmod.add_upload(conn, "SOURCE", "second.pdf", str(second_pdf), "c0de02")
+    assert _reconcile_upload(PipelineContext(conn, settings), second, second_upload) is True
+
+
+def test_same_file_twice_in_one_run_reuses_within_the_run(conn, tmp_path, monkeypatch):
+    """Report and source are the same bytes: the source reconcile reuses the
+    report's just-finished ingest rewritten to SOURCE — the partition
+    verification retrieval reads from."""
+    from authorai.search import vector_search
+
+    settings = _dedup_settings(tmp_path)
+    run_id = dbmod.create_run(conn)
+    _ingested_upload(conn, tmp_path, kind="REPORT", content_hash="feed77", run_id=run_id)
+    _no_recompute(monkeypatch)
+    source_pdf = tmp_path / "same-bytes.pdf"
+    source_pdf.write_bytes(b"%PDF-donor")
+    source_upload = dbmod.add_upload(conn, "SOURCE", "same-bytes.pdf", str(source_pdf), "feed77")
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, source_upload) is True
+
+    docs = {
+        row["kind"]: row["id"]
+        for row in conn.execute("SELECT id, kind FROM documents WHERE run_id = ?", (run_id,))
+    }
+    assert set(docs) == {"REPORT", "SOURCE"}
+    source_chunk_ids = [
+        row["id"]
+        for row in conn.execute("SELECT id FROM chunks WHERE doc_id = ?", (docs["SOURCE"],))
+    ]
+    query = [1.0] + [0.0] * (DIM - 1)
+    assert sorted(vector_search(conn, run_id, query, k=10, doc_kind="SOURCE")) == sorted(
+        source_chunk_ids
+    )
 
 
 def test_worker_start_twice_is_loud_and_restart_after_stop_works(conn, tmp_path):
