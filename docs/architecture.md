@@ -59,9 +59,9 @@ One SQLite file (`AUTHORAI_DB_PATH`, default `data/authorai.db`) holds everythin
 
 | Table | Contents |
 | --- | --- |
-| `meta` | Key/value; stores the database's `embedding_dim` |
+| `meta` | Key/value; stores `embedding_dim` plus first-write-wins `embedding_model` / `caption_model` stamps (the dedup gate) |
 | `runs` | `id, created_at, status (CREATED/RUNNING/DONE/FAILED), error` |
-| `uploads` | Stored PDF files: kind, original file name, server-side path |
+| `uploads` | Stored PDF files: kind, original file name, server-side path, `content_hash` (SHA-256, indexed — NULL on legacy/CLI rows) |
 | `documents` | One row per ingested PDF: `run_id`, kind (`SOURCE`/`REPORT`), title, metadata JSON (report sections) |
 | `chunks` | Retrieval units: `run_id`, `doc_id`, page, section, kind (`text`/`table`/`figure`), text, `figure_id` |
 | `chunks_fts` | FTS5 index over chunk text (external-content table, trigger-synced) |
@@ -97,6 +97,8 @@ Every query is scoped to one run via SQL. Verification passes `doc_kind="SOURCE"
 - **Figure** chunks: caption plus an LLM-written description (`claude-haiku-4-5`), baked into the chunk text *before* embedding — chunk text is immutable, so this is the only moment it can happen. The PNG is saved under `figures_dir/<run_id>/<doc_id>/`.
 
 All failure-prone external work (parsing, figure descriptions, the embedding call) happens **before** any database or filesystem write, so a failed ingest leaves no half-ingested document. An empty parse raises instead of indexing an empty document.
+
+**Cross-run ingest dedup.** Every API upload records the file's SHA-256 in `uploads.content_hash`. Before ingesting fresh, the worker looks for the newest **complete** document (one that has chunks) whose upload shares the hash and **copies** its derived data into the new run: the document row, figures (PNGs copied on disk first, so no row ever points at a missing file), chunks, and the raw embedding blobs byte-for-byte — never re-embedded, since renormalization isn't float32-stable. **Copy, never share**: the two runs reference no common row or file afterwards, so deleting either run leaves the other whole. The copy lands under the *new* upload's kind (a SOURCE donor can serve a REPORT upload — `chunks_vec.doc_kind` is rewritten), and reuse is refused when `meta.embedding_model` (stamped first-write-wins by the first real ingest) doesn't match the configured model — stored vectors must not answer for a different embedder. Hashless uploads (legacy rows, the CLI path) always ingest fresh. A fully reused ingest constructs no provider client at all; the step label reports it as `Ingested N documents (M reused)`.
 
 ## LLM layer (`llm.py`, `config.py`)
 
