@@ -1,12 +1,14 @@
-"""Job worker tests: claiming, resume, failure, and torn-ingest recovery."""
+"""Job worker tests: claiming, resume, failure, torn-ingest recovery, dedup."""
 
 import inspect
 import time
+from pathlib import Path
 
 import pytest
 
 from authorai import db as dbmod
 from authorai.config import Settings
+from authorai.embeddings import FakeEmbedder
 from authorai.ingest import ingest_pdf
 from authorai.jobs import (
     PIPELINE_STEPS,
@@ -15,6 +17,7 @@ from authorai.jobs import (
     Worker,
     _reconcile_upload,
     run_job,
+    step_ingest,
 )
 from tests.conftest import DIM
 
@@ -388,6 +391,200 @@ def test_worker_thread_completes_jobs_and_survives_step_failures(tmp_path):
     finally:
         worker.stop()
     conn.close()
+
+
+# --------------------------------------------------------------------------
+# Cross-run ingest dedup: _reconcile_upload reuses a prior ingest of
+# byte-identical bytes instead of recomputing it.
+
+
+def _dedup_settings(tmp_path):
+    return Settings(anthropic_api_key="x", openai_api_key="x", figures_dir=tmp_path / "figures")
+
+
+def _ingested_upload(conn, tmp_path, *, kind="SOURCE", content_hash="feed01"):
+    """A COMPLETE prior ingest at the jobs level: rows plus a PNG on disk."""
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / f"{dbmod.new_id()}.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, kind, "donor.pdf", str(pdf), content_hash)
+    doc_id = dbmod.add_document(conn, run_id, kind, upload_id=upload_id, title="Donor Doc")
+    png = tmp_path / "figures" / run_id / doc_id / "fig-1.png"
+    png.parent.mkdir(parents=True)
+    png.write_bytes(b"donor png bytes")
+    figure_id = dbmod.add_figure(conn, run_id, doc_id, str(png), page=2, caption="cap")
+    chunks = [
+        {"text": "alpha wheat statistics", "page": 1, "section": "Intro"},
+        {"text": "beta table of yields", "page": 2, "kind": "table"},
+        {"text": "figure about crops", "page": 2, "kind": "figure", "figure_id": figure_id},
+    ]
+    embedder = FakeEmbedder(dim=DIM)
+    dbmod.add_chunks(conn, run_id, doc_id, chunks, embedder.embed([c["text"] for c in chunks]))
+    return run_id, upload_id, doc_id
+
+
+def _no_recompute(monkeypatch):
+    """Any provider work during a reuse is a test failure — not just calls:
+    CONSTRUCTING a client already means the dedup path leaked."""
+    from authorai import jobs as jobsmod
+
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
+    monkeypatch.setattr(
+        jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
+    )
+    monkeypatch.setattr(
+        jobsmod, "AnthropicClient", lambda *a, **k: pytest.fail("constructed an LLM client")
+    )
+
+
+def test_dedup_reuses_prior_ingest_without_recomputing(conn, tmp_path, monkeypatch):
+    """The headline contract: identical bytes reuse the donor's rows and PNGs
+    with NO provider client constructed. Meta has no embedding_model row here
+    (a pre-dedup database) — that must count as compatible, not as a refusal."""
+    _, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="beef01")
+    _no_recompute(monkeypatch)
+
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "again.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "again.pdf", str(pdf), "beef01")
+    context = PipelineContext(conn, _dedup_settings(tmp_path))
+    assert _reconcile_upload(context, run_id, upload_id) is True
+
+    new_doc = conn.execute(
+        "SELECT * FROM documents WHERE run_id = ? AND upload_id = ?", (run_id, upload_id)
+    ).fetchone()
+    assert new_doc["title"] == "Donor Doc"
+    texts = "SELECT text FROM chunks WHERE doc_id = ? ORDER BY id"
+    assert [r["text"] for r in conn.execute(texts, (new_doc["id"],))] == [
+        r["text"] for r in conn.execute(texts, (donor_doc,))
+    ]
+    new_figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (new_doc["id"],)).fetchone()
+    assert Path(new_figure["image_path"]).read_bytes() == b"donor png bytes"
+    assert Path(new_figure["image_path"]).parent == tmp_path / "figures" / run_id / new_doc["id"]
+    # Idempotent on retry: the copy is now a completed ingest, nothing reruns.
+    assert _reconcile_upload(context, run_id, upload_id) is False
+
+
+def test_dedup_rewrites_kind_for_the_new_upload(conn, tmp_path, monkeypatch):
+    """A SOURCE donor serving a REPORT upload: the copy lands under doc_kind
+    REPORT — the partition verification retrieval filters on."""
+    from authorai.search import vector_search
+
+    _ingested_upload(conn, tmp_path, kind="SOURCE", content_hash="beef02")
+    _no_recompute(monkeypatch)
+
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "as-report.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, "REPORT", "as-report.pdf", str(pdf), "beef02")
+    assert _reconcile_upload(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, upload_id)
+
+    doc = conn.execute("SELECT * FROM documents WHERE run_id = ?", (run_id,)).fetchone()
+    assert doc["kind"] == "REPORT"
+    query = [1.0] + [0.0] * (DIM - 1)
+    assert len(vector_search(conn, run_id, query, k=5, doc_kind="REPORT")) == 3
+    assert vector_search(conn, run_id, query, k=5, doc_kind="SOURCE") == []
+
+
+def test_dedup_refused_when_embedding_model_changed(conn, tmp_path, monkeypatch):
+    """Stored vectors from another embedding model must not answer for this
+    one — the gate falls through to a fresh ingest, loudly compatible."""
+    from authorai import jobs as jobsmod
+
+    _ingested_upload(conn, tmp_path, content_hash="beef03")
+    dbmod.set_meta_if_absent(conn, "embedding_model", "older-embedding-model")
+
+    ingested: list[int] = []
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: ingested.append(1))
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "again.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "again.pdf", str(pdf), "beef03")
+    context = PipelineContext(conn, _dedup_settings(tmp_path))
+    assert _reconcile_upload(context, run_id, upload_id) is False
+    assert ingested == [1]
+
+
+def test_dedup_allowed_when_stored_model_matches(conn, tmp_path, monkeypatch):
+    settings = _dedup_settings(tmp_path)
+    _ingested_upload(conn, tmp_path, content_hash="beef04")
+    dbmod.set_meta_if_absent(conn, "embedding_model", settings.embedding_model)
+    _no_recompute(monkeypatch)
+
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "again.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "again.pdf", str(pdf), "beef04")
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, upload_id) is True
+
+
+def test_fresh_ingest_stamps_model_meta(conn, tmp_path, monkeypatch):
+    """The first real ingest records WHICH models produced the stored data —
+    the fact the dedup gate checks forever after."""
+    from authorai import jobs as jobsmod
+
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
+    settings = _dedup_settings(tmp_path)
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "fresh.pdf"
+    pdf.write_bytes(b"%PDF-fresh")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "fresh.pdf", str(pdf), "beef05")
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, upload_id) is False
+    assert dbmod.get_meta(conn, "embedding_model") == settings.embedding_model
+    assert dbmod.get_meta(conn, "caption_model") == settings.caption_model
+
+
+def test_dedup_ignores_torn_donors_and_null_hashes(conn, tmp_path, monkeypatch):
+    """A torn donor (no chunks) and a hashless legacy upload both fall
+    through to a fresh ingest — never a degraded copy."""
+    from authorai import jobs as jobsmod
+
+    torn_run = dbmod.create_run(conn)
+    torn_pdf = tmp_path / "torn.pdf"
+    torn_pdf.write_bytes(b"%PDF-torn")
+    torn_upload = dbmod.add_upload(conn, "SOURCE", "torn.pdf", str(torn_pdf), "dead01")
+    dbmod.add_document(conn, torn_run, "SOURCE", upload_id=torn_upload)  # zero chunks
+
+    ingested: list[int] = []
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: ingested.append(1))
+    settings = _dedup_settings(tmp_path)
+
+    run_id = dbmod.create_run(conn)
+    same_hash = tmp_path / "same-hash.pdf"
+    same_hash.write_bytes(b"%PDF-torn")
+    matching = dbmod.add_upload(conn, "SOURCE", "same-hash.pdf", str(same_hash), "dead01")
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, matching) is False
+
+    hashless = dbmod.add_upload(conn, "SOURCE", "legacy.pdf", str(same_hash), None)
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, hashless) is False
+    assert ingested == [1, 1]
+
+
+def test_step_ingest_label_counts_reuse(conn, tmp_path, monkeypatch):
+    """The done-label the UI shows verbatim: '(M reused)' only when M > 0."""
+    from authorai import jobs as jobsmod
+
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
+    settings = _dedup_settings(tmp_path)
+    _ingested_upload(conn, tmp_path, content_hash="feed99")
+
+    run_id = dbmod.create_run(conn)
+    report_pdf = tmp_path / "r.pdf"
+    report_pdf.write_bytes(b"%PDF-r")
+    source_pdf = tmp_path / "s.pdf"
+    source_pdf.write_bytes(b"%PDF-donor")
+    report_upload = dbmod.add_upload(conn, "REPORT", "r.pdf", str(report_pdf), "aaaa01")
+    source_upload = dbmod.add_upload(conn, "SOURCE", "s.pdf", str(source_pdf), "feed99")
+    payload = {"report_upload_id": report_upload, "source_upload_ids": [source_upload]}
+    context = PipelineContext(conn, settings)
+    assert step_ingest(context, run_id, payload) == "Ingested 2 documents (1 reused)"
+
+    other_run = dbmod.create_run(conn)
+    fresh_a = dbmod.add_upload(conn, "REPORT", "a.pdf", str(report_pdf), "bbbb01")
+    fresh_b = dbmod.add_upload(conn, "SOURCE", "b.pdf", str(source_pdf), "bbbb02")
+    payload = {"report_upload_id": fresh_a, "source_upload_ids": [fresh_b]}
+    assert step_ingest(context, other_run, payload) == "Ingested 2 documents"
 
 
 def test_worker_start_twice_is_loud_and_restart_after_stop_works(conn, tmp_path):

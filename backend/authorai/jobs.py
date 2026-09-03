@@ -79,13 +79,91 @@ def _chunk_count(conn: sqlite3.Connection, doc_id: str) -> int:
     return conn.execute("SELECT count(*) FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
 
 
-def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> None:
+def _copy_ingested_document(
+    context: PipelineContext, run_id: str, upload: sqlite3.Row, donor: dict
+) -> None:
+    """Copy a donor document's ingest output into this run — files, then rows.
+
+    PNGs are copied BEFORE any DB write (verify attaches them, so a row must
+    never point at a missing file; a vanished donor PNG raises loudly). The
+    rows then land in copy_document_data's single transaction, so a failure
+    after the files leaves no rows — the fresh directory is removed on the
+    way out and a retry starts clean.
+    """
+    conn = context.conn
+    doc_id = dbmod.new_id()
+    donor_figures = conn.execute(
+        "SELECT id, image_path FROM figures WHERE doc_id = ? ORDER BY rowid", (donor["doc_id"],)
+    ).fetchall()
+    figure_dir = Path(context.settings.figures_dir) / run_id / doc_id
+    figure_map: dict[str, tuple[str, str]] = {}
+    try:
+        if donor_figures:
+            figure_dir.mkdir(parents=True, exist_ok=True)
+        for row in donor_figures:
+            target = figure_dir / Path(row["image_path"]).name
+            shutil.copyfile(row["image_path"], target)
+            figure_map[row["id"]] = (dbmod.new_id(), str(target))
+        dbmod.copy_document_data(
+            conn,
+            donor["doc_id"],
+            run_id=run_id,
+            doc_id=doc_id,
+            upload_id=upload["id"],
+            kind=upload["kind"],
+            figure_map=figure_map,
+        )
+    except Exception:
+        if figure_dir.exists():
+            shutil.rmtree(figure_dir)
+        raise
+
+
+def _maybe_reuse_ingest(context: PipelineContext, run_id: str, upload: sqlite3.Row) -> bool:
+    """Reuse a previous ingest of these exact bytes, when one is safe to copy.
+
+    Each gate falls through to a fresh ingest: no hash (legacy/CLI upload),
+    an embedding-model mismatch (stored vectors must not answer for a
+    different model; missing meta = pre-dedup database, allowed), no
+    complete donor. On reuse the donor's kind is irrelevant — the copy is
+    written under THIS upload's kind.
+    """
+    if not upload["content_hash"]:
+        return False
+    conn = context.conn
+    stored_model = dbmod.get_meta(conn, "embedding_model")
+    if stored_model is not None and stored_model != context.settings.embedding_model:
+        logger.warning(
+            "embedding model changed (%s -> %s) — ingesting fresh instead of reusing",
+            stored_model,
+            context.settings.embedding_model,
+        )
+        return False
+    donor = dbmod.find_ingest_donor(conn, upload["content_hash"], exclude_upload_id=upload["id"])
+    if donor is None:
+        return False
+    _copy_ingested_document(context, run_id, upload, donor)
+    logger.info(
+        "reused ingest for upload %s from document %s (run %s)",
+        upload["id"],
+        donor["doc_id"],
+        donor["run_id"],
+    )
+    return True
+
+
+def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> bool:
     """Ingest one upload, tolerating a previous torn attempt.
 
     ingest_pdf's writes span several transactions, so a crash can leave a
     document row with zero chunks. Chunks present -> done; document without
     chunks -> torn, delete its figures + row and re-ingest (no claims can
-    exist before extract, so the FKs permit it); nothing -> ingest fresh.
+    exist before extract, so the FKs permit it); nothing -> reuse a previous
+    ingest of byte-identical bytes if one exists, else ingest fresh.
+
+    Returns True when THIS attempt reused a previous ingest — already-done
+    and fresh both return False, so the step label counts only this
+    attempt's actual reuse.
     """
     conn = context.conn
     upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
@@ -97,7 +175,7 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
     settings = context.settings
     if document is not None:
         if _chunk_count(conn, document["id"]):
-            return  # completed on a previous attempt
+            return False  # completed on a previous attempt
         logger.warning("torn ingest for upload %s — re-ingesting", upload_id)
         # The figure PNGs land on disk BEFORE any DB write and re-ingest gets
         # a fresh doc_id, so the old directory would be unreferenced garbage.
@@ -107,6 +185,12 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         with conn:
             conn.execute("DELETE FROM figures WHERE doc_id = ?", (document["id"],))
             conn.execute("DELETE FROM documents WHERE id = ?", (document["id"],))
+
+    # The dedup check MUST precede context.llm/context.embedder: a fully
+    # reused ingest constructs no provider client, so it needs no API key —
+    # which is also the proof that reuse recomputes nothing.
+    if _maybe_reuse_ingest(context, run_id, upload):
+        return True
 
     llm = context.llm
     caption_model = settings.caption_model
@@ -129,13 +213,20 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         # path (path.stem), not "report.pdf" vs "report".
         fallback_title=Path(upload["file_name"]).stem,
     )
+    # Stamp which models produced the stored vectors and captions (first
+    # write wins), so a later model swap cannot launder old vectors through
+    # the dedup gate. Captions are recorded but not gated — they stay valid
+    # text whichever model wrote them.
+    dbmod.set_meta_if_absent(conn, "embedding_model", settings.embedding_model)
+    dbmod.set_meta_if_absent(conn, "caption_model", settings.caption_model)
+    return False
 
 
 def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:
     upload_ids = [payload["report_upload_id"], *payload["source_upload_ids"]]
-    for upload_id in upload_ids:
-        _reconcile_upload(context, run_id, upload_id)
-    return f"Ingested {len(upload_ids)} documents"
+    reused = sum(_reconcile_upload(context, run_id, upload_id) for upload_id in upload_ids)
+    label = f"Ingested {len(upload_ids)} documents"
+    return f"{label} ({reused} reused)" if reused else label
 
 
 def step_extract(context: PipelineContext, run_id: str, payload: dict) -> str:
