@@ -152,6 +152,30 @@ def test_startup_requeues_running_jobs(tmp_path):
     assert any(p["step"] == "recovered" for p in job["progress"])
 
 
+def test_upload_rows_carry_sha256_content_hash(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        run_id = client.post("/api/runs", headers=AUTH, files=_upload_files(source_count=2)).json()[
+            "run_id"
+        ]
+    import hashlib
+
+    expected = hashlib.sha256(PDF_BYTES).hexdigest()
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    hashes = [
+        row["content_hash"]
+        for row in conn.execute(
+            "SELECT u.content_hash FROM uploads u"
+            " JOIN jobs j ON j.run_id = ?"
+            " WHERE u.id IN (SELECT value FROM json_each(j.payload, '$.source_upload_ids')"
+            "                UNION SELECT json_extract(j.payload, '$.report_upload_id'))",
+            (run_id,),
+        )
+    ]
+    conn.close()
+    assert hashes and all(h == expected for h in hashes)
+
+
 def test_run_title_defaults_to_report_filename_stem(tmp_path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:

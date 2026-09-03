@@ -10,6 +10,7 @@ as a whole, so a new endpoint cannot forget it, and it fails CLOSED (no
 configured key ⇒ 401).
 """
 
+import hashlib
 import json
 import secrets
 import shutil
@@ -155,16 +156,21 @@ def create_run(
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     try:
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str, str | None]] = []
         for kind, upload in uploads:
             # Server-generated disk name: the client filename never touches the
             # path (kept only as the uploads.file_name column for display).
             path = settings.uploads_dir / f"{dbmod.new_id()}.pdf"
             upload.file.seek(0)
+            # Hash while writing — the content fingerprint that lets a later
+            # run reuse this file's ingested data instead of recomputing it.
+            hasher = hashlib.sha256()
             with path.open("wb") as handle:
-                shutil.copyfileobj(upload.file, handle, length=1024 * 1024)
+                while block := upload.file.read(1024 * 1024):
+                    hasher.update(block)
+                    handle.write(block)
             written.append(path)
-            rows.append((kind, upload.filename, str(path)))
+            rows.append((kind, upload.filename, str(path), hasher.hexdigest()))
         run_id, job_id = dbmod.create_run_with_uploads_and_job(conn, rows, title=title)
     except Exception:
         for path in written:

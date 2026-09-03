@@ -52,7 +52,7 @@ Each step is recorded in the job's `progress` JSON (`{step, label, status, ts}`,
 
 One SQLite file (`AUTHORAI_DB_PATH`, default `data/authorai.db`) holds everything: relational tables, the FTS5 keyword index, and the sqlite-vec vector index. Connections run WAL with `busy_timeout=5000` (set *before* the WAL switch so racing openers wait instead of throwing `SQLITE_BUSY`) and `foreign_keys=ON`.
 
-**Migrations** run at connect time via `PRAGMA user_version`; `SCHEMA_VERSION` is currently **9**. Each migration is an `if version < N:` block whose DDL, data moves, and version bump execute in one `BEGIN…COMMIT` script, so an interruption can never leave a half-created schema. Two loud guards at open:
+**Migrations** run at connect time via `PRAGMA user_version`; `SCHEMA_VERSION` is currently **11**. Each migration is an `if version < N:` block whose DDL, data moves, and version bump execute in one `BEGIN…COMMIT` script, so an interruption can never leave a half-created schema. Two loud guards at open:
 
 - A database with `user_version > SCHEMA_VERSION` (written by a newer build) **refuses to open** — an old checkout writing through a schema it doesn't understand would corrupt silently.
 - A database created with a different `embedding_dim` than configured refuses to open — mixed dimensions would corrupt every similarity search.

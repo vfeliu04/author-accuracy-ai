@@ -149,7 +149,8 @@ def test_migration_4_to_5_adds_prompt_hash(tmp_path):
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: drop the column the way a v4 database lacks it.
     conn.executescript(
-        "DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
+        "DROP INDEX idx_uploads_content_hash; ALTER TABLE uploads DROP COLUMN content_hash;"
+        " DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
         " ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE runs DROP COLUMN title;"
@@ -186,6 +187,8 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
         );
         INSERT INTO chunks_vec(chunk_id, run_id, embedding) SELECT * FROM b;
         DROP TABLE b;
+        DROP INDEX idx_uploads_content_hash;
+        ALTER TABLE uploads DROP COLUMN content_hash;
         DROP TABLE run_scores;
         DROP TABLE source_credibility;
         DROP TABLE jobs;
@@ -216,7 +219,11 @@ def test_migration_9_to_10_adds_run_title(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: a v9 database has no runs.title.
-    conn.executescript("ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;")
+    conn.executescript(
+        "DROP INDEX idx_uploads_content_hash;"
+        " ALTER TABLE uploads DROP COLUMN content_hash;"
+        " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;"
+    )
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
@@ -224,13 +231,32 @@ def test_migration_9_to_10_adds_run_title(tmp_path):
     conn.close()
 
 
+def test_migration_10_to_11_adds_upload_content_hash(tmp_path):
+    path = tmp_path / "db.sqlite"
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    # Rewind: a v10 database has no uploads.content_hash (nor its index).
+    conn.executescript(
+        "DROP INDEX idx_uploads_content_hash;"
+        " ALTER TABLE uploads DROP COLUMN content_hash; PRAGMA user_version = 10;"
+    )
+    conn.close()
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+    conn.execute("SELECT content_hash FROM uploads")  # column exists again
+    conn.close()
+
+
 def test_create_run_with_uploads_stores_title(conn):
     run_id, _job_id = dbmod.create_run_with_uploads_and_job(
-        conn, [("REPORT", "r.pdf", "/tmp/r.pdf")], title="My Study"
+        conn, [("REPORT", "r.pdf", "/tmp/r.pdf", "hash-a")], title="My Study"
     )
     assert dbmod.get_run(conn, run_id)["title"] == "My Study"
+    [stored] = conn.execute(
+        "SELECT content_hash FROM uploads WHERE content_hash IS NOT NULL"
+    ).fetchall()
+    assert stored["content_hash"] == "hash-a"
     untitled_id, _ = dbmod.create_run_with_uploads_and_job(
-        conn, [("REPORT", "r.pdf", "/tmp/r.pdf")]
+        conn, [("REPORT", "r.pdf", "/tmp/r.pdf", None)]
     )
     assert dbmod.get_run(conn, untitled_id)["title"] is None
 
@@ -246,7 +272,8 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind to a v3 state and reconnect — the v4 block must re-run cleanly.
     conn.executescript(
-        "DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
+        "DROP INDEX idx_uploads_content_hash; ALTER TABLE uploads DROP COLUMN content_hash;"
+        " DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
         " DROP TABLE jobs; ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 3;"

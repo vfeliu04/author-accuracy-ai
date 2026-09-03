@@ -100,7 +100,7 @@ The workflow ingests the pinned source pair + dev report, then runs extract → 
 
 One SQLite file (`backend/data/authorai.db` by default) holds relational tables + FTS5 + sqlite-vec. Two rules to know:
 
-**A worker on an old checkout dies loudly against a newer database.** `db.py` refuses to open any database whose `PRAGMA user_version` is higher than the build's `SCHEMA_VERSION` (currently 9). This is deliberate: an old build writing through a newer schema corrupts silently (e.g. the pre-partition `add_chunks` would store `doc_kind=NULL` rows that every SOURCE-filtered search then misses). When you see this error, **upgrade the checkout — do not work around the guard.**
+**A worker on an old checkout dies loudly against a newer database.** `db.py` refuses to open any database whose `PRAGMA user_version` is higher than the build's `SCHEMA_VERSION` (currently 11). This is deliberate: an old build writing through a newer schema corrupts silently (e.g. the pre-partition `add_chunks` would store `doc_kind=NULL` rows that every SOURCE-filtered search then misses). When you see this error, **upgrade the checkout — do not work around the guard.**
 
 **Migration discipline.** Adding a migration means, in the same commit:
 

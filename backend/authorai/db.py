@@ -17,7 +17,7 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "FAILED")
 
@@ -413,6 +413,22 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 11:
+        conn.executescript(
+            """
+            BEGIN;
+
+            -- sha256 of the stored PDF bytes, written by the API upload loop.
+            -- NULL for legacy/CLI rows: NULL never matches a donor lookup, so
+            -- old rows are inert until backfilled.
+            ALTER TABLE uploads ADD COLUMN content_hash TEXT;
+            CREATE INDEX idx_uploads_content_hash ON uploads(content_hash);
+
+            PRAGMA user_version = 11;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -610,12 +626,19 @@ def set_run_status(
 # --- uploads and documents ----------------------------------------------
 
 
-def add_upload(conn: sqlite3.Connection, kind: str, file_name: str, path: str) -> str:
+def add_upload(
+    conn: sqlite3.Connection,
+    kind: str,
+    file_name: str,
+    path: str,
+    content_hash: str | None = None,
+) -> str:
     upload_id = new_id()
     with conn:
         conn.execute(
-            "INSERT INTO uploads(id, kind, file_name, path, created_at) VALUES (?, ?, ?, ?, ?)",
-            (upload_id, kind, file_name, path, now_iso()),
+            "INSERT INTO uploads(id, kind, file_name, path, content_hash, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (upload_id, kind, file_name, path, content_hash, now_iso()),
         )
     return upload_id
 
@@ -825,11 +848,14 @@ def create_job(
 
 
 def create_run_with_uploads_and_job(
-    conn: sqlite3.Connection, uploads: list[tuple[str, str, str]], title: str | None = None
+    conn: sqlite3.Connection,
+    uploads: list[tuple[str, str, str, str | None]],
+    title: str | None = None,
 ) -> tuple[str, str]:
     """Create a run, its upload rows, and its pipeline job in ONE transaction.
 
-    `uploads` is a list of (kind, file_name, path); exactly one must be REPORT.
+    `uploads` is a list of (kind, file_name, path, content_hash); exactly one
+    must be REPORT.
     All-or-nothing so a failure part-way never strands a run with no job, or
     uploads with no run (the API's atomicity guarantee — v1 committed each
     separately and left orphans on the first failure).
@@ -842,11 +868,12 @@ def create_run_with_uploads_and_job(
         conn.execute(
             "INSERT INTO runs(id, created_at, title) VALUES (?, ?, ?)", (run_id, now, title)
         )
-        for kind, file_name, path in uploads:
+        for kind, file_name, path, content_hash in uploads:
             upload_id = new_id()
             conn.execute(
-                "INSERT INTO uploads(id, kind, file_name, path, created_at) VALUES (?, ?, ?, ?, ?)",
-                (upload_id, kind, file_name, path, now),
+                "INSERT INTO uploads(id, kind, file_name, path, content_hash, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (upload_id, kind, file_name, path, content_hash, now),
             )
             if kind == "REPORT":
                 report_upload_id = upload_id
