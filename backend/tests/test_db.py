@@ -295,3 +295,169 @@ def test_delete_cleans_both_indexes(conn):
         conn.execute("DELETE FROM chunks WHERE id = ?", (chunk_id,))
     assert keyword_search(conn, run_id, "wheat") == []
     assert conn.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] == 0
+
+
+# --- ingest dedup primitives ---------------------------------------------
+
+
+def _donor_run(conn, kind="SOURCE", content_hash="cafe01"):
+    """A complete donor: upload + document + figure + three chunks."""
+    run_id = dbmod.create_run(conn)
+    upload_id = dbmod.add_upload(conn, kind, "donor.pdf", "/tmp/donor.pdf", content_hash)
+    doc_id = dbmod.add_document(conn, run_id, kind, upload_id=upload_id, title="Donor Doc")
+    figure_id = dbmod.add_figure(conn, run_id, doc_id, "/tmp/fig-1.png", page=2, caption="cap")
+    chunks = [
+        {"text": "alpha wheat statistics", "page": 1, "section": "Intro"},
+        {"text": "beta table of yields", "page": 2, "kind": "table"},
+        {"text": "figure about crops", "page": 2, "kind": "figure", "figure_id": figure_id},
+    ]
+    embedder = FakeEmbedder(dim=DIM)
+    chunk_ids = dbmod.add_chunks(
+        conn, run_id, doc_id, chunks, embedder.embed([c["text"] for c in chunks])
+    )
+    return run_id, upload_id, doc_id, figure_id, chunk_ids
+
+
+def test_meta_helpers_first_write_wins(conn):
+    assert dbmod.get_meta(conn, "embedding_model") is None
+    dbmod.set_meta_if_absent(conn, "embedding_model", "model-a")
+    assert dbmod.get_meta(conn, "embedding_model") == "model-a"
+    dbmod.set_meta_if_absent(conn, "embedding_model", "model-b")
+    assert dbmod.get_meta(conn, "embedding_model") == "model-a"  # never overwritten
+
+
+def test_find_ingest_donor_picks_newest_complete_and_excludes_self(conn):
+    _, old_upload, old_doc, _, _ = _donor_run(conn, content_hash="samehash")
+    conn.execute(
+        "UPDATE uploads SET created_at = '2020-01-01T00:00:00' WHERE id = ?", (old_upload,)
+    )
+    conn.commit()
+    _, new_upload, new_doc, _, _ = _donor_run(conn, content_hash="samehash")
+
+    donor = dbmod.find_ingest_donor(conn, "samehash", exclude_upload_id="someone-else")
+    assert donor is not None and donor["doc_id"] == new_doc  # newest wins
+    # Excluding the newest upload falls back to the older complete donor.
+    donor = dbmod.find_ingest_donor(conn, "samehash", exclude_upload_id=new_upload)
+    assert donor is not None and donor["doc_id"] == old_doc
+
+
+def test_find_ingest_donor_rejects_torn_and_null(conn):
+    run_id = dbmod.create_run(conn)
+    upload_id = dbmod.add_upload(conn, "SOURCE", "torn.pdf", "/tmp/torn.pdf", "tornhash")
+    dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)  # zero chunks
+    assert dbmod.find_ingest_donor(conn, "tornhash", exclude_upload_id="x") is None
+    assert dbmod.find_ingest_donor(conn, None, exclude_upload_id="x") is None
+    # NULL-hash uploads never match anything, not even each other.
+    assert dbmod.find_ingest_donor(conn, "", exclude_upload_id="x") is None
+
+
+def test_copy_document_data_equivalence(conn):
+    donor_run, _, donor_doc, donor_figure, donor_chunk_ids = _donor_run(conn)
+
+    new_run = dbmod.create_run(conn)
+    new_upload = dbmod.add_upload(conn, "REPORT", "again.pdf", "/tmp/again.pdf", "cafe01")
+    new_doc = dbmod.new_id()
+    new_figure = dbmod.new_id()
+    copied = dbmod.copy_document_data(
+        conn,
+        donor_doc,
+        run_id=new_run,
+        doc_id=new_doc,
+        upload_id=new_upload,
+        kind="REPORT",
+        figure_map={donor_figure: (new_figure, "/tmp/new/fig-1.png")},
+    )
+    assert copied == 3
+
+    donor_rows = conn.execute(
+        "SELECT page, section, kind, text FROM chunks WHERE doc_id = ? ORDER BY id", (donor_doc,)
+    ).fetchall()
+    copy_rows = conn.execute(
+        "SELECT page, section, kind, text FROM chunks WHERE doc_id = ? ORDER BY id", (new_doc,)
+    ).fetchall()
+    assert [tuple(r) for r in donor_rows] == [tuple(r) for r in copy_rows]
+
+    # Embedding blobs are byte-identical, order-aligned.
+    copy_chunk_ids = [
+        r["id"]
+        for r in conn.execute("SELECT id FROM chunks WHERE doc_id = ? ORDER BY id", (new_doc,))
+    ]
+    for old_id, new_id_ in zip(donor_chunk_ids, copy_chunk_ids, strict=True):
+        old_blob = conn.execute(
+            "SELECT embedding FROM chunks_vec WHERE chunk_id = ?", (old_id,)
+        ).fetchone()[0]
+        new_blob = conn.execute(
+            "SELECT embedding FROM chunks_vec WHERE chunk_id = ?", (new_id_,)
+        ).fetchone()[0]
+        assert bytes(old_blob) == bytes(new_blob)
+
+    # Both indexes answer on the NEW run under the NEW kind.
+    assert keyword_search(conn, new_run, "wheat") == [copy_chunk_ids[0]]
+    from authorai.search import vector_search
+
+    query = FakeEmbedder(dim=DIM).embed(["alpha wheat statistics"])[0]
+    assert copy_chunk_ids[0] in vector_search(conn, new_run, query, k=3, doc_kind="REPORT")
+    assert vector_search(conn, new_run, query, k=3, doc_kind="SOURCE") == []
+
+    # Figure remapped; document carries donor title under the new identity.
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (new_doc,)).fetchone()
+    assert figure["id"] == new_figure and figure["image_path"] == "/tmp/new/fig-1.png"
+    assert (
+        conn.execute(
+            "SELECT figure_id FROM chunks WHERE doc_id = ? AND kind = 'figure'", (new_doc,)
+        ).fetchone()[0]
+        == new_figure
+    )
+    document = conn.execute("SELECT * FROM documents WHERE id = ?", (new_doc,)).fetchone()
+    assert document["title"] == "Donor Doc"
+    assert document["kind"] == "REPORT"
+    assert document["upload_id"] == new_upload
+    assert document["run_id"] == new_run
+    # Donor untouched.
+    assert (
+        conn.execute("SELECT count(*) FROM chunks WHERE run_id = ?", (donor_run,)).fetchone()[0]
+        == 3
+    )
+
+
+def test_copy_document_data_is_atomic(conn):
+    _, _, donor_doc, _donor_figure, _ = _donor_run(conn)
+    new_run = dbmod.create_run(conn)
+    new_upload = dbmod.add_upload(conn, "SOURCE", "again.pdf", "/tmp/a.pdf", "cafe01")
+    new_doc = dbmod.new_id()
+    with pytest.raises(KeyError):
+        dbmod.copy_document_data(
+            conn,
+            donor_doc,
+            run_id=new_run,
+            doc_id=new_doc,
+            upload_id=new_upload,
+            kind="SOURCE",
+            figure_map={},  # violates the files-first contract → abort
+        )
+    # Single transaction: nothing of the new document exists.
+    for table, col in (("documents", "id"), ("figures", "doc_id"), ("chunks", "doc_id")):
+        assert (
+            conn.execute(f"SELECT count(*) FROM {table} WHERE {col} = ?", (new_doc,)).fetchone()[0]
+            == 0
+        )
+    assert (
+        conn.execute("SELECT count(*) FROM chunks_vec WHERE run_id = ?", (new_run,)).fetchone()[0]
+        == 0
+    )
+
+
+def test_copy_document_data_refuses_incomplete_donor(conn):
+    run_id = dbmod.create_run(conn)
+    upload_id = dbmod.add_upload(conn, "SOURCE", "d.pdf", "/tmp/d.pdf", "h")
+    doc_id = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)
+    with pytest.raises(ValueError, match="incomplete"):
+        dbmod.copy_document_data(
+            conn,
+            doc_id,
+            run_id=dbmod.create_run(conn),
+            doc_id=dbmod.new_id(),
+            upload_id=upload_id,
+            kind="SOURCE",
+            figure_map={},
+        )

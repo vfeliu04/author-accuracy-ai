@@ -442,6 +442,134 @@ def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
         )
 
 
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    """The stored meta value for `key`, or None if never written."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta_if_absent(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """First write wins — one atomic INSERT OR IGNORE, so racing connections
+    cannot interleave a read-modify-write, and an existing value is never
+    overwritten (overwriting would launder vectors made by an older embedding
+    model straight through the ingest-dedup gate)."""
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, value))
+
+
+def find_ingest_donor(
+    conn: sqlite3.Connection, content_hash: str | None, exclude_upload_id: str
+) -> dict | None:
+    """The newest COMPLETE document whose upload shares `content_hash`.
+
+    None hash → None (legacy/CLI rows are inert). Torn donors (zero chunks)
+    are excluded structurally by the EXISTS. Deterministic pick: newest
+    upload first, document id as tie-break — uploads created in one POST
+    share a created_at."""
+    if not content_hash:
+        return None
+    row = conn.execute(
+        """
+        SELECT d.id AS doc_id, d.run_id, d.kind, d.title
+        FROM documents d JOIN uploads u ON u.id = d.upload_id
+        WHERE u.content_hash = ? AND u.id != ?
+          AND EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = d.id)
+        ORDER BY u.created_at DESC, d.id DESC LIMIT 1
+        """,
+        (content_hash, exclude_upload_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def copy_document_data(
+    conn: sqlite3.Connection,
+    donor_doc_id: str,
+    *,
+    run_id: str,
+    doc_id: str,
+    upload_id: str,
+    kind: str,
+    figure_map: dict[str, tuple[str, str]],
+) -> int:
+    """Copy a donor document's derived rows into a new run in ONE transaction;
+    returns the number of chunks copied.
+
+    The caller must have copied the figure PNGs to the new image_paths in
+    `figure_map` BEFORE calling (files first, rows second — a crash leaves
+    orphan files, never a partial document). Embedding blobs are copied
+    byte-for-byte: they are already normalized float32 bytes, and pushing
+    them back through add_chunks would renormalize (not float32-byte-stable).
+    chunks_vec.doc_kind and documents.kind are rewritten to `kind` so a
+    SOURCE donor can serve a REPORT upload and vice versa. FTS fills itself
+    via the chunks AFTER INSERT trigger.
+    """
+    donor = conn.execute(
+        "SELECT title, metadata FROM documents WHERE id = ?", (donor_doc_id,)
+    ).fetchone()
+    if donor is None:
+        raise ValueError(f"Unknown donor document {donor_doc_id!r}")
+    figures = conn.execute(
+        "SELECT * FROM figures WHERE doc_id = ? ORDER BY rowid", (donor_doc_id,)
+    ).fetchall()
+    chunk_count = conn.execute(
+        "SELECT count(*) FROM chunks WHERE doc_id = ?", (donor_doc_id,)
+    ).fetchone()[0]
+    rows = conn.execute(
+        """
+        SELECT c.id, c.page, c.section, c.kind, c.text, c.figure_id, v.embedding
+        FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id
+        WHERE c.doc_id = ? ORDER BY c.id
+        """,
+        (donor_doc_id,),
+    ).fetchall()
+    if chunk_count == 0 or len(rows) != chunk_count:
+        raise ValueError(
+            f"Donor document {donor_doc_id!r} is incomplete "
+            f"({chunk_count} chunks, {len(rows)} embeddings) — refusing a degraded copy"
+        )
+    with conn:
+        conn.execute(
+            "INSERT INTO documents(id, run_id, upload_id, kind, title, metadata)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (doc_id, run_id, upload_id, kind, donor["title"], donor["metadata"]),
+        )
+        for figure in figures:
+            new_figure_id, new_image_path = figure_map[figure["id"]]
+            conn.execute(
+                "INSERT INTO figures(id, run_id, doc_id, page, image_path, caption, description)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_figure_id,
+                    run_id,
+                    doc_id,
+                    figure["page"],
+                    new_image_path,
+                    figure["caption"],
+                    figure["description"],
+                ),
+            )
+        for row in rows:
+            new_figure_id = figure_map[row["figure_id"]][0] if row["figure_id"] else None
+            cursor = conn.execute(
+                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text, figure_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    doc_id,
+                    row["page"],
+                    row["section"],
+                    row["kind"],
+                    row["text"],
+                    new_figure_id,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO chunks_vec(chunk_id, run_id, doc_kind, embedding) VALUES (?, ?, ?, ?)",
+                (cursor.lastrowid, run_id, kind, row["embedding"]),
+            )
+    return chunk_count
+
+
 # --- runs ---------------------------------------------------------------
 
 
