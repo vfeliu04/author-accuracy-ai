@@ -217,7 +217,7 @@ def delete_run(run_id: str, request: Request, conn: Conn) -> None:
     # never database rows pointing at missing ones.
     for path in upload_paths:
         Path(path).unlink(missing_ok=True)
-    shutil.rmtree(Path(settings.figures_dir) / run_id, ignore_errors=True)
+    shutil.rmtree(settings.run_figures_dir(run_id), ignore_errors=True)
 
 
 @router.get("/runs/{run_id}")

@@ -16,7 +16,7 @@ from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.jobs import Worker
 from authorai.main import create_app
-from tests.conftest import DIM
+from tests.conftest import DIM, poison_providers
 
 # Routes that are intentionally open (no API key). Everything else must 401.
 OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
@@ -190,7 +190,15 @@ def test_second_identical_upload_reuses_ingest_end_to_end(tmp_path, monkeypatch)
     def fake_ingest_pdf(
         conn, embedder, run_id, path, *, kind, figures_dir, upload_id, describe, fallback_title
     ):
-        doc_id = dbmod.add_document(conn, run_id, kind, upload_id=upload_id, title=fallback_title)
+        doc_id = dbmod.add_document(
+            conn,
+            run_id,
+            kind,
+            upload_id=upload_id,
+            title=fallback_title,
+            # What the real ingest stamps — the donor filter matches on it.
+            embedding_model=settings.embedding_model,
+        )
         png = Path(figures_dir) / run_id / doc_id / "fig-1.png"
         png.parent.mkdir(parents=True)
         png.write_bytes(b"png bytes")
@@ -220,13 +228,7 @@ def test_second_identical_upload_reuses_ingest_end_to_end(tmp_path, monkeypatch)
         assert Worker(settings, steps=steps).run_pending(conn) == 1
 
         second = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
-        monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
-        monkeypatch.setattr(
-            jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
-        )
-        monkeypatch.setattr(
-            jobsmod, "AnthropicClient", lambda *a, **k: pytest.fail("constructed an LLM client")
-        )
+        poison_providers(monkeypatch)
         assert Worker(settings, steps=steps).run_pending(conn) == 1
         report_doc = conn.execute(
             "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT'", (second,)

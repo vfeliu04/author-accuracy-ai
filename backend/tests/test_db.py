@@ -144,13 +144,22 @@ def test_verdict_rows_carry_prompt_hash(conn):
     assert row["prompt_hash"] == "abc123"
 
 
+# Everything migration 11 added, dropped in one prefix shared by every rewind
+# below 11 (each index drop precedes its column drop — SQLite refuses to drop
+# an indexed column).
+V11_REWIND = (
+    "DROP INDEX idx_uploads_content_hash; ALTER TABLE uploads DROP COLUMN content_hash;"
+    " DROP INDEX idx_chunks_doc; DROP INDEX idx_figures_doc;"
+    " ALTER TABLE documents DROP COLUMN embedding_model;"
+)
+
+
 def test_migration_4_to_5_adds_prompt_hash(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: drop the column the way a v4 database lacks it.
     conn.executescript(
-        "DROP INDEX idx_uploads_content_hash; ALTER TABLE uploads DROP COLUMN content_hash;"
-        " DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
+        V11_REWIND + " DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
         " ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE runs DROP COLUMN title;"
@@ -187,8 +196,7 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
         );
         INSERT INTO chunks_vec(chunk_id, run_id, embedding) SELECT * FROM b;
         DROP TABLE b;
-        DROP INDEX idx_uploads_content_hash;
-        ALTER TABLE uploads DROP COLUMN content_hash;
+        {V11_REWIND}
         DROP TABLE run_scores;
         DROP TABLE source_credibility;
         DROP TABLE jobs;
@@ -219,11 +227,7 @@ def test_migration_9_to_10_adds_run_title(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: a v9 database has no runs.title.
-    conn.executescript(
-        "DROP INDEX idx_uploads_content_hash;"
-        " ALTER TABLE uploads DROP COLUMN content_hash;"
-        " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;"
-    )
+    conn.executescript(V11_REWIND + " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;")
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
@@ -234,15 +238,17 @@ def test_migration_9_to_10_adds_run_title(tmp_path):
 def test_migration_10_to_11_adds_upload_content_hash(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
-    # Rewind: a v10 database has no uploads.content_hash (nor its index).
-    conn.executescript(
-        "DROP INDEX idx_uploads_content_hash;"
-        " ALTER TABLE uploads DROP COLUMN content_hash; PRAGMA user_version = 10;"
-    )
+    # Rewind: a v10 database has none of migration 11's columns or indexes.
+    conn.executescript(V11_REWIND + " PRAGMA user_version = 10;")
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
-    conn.execute("SELECT content_hash FROM uploads")  # column exists again
+    conn.execute("SELECT content_hash FROM uploads")  # columns exist again
+    conn.execute("SELECT embedding_model FROM documents")
+    indexes = {
+        row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+    }
+    assert {"idx_uploads_content_hash", "idx_chunks_doc", "idx_figures_doc"} <= indexes
     conn.close()
 
 
@@ -272,8 +278,7 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind to a v3 state and reconnect — the v4 block must re-run cleanly.
     conn.executescript(
-        "DROP INDEX idx_uploads_content_hash; ALTER TABLE uploads DROP COLUMN content_hash;"
-        " DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
+        V11_REWIND + " DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
         " DROP TABLE jobs; ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 3;"
@@ -300,11 +305,16 @@ def test_delete_cleans_both_indexes(conn):
 # --- ingest dedup primitives ---------------------------------------------
 
 
-def _donor_run(conn, kind="SOURCE", content_hash="cafe01"):
+EMB = "emb-model-x"  # the embedding model donors in this block are stamped with
+
+
+def _donor_run(conn, kind="SOURCE", content_hash="cafe01", embedding_model=EMB, title="Donor Doc"):
     """A complete donor: upload + document + figure + three chunks."""
     run_id = dbmod.create_run(conn)
     upload_id = dbmod.add_upload(conn, kind, "donor.pdf", "/tmp/donor.pdf", content_hash)
-    doc_id = dbmod.add_document(conn, run_id, kind, upload_id=upload_id, title="Donor Doc")
+    doc_id = dbmod.add_document(
+        conn, run_id, kind, upload_id=upload_id, title=title, embedding_model=embedding_model
+    )
     figure_id = dbmod.add_figure(conn, run_id, doc_id, "/tmp/fig-1.png", page=2, caption="cap")
     chunks = [
         {"text": "alpha wheat statistics", "page": 1, "section": "Intro"},
@@ -318,14 +328,6 @@ def _donor_run(conn, kind="SOURCE", content_hash="cafe01"):
     return run_id, upload_id, doc_id, figure_id, chunk_ids
 
 
-def test_meta_helpers_first_write_wins(conn):
-    assert dbmod.get_meta(conn, "embedding_model") is None
-    dbmod.set_meta_if_absent(conn, "embedding_model", "model-a")
-    assert dbmod.get_meta(conn, "embedding_model") == "model-a"
-    dbmod.set_meta_if_absent(conn, "embedding_model", "model-b")
-    assert dbmod.get_meta(conn, "embedding_model") == "model-a"  # never overwritten
-
-
 def test_find_ingest_donor_picks_newest_complete_and_excludes_self(conn):
     _, old_upload, old_doc, _, _ = _donor_run(conn, content_hash="samehash")
     conn.execute(
@@ -334,21 +336,43 @@ def test_find_ingest_donor_picks_newest_complete_and_excludes_self(conn):
     conn.commit()
     _, new_upload, new_doc, _, _ = _donor_run(conn, content_hash="samehash")
 
-    donor = dbmod.find_ingest_donor(conn, "samehash", exclude_upload_id="someone-else")
+    donor = dbmod.find_ingest_donor(
+        conn, "samehash", embedding_model=EMB, exclude_upload_id="someone-else"
+    )
     assert donor is not None and donor["doc_id"] == new_doc  # newest wins
     # Excluding the newest upload falls back to the older complete donor.
-    donor = dbmod.find_ingest_donor(conn, "samehash", exclude_upload_id=new_upload)
+    donor = dbmod.find_ingest_donor(
+        conn, "samehash", embedding_model=EMB, exclude_upload_id=new_upload
+    )
     assert donor is not None and donor["doc_id"] == old_doc
+
+
+def test_find_ingest_donor_filters_by_embedding_model(conn):
+    """The per-document model gate: vectors made under another model — or
+    never stamped at all (legacy/pre-dedup docs) — must not donate, even when
+    the bytes match. A global stamp could be flip-flopped (A → B → A) into
+    reusing model-B vectors under model A; per-document cannot."""
+    _donor_run(conn, content_hash="modelhash", embedding_model="other-model")
+    _donor_run(conn, content_hash="modelhash", embedding_model=None)  # pre-dedup doc
+    assert (
+        dbmod.find_ingest_donor(conn, "modelhash", embedding_model=EMB, exclude_upload_id="x")
+        is None
+    )
+
+    _, _, matching_doc, _, _ = _donor_run(conn, content_hash="modelhash")
+    donor = dbmod.find_ingest_donor(conn, "modelhash", embedding_model=EMB, exclude_upload_id="x")
+    assert donor is not None and donor["doc_id"] == matching_doc
 
 
 def test_find_ingest_donor_rejects_torn_and_null(conn):
     run_id = dbmod.create_run(conn)
     upload_id = dbmod.add_upload(conn, "SOURCE", "torn.pdf", "/tmp/torn.pdf", "tornhash")
-    dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)  # zero chunks
-    assert dbmod.find_ingest_donor(conn, "tornhash", exclude_upload_id="x") is None
-    assert dbmod.find_ingest_donor(conn, None, exclude_upload_id="x") is None
+    dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id, embedding_model=EMB)
+    torn = dbmod.find_ingest_donor(conn, "tornhash", embedding_model=EMB, exclude_upload_id="x")
+    assert torn is None  # zero chunks — torn
+    assert dbmod.find_ingest_donor(conn, None, embedding_model=EMB, exclude_upload_id="x") is None
     # NULL-hash uploads never match anything, not even each other.
-    assert dbmod.find_ingest_donor(conn, "", exclude_upload_id="x") is None
+    assert dbmod.find_ingest_donor(conn, "", embedding_model=EMB, exclude_upload_id="x") is None
 
 
 def test_copy_document_data_equivalence(conn):
@@ -366,6 +390,7 @@ def test_copy_document_data_equivalence(conn):
         upload_id=new_upload,
         kind="REPORT",
         figure_map={donor_figure: (new_figure, "/tmp/new/fig-1.png")},
+        fallback_title="again",
     )
     assert copied == 3
 
@@ -409,14 +434,57 @@ def test_copy_document_data_equivalence(conn):
         == new_figure
     )
     document = conn.execute("SELECT * FROM documents WHERE id = ?", (new_doc,)).fetchone()
-    assert document["title"] == "Donor Doc"
+    assert document["title"] == "Donor Doc"  # a real (parsed-style) title is kept
     assert document["kind"] == "REPORT"
     assert document["upload_id"] == new_upload
     assert document["run_id"] == new_run
+    assert document["embedding_model"] == EMB  # the vectors ARE the donor's
     # Donor untouched.
     assert (
         conn.execute("SELECT count(*) FROM chunks WHERE run_id = ?", (donor_run,)).fetchone()[0]
         == 3
+    )
+
+
+def test_copy_retitles_when_donor_title_was_its_filename_stem(conn):
+    """A donor titled by the filename-stem FALLBACK carries the previous
+    upload's name — the copy must retitle with the new upload's stem, exactly
+    as a fresh ingest of these bytes would. A parsed title (≠ the donor's
+    stem) is kept: identical bytes parse to identical titles."""
+    _, _, fallback_doc, fig_a, _ = _donor_run(conn, content_hash="t1", title="donor")
+    new_run = dbmod.create_run(conn)
+    upload = dbmod.add_upload(conn, "SOURCE", "papers_v2.pdf", "/tmp/p2.pdf", "t1")
+    doc = dbmod.new_id()
+    dbmod.copy_document_data(
+        conn,
+        fallback_doc,
+        run_id=new_run,
+        doc_id=doc,
+        upload_id=upload,
+        kind="SOURCE",
+        figure_map={fig_a: (dbmod.new_id(), "/tmp/new/a.png")},
+        fallback_title="papers_v2",
+    )
+    assert (
+        conn.execute("SELECT title FROM documents WHERE id = ?", (doc,)).fetchone()[0]
+        == "papers_v2"
+    )
+
+    # An absent donor title also takes the new fallback.
+    _, _, untitled_doc, fig_b, _ = _donor_run(conn, content_hash="t2", title=None)
+    doc2 = dbmod.new_id()
+    dbmod.copy_document_data(
+        conn,
+        untitled_doc,
+        run_id=new_run,
+        doc_id=doc2,
+        upload_id=dbmod.add_upload(conn, "SOURCE", "other.pdf", "/tmp/o.pdf", "t2"),
+        kind="SOURCE",
+        figure_map={fig_b: (dbmod.new_id(), "/tmp/new/b.png")},
+        fallback_title="other",
+    )
+    assert (
+        conn.execute("SELECT title FROM documents WHERE id = ?", (doc2,)).fetchone()[0] == "other"
     )
 
 

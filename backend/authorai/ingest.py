@@ -231,6 +231,9 @@ def ingest_pdf(
         title=parsed.title or fallback_title or path.stem,
         metadata=json.dumps({"sections": [asdict(section) for section in parsed.sections]}),
         doc_id=doc_id,
+        # Which model made this document's vectors — the dedup donor filter:
+        # a future ingest under a different model must not reuse them.
+        embedding_model=embedder.model,
     )
     for figure_id, figure, image_path, description in planned_figures:
         dbmod.add_figure(

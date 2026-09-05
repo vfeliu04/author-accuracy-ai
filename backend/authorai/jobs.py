@@ -95,7 +95,10 @@ def _copy_ingested_document(
     donor_figures = conn.execute(
         "SELECT id, image_path FROM figures WHERE doc_id = ? ORDER BY rowid", (donor["doc_id"],)
     ).fetchall()
-    figure_dir = Path(context.settings.figures_dir) / run_id / doc_id
+    # Resolved, like ingest_pdf's own figure dir — an unresolved default
+    # ('data/figures') would store CWD-relative image paths that break
+    # verification when the server starts from a different directory.
+    figure_dir = context.settings.run_figures_dir(run_id) / doc_id
     figure_map: dict[str, tuple[str, str]] = {}
     try:
         if donor_figures:
@@ -112,6 +115,9 @@ def _copy_ingested_document(
             upload_id=upload["id"],
             kind=upload["kind"],
             figure_map=figure_map,
+            # Same rule as a fresh ingest: an API upload's real name, not its
+            # generated on-disk name.
+            fallback_title=Path(upload["file_name"]).stem,
         )
     except Exception:
         if figure_dir.exists():
@@ -122,27 +128,37 @@ def _copy_ingested_document(
 def _maybe_reuse_ingest(context: PipelineContext, run_id: str, upload: sqlite3.Row) -> bool:
     """Reuse a previous ingest of these exact bytes, when one is safe to copy.
 
-    Each gate falls through to a fresh ingest: no hash (legacy/CLI upload),
-    an embedding-model mismatch (stored vectors must not answer for a
-    different model; missing meta = pre-dedup database, allowed), no
-    complete donor. On reuse the donor's kind is irrelevant — the copy is
-    written under THIS upload's kind.
+    Falls through to a fresh ingest when there is no hash (legacy/CLI
+    upload) or no complete donor made by the CURRENT embedding model (the
+    donor filter is per document, so vectors from another model can never
+    answer for this one, and unstamped pre-dedup documents never donate).
+    A copy that FAILS — donor deleted mid-copy, a donor PNG lost from disk —
+    also falls through: dedup is an optimization, and no optimization
+    failure may fail an ingest that recomputing would complete (the failed
+    attempt already cleaned its files and rolled back its rows). On reuse
+    the donor's kind is irrelevant — the copy is written under THIS
+    upload's kind.
     """
     if not upload["content_hash"]:
         return False
-    conn = context.conn
-    stored_model = dbmod.get_meta(conn, "embedding_model")
-    if stored_model is not None and stored_model != context.settings.embedding_model:
-        logger.warning(
-            "embedding model changed (%s -> %s) — ingesting fresh instead of reusing",
-            stored_model,
-            context.settings.embedding_model,
-        )
-        return False
-    donor = dbmod.find_ingest_donor(conn, upload["content_hash"], exclude_upload_id=upload["id"])
+    donor = dbmod.find_ingest_donor(
+        context.conn,
+        upload["content_hash"],
+        embedding_model=context.settings.embedding_model,
+        exclude_upload_id=upload["id"],
+    )
     if donor is None:
         return False
-    _copy_ingested_document(context, run_id, upload, donor)
+    try:
+        _copy_ingested_document(context, run_id, upload, donor)
+    except Exception:
+        logger.warning(
+            "reusing document %s for upload %s failed — ingesting fresh instead",
+            donor["doc_id"],
+            upload["id"],
+            exc_info=True,
+        )
+        return False
     logger.info(
         "reused ingest for upload %s from document %s (run %s)",
         upload["id"],
@@ -179,7 +195,7 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         logger.warning("torn ingest for upload %s — re-ingesting", upload_id)
         # The figure PNGs land on disk BEFORE any DB write and re-ingest gets
         # a fresh doc_id, so the old directory would be unreferenced garbage.
-        figure_dir = Path(settings.figures_dir) / run_id / document["id"]
+        figure_dir = settings.run_figures_dir(run_id) / document["id"]
         if figure_dir.exists():
             shutil.rmtree(figure_dir)
         with conn:
@@ -213,12 +229,6 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         # path (path.stem), not "report.pdf" vs "report".
         fallback_title=Path(upload["file_name"]).stem,
     )
-    # Stamp which models produced the stored vectors and captions (first
-    # write wins), so a later model swap cannot launder old vectors through
-    # the dedup gate. Captions are recorded but not gated — they stay valid
-    # text whichever model wrote them.
-    dbmod.set_meta_if_absent(conn, "embedding_model", settings.embedding_model)
-    dbmod.set_meta_if_absent(conn, "caption_model", settings.caption_model)
     return False
 
 

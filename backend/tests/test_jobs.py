@@ -19,7 +19,7 @@ from authorai.jobs import (
     run_job,
     step_ingest,
 )
-from tests.conftest import DIM
+from tests.conftest import DIM, poison_providers
 
 SETTINGS = Settings(anthropic_api_key="x", openai_api_key="x")
 
@@ -402,13 +402,26 @@ def _dedup_settings(tmp_path):
     return Settings(anthropic_api_key="x", openai_api_key="x", figures_dir=tmp_path / "figures")
 
 
-def _ingested_upload(conn, tmp_path, *, kind="SOURCE", content_hash="feed01", run_id=None):
-    """A COMPLETE prior ingest at the jobs level: rows plus a PNG on disk."""
+def _ingested_upload(
+    conn, tmp_path, *, kind="SOURCE", content_hash="feed01", run_id=None, embedding_model=None
+):
+    """A COMPLETE prior ingest at the jobs level: rows plus a PNG on disk.
+
+    Stamped with the Settings-default embedding model unless overridden, so
+    the donor passes the per-document model filter the way a real prior
+    ingest under the same configuration would."""
     run_id = run_id or dbmod.create_run(conn)
     pdf = tmp_path / f"{dbmod.new_id()}.pdf"
     pdf.write_bytes(b"%PDF-donor")
     upload_id = dbmod.add_upload(conn, kind, "donor.pdf", str(pdf), content_hash)
-    doc_id = dbmod.add_document(conn, run_id, kind, upload_id=upload_id, title="Donor Doc")
+    doc_id = dbmod.add_document(
+        conn,
+        run_id,
+        kind,
+        upload_id=upload_id,
+        title="Donor Doc",
+        embedding_model=embedding_model or SETTINGS.embedding_model,
+    )
     png = tmp_path / "figures" / run_id / doc_id / "fig-1.png"
     png.parent.mkdir(parents=True)
     png.write_bytes(b"donor png bytes")
@@ -423,26 +436,11 @@ def _ingested_upload(conn, tmp_path, *, kind="SOURCE", content_hash="feed01", ru
     return run_id, upload_id, doc_id
 
 
-def _no_recompute(monkeypatch):
-    """Any provider work during a reuse is a test failure — not just calls:
-    CONSTRUCTING a client already means the dedup path leaked."""
-    from authorai import jobs as jobsmod
-
-    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
-    monkeypatch.setattr(
-        jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
-    )
-    monkeypatch.setattr(
-        jobsmod, "AnthropicClient", lambda *a, **k: pytest.fail("constructed an LLM client")
-    )
-
-
 def test_dedup_reuses_prior_ingest_without_recomputing(conn, tmp_path, monkeypatch):
     """The headline contract: identical bytes reuse the donor's rows and PNGs
-    with NO provider client constructed. Meta has no embedding_model row here
-    (a pre-dedup database) — that must count as compatible, not as a refusal."""
+    with NO provider client constructed."""
     _, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="beef01")
-    _no_recompute(monkeypatch)
+    poison_providers(monkeypatch)
 
     run_id = dbmod.create_run(conn)
     pdf = tmp_path / "again.pdf"
@@ -472,7 +470,7 @@ def test_dedup_rewrites_kind_for_the_new_upload(conn, tmp_path, monkeypatch):
     from authorai.search import vector_search
 
     _ingested_upload(conn, tmp_path, kind="SOURCE", content_hash="beef02")
-    _no_recompute(monkeypatch)
+    poison_providers(monkeypatch)
 
     run_id = dbmod.create_run(conn)
     pdf = tmp_path / "as-report.pdf"
@@ -487,13 +485,22 @@ def test_dedup_rewrites_kind_for_the_new_upload(conn, tmp_path, monkeypatch):
     assert vector_search(conn, run_id, query, k=5, doc_kind="SOURCE") == []
 
 
-def test_dedup_refused_when_embedding_model_changed(conn, tmp_path, monkeypatch):
+def test_dedup_refused_when_donor_used_another_embedding_model(conn, tmp_path, monkeypatch):
     """Stored vectors from another embedding model must not answer for this
-    one — the gate falls through to a fresh ingest, loudly compatible."""
+    one. The filter is PER DOCUMENT, so an A→B→A model flip-flop cannot
+    launder B-vectors under A, and an unstamped pre-dedup document never
+    donates — both fall through to a fresh ingest."""
     from authorai import jobs as jobsmod
 
-    _ingested_upload(conn, tmp_path, content_hash="beef03")
-    dbmod.set_meta_if_absent(conn, "embedding_model", "older-embedding-model")
+    _ingested_upload(conn, tmp_path, content_hash="beef03", embedding_model="older-model")
+    legacy_run = dbmod.create_run(conn)
+    legacy_pdf = tmp_path / "legacy-donor.pdf"
+    legacy_pdf.write_bytes(b"%PDF-donor")
+    legacy_upload = dbmod.add_upload(conn, "SOURCE", "legacy.pdf", str(legacy_pdf), "beef03")
+    legacy_doc = dbmod.add_document(conn, legacy_run, "SOURCE", upload_id=legacy_upload)
+    dbmod.add_chunks(
+        conn, legacy_run, legacy_doc, [{"text": "old"}], FakeEmbedder(dim=DIM).embed(["old"])
+    )  # complete but NULL-stamped: pre-dedup
 
     ingested: list[int] = []
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: ingested.append(1))
@@ -506,33 +513,78 @@ def test_dedup_refused_when_embedding_model_changed(conn, tmp_path, monkeypatch)
     assert ingested == [1]
 
 
-def test_dedup_allowed_when_stored_model_matches(conn, tmp_path, monkeypatch):
+def test_failed_copy_falls_back_to_fresh_ingest(conn, tmp_path, monkeypatch):
+    """The wedge class: a complete donor whose PNG vanished from disk must
+    not fail the run — the copy attempt cleans up after itself and the
+    reconcile ingests fresh (dedup is an optimization, never a blocker)."""
+    from authorai import jobs as jobsmod
+
+    donor_run, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="beef06")
+    donor_png = conn.execute(
+        "SELECT image_path FROM figures WHERE doc_id = ?", (donor_doc,)
+    ).fetchone()["image_path"]
+    Path(donor_png).unlink()  # rows intact, file lost
+
+    ingested: list[int] = []
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: ingested.append(1))
     settings = _dedup_settings(tmp_path)
-    _ingested_upload(conn, tmp_path, content_hash="beef04")
-    dbmod.set_meta_if_absent(conn, "embedding_model", settings.embedding_model)
-    _no_recompute(monkeypatch)
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "again.pdf"
+    pdf.write_bytes(b"%PDF-donor")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "again.pdf", str(pdf), "beef06")
+    assert _reconcile_upload(PipelineContext(conn, settings), run_id, upload_id) is False
+    assert ingested == [1]
+    # The aborted copy left nothing: no rows for the new run, no figure files
+    # (the empty run-level directory may remain — same as torn-ingest cleanup).
+    assert (
+        conn.execute("SELECT count(*) FROM documents WHERE run_id = ?", (run_id,)).fetchone()[0]
+        == 0
+    )
+    assert not any((Path(settings.figures_dir) / run_id).rglob("*.png"))
+
+
+def test_copied_figure_paths_are_absolute_with_relative_figures_dir(conn, tmp_path, monkeypatch):
+    """The default figures_dir is RELATIVE ('data/figures'): fresh ingest
+    resolves it before storing image_path, so the copy must too — a
+    CWD-relative stored path breaks verification (and deletion) as soon as
+    the server starts from a different directory."""
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", figures_dir=Path("figures-rel"))
+    donor_run = dbmod.create_run(conn)
+    donor_pdf = tmp_path / "donor.pdf"
+    donor_pdf.write_bytes(b"%PDF-donor")
+    donor_upload = dbmod.add_upload(conn, "SOURCE", "donor.pdf", str(donor_pdf), "beef07")
+    donor_doc = dbmod.add_document(
+        conn,
+        donor_run,
+        "SOURCE",
+        upload_id=donor_upload,
+        title="Donor Doc",
+        embedding_model=settings.embedding_model,
+    )
+    donor_png = tmp_path / "donor-figs" / "fig-1.png"
+    donor_png.parent.mkdir()
+    donor_png.write_bytes(b"donor png bytes")
+    figure_id = dbmod.add_figure(conn, donor_run, donor_doc, str(donor_png), page=1)
+    dbmod.add_chunks(
+        conn,
+        donor_run,
+        donor_doc,
+        [{"text": "figure", "kind": "figure", "figure_id": figure_id}],
+        FakeEmbedder(dim=DIM).embed(["figure"]),
+    )
+    poison_providers(monkeypatch)
 
     run_id = dbmod.create_run(conn)
     pdf = tmp_path / "again.pdf"
     pdf.write_bytes(b"%PDF-donor")
-    upload_id = dbmod.add_upload(conn, "SOURCE", "again.pdf", str(pdf), "beef04")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "again.pdf", str(pdf), "beef07")
     assert _reconcile_upload(PipelineContext(conn, settings), run_id, upload_id) is True
-
-
-def test_fresh_ingest_stamps_model_meta(conn, tmp_path, monkeypatch):
-    """The first real ingest records WHICH models produced the stored data —
-    the fact the dedup gate checks forever after."""
-    from authorai import jobs as jobsmod
-
-    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
-    settings = _dedup_settings(tmp_path)
-    run_id = dbmod.create_run(conn)
-    pdf = tmp_path / "fresh.pdf"
-    pdf.write_bytes(b"%PDF-fresh")
-    upload_id = dbmod.add_upload(conn, "SOURCE", "fresh.pdf", str(pdf), "beef05")
-    assert _reconcile_upload(PipelineContext(conn, settings), run_id, upload_id) is False
-    assert dbmod.get_meta(conn, "embedding_model") == settings.embedding_model
-    assert dbmod.get_meta(conn, "caption_model") == settings.caption_model
+    [copied] = conn.execute("SELECT image_path FROM figures WHERE run_id = ?", (run_id,)).fetchall()
+    stored = Path(copied["image_path"])
+    assert stored.is_absolute()
+    assert stored.read_bytes() == b"donor png bytes"
+    assert stored.is_relative_to(tmp_path / "figures-rel")
 
 
 def test_dedup_ignores_torn_donors_and_null_hashes(conn, tmp_path, monkeypatch):
@@ -544,7 +596,15 @@ def test_dedup_ignores_torn_donors_and_null_hashes(conn, tmp_path, monkeypatch):
     torn_pdf = tmp_path / "torn.pdf"
     torn_pdf.write_bytes(b"%PDF-torn")
     torn_upload = dbmod.add_upload(conn, "SOURCE", "torn.pdf", str(torn_pdf), "dead01")
-    dbmod.add_document(conn, torn_run, "SOURCE", upload_id=torn_upload)  # zero chunks
+    # Model-stamped so TORNNESS (zero chunks) is what excludes it, not the
+    # per-document model filter.
+    dbmod.add_document(
+        conn,
+        torn_run,
+        "SOURCE",
+        upload_id=torn_upload,
+        embedding_model=SETTINGS.embedding_model,
+    )
 
     ingested: list[int] = []
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: ingested.append(1))
@@ -604,7 +664,7 @@ def test_deleting_the_donor_run_leaves_the_copy_whole(conn, tmp_path, monkeypatc
     from authorai.search import keyword_search
 
     donor_run, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="c0de01")
-    _no_recompute(monkeypatch)
+    poison_providers(monkeypatch)
     settings = _dedup_settings(tmp_path)
     run_id = dbmod.create_run(conn)
     pdf = tmp_path / "mine.pdf"
@@ -630,7 +690,7 @@ def test_deleting_the_donor_run_leaves_the_copy_whole(conn, tmp_path, monkeypatc
 
 def test_deleting_the_copy_leaves_the_donor_a_valid_donor(conn, tmp_path, monkeypatch):
     donor_run, _, donor_doc = _ingested_upload(conn, tmp_path, content_hash="c0de02")
-    _no_recompute(monkeypatch)
+    poison_providers(monkeypatch)
     settings = _dedup_settings(tmp_path)
     first = dbmod.create_run(conn)
     first_pdf = tmp_path / "first.pdf"
@@ -660,7 +720,7 @@ def test_same_file_twice_in_one_run_reuses_within_the_run(conn, tmp_path, monkey
     settings = _dedup_settings(tmp_path)
     run_id = dbmod.create_run(conn)
     _ingested_upload(conn, tmp_path, kind="REPORT", content_hash="feed77", run_id=run_id)
-    _no_recompute(monkeypatch)
+    poison_providers(monkeypatch)
     source_pdf = tmp_path / "same-bytes.pdf"
     source_pdf.write_bytes(b"%PDF-donor")
     source_upload = dbmod.add_upload(conn, "SOURCE", "same-bytes.pdf", str(source_pdf), "feed77")

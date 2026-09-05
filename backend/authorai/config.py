@@ -29,6 +29,15 @@ class Settings(BaseSettings):
 
     db_path: Path = Path("data/authorai.db")
     figures_dir: Path = Path("data/figures")
+
+    def run_figures_dir(self, run_id: str) -> Path:
+        """The ABSOLUTE figures directory for a run — the one convention shared
+        by ingest, the dedup copy, torn-ingest cleanup, and run deletion. The
+        default figures_dir is relative, so an unresolved variant would store
+        CWD-relative image paths that break verification (and deletion) the
+        moment the server starts from a different directory."""
+        return Path(self.figures_dir).resolve() / run_id
+
     embedding_model: str = "text-embedding-3-large"
     embedding_dim: int = 3072
     # Read from the unprefixed provider names so the existing .env keeps working.

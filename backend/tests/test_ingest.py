@@ -61,6 +61,9 @@ def test_ingest_pdf_writes_document_chunks_and_figures(conn, tmp_path, monkeypat
     document = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
     assert document["title"] == "Hunger Report"
     assert document["run_id"] == run_id
+    # The dedup donor filter matches on this stamp — a fresh ingest that
+    # forgot it would produce documents that can never donate.
+    assert document["embedding_model"] == "fake-embedder"
 
     kinds = dict(
         conn.execute(

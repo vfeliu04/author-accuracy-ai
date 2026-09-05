@@ -62,6 +62,9 @@ class FakeEmbedder:
 
     def __init__(self, dim: int = 8, mapping: dict[str, list[float]] | None = None):
         self.dim = dim
+        # Same attribute the real embedder exposes — ingest stamps it onto
+        # documents.embedding_model (the dedup donor filter).
+        self.model = "fake-embedder"
         self._mapping = mapping or {}
 
     def embed(self, texts: list[str]) -> list[list[float]]:

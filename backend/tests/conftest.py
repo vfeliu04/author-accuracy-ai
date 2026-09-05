@@ -14,6 +14,23 @@ def conn(tmp_path):
     connection.close()
 
 
+def poison_providers(monkeypatch):
+    """Make any provider work during an ingest reuse a test failure — not just
+    calls: CONSTRUCTING a client already means the dedup path leaked. The one
+    definition both the jobs tests and the API seam test use, so the
+    reuse-recomputes-nothing contract cannot silently stop being guarded in
+    one of them."""
+    from authorai import jobs as jobsmod
+
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
+    monkeypatch.setattr(
+        jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
+    )
+    monkeypatch.setattr(
+        jobsmod, "AnthropicClient", lambda *a, **k: pytest.fail("constructed an LLM client")
+    )
+
+
 class FakeLLM:
     """Canned LLM for tests: returns pre-set objects per output type and
     records every call so tests can assert on prompts.
