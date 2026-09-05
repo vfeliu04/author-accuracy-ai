@@ -540,7 +540,7 @@ def test_failed_copy_falls_back_to_fresh_ingest(conn, tmp_path, monkeypatch):
         conn.execute("SELECT count(*) FROM documents WHERE run_id = ?", (run_id,)).fetchone()[0]
         == 0
     )
-    assert not any((Path(settings.figures_dir) / run_id).rglob("*.png"))
+    assert not any(settings.run_figures_dir(run_id).rglob("*.png"))
 
 
 def test_copied_figure_paths_are_absolute_with_relative_figures_dir(conn, tmp_path, monkeypatch):
@@ -653,7 +653,7 @@ def _api_style_delete(conn, settings, run_id):
 
     for path in dbmod.delete_run_data(conn, run_id):
         Path(path).unlink(missing_ok=True)
-    shutil.rmtree(Path(settings.figures_dir) / run_id, ignore_errors=True)
+    shutil.rmtree(settings.run_figures_dir(run_id), ignore_errors=True)
 
 
 def test_deleting_the_donor_run_leaves_the_copy_whole(conn, tmp_path, monkeypatch):
