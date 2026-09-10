@@ -934,7 +934,7 @@ def test_time_budget_is_checked_between_hops(clock):
 
     respx.get(f"https://{PUBLIC_V4}/start").mock(side_effect=slow_redirect)
     resolver = _example()
-    with pytest.raises(FetchError, match="time budget") as info:
+    with pytest.raises(FetchError, match=r"timed out.*time budget") as info:
         fetch_url("https://example.org/start", _settings(), resolve=resolver)
     assert resolver.calls == [("example.org", 443)]  # the next hop never even resolved
     assert "https://example.org/start" in str(info.value)
@@ -954,7 +954,7 @@ def test_time_budget_is_checked_while_streaming_the_body(clock):
     respx.get(f"https://{PUBLIC_V4}/trickle").mock(
         return_value=httpx.Response(200, headers={"Content-Type": "text/html"}, content=trickle())
     )
-    with pytest.raises(FetchError, match="time budget"):
+    with pytest.raises(FetchError, match=r"timed out.*time budget"):
         fetch_url("https://example.org/trickle", _settings(), resolve=_example())
     assert len(pulled) == 2
 

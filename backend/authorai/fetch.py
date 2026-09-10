@@ -298,7 +298,8 @@ def _where(requested: str, current: str) -> str:
 def _remaining(deadline: float, budget: float, where: str) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise FetchError(f"Fetching {where} exceeded its {budget:g}-second time budget")
+        # "timed out" is the phrase the UI turns into a plain sentence.
+        raise FetchError(f"Fetching {where} timed out after its {budget:g}-second time budget")
     return remaining
 
 
