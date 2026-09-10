@@ -263,6 +263,31 @@ def test_public_addresses_pass(address):
     assert is_public_address(ipaddress.ip_address(address)) is True
 
 
+# Each is blocked by a clause of the gate's own, not by stdlib's is_global. This
+# Python's stdlib already calls the CGNAT and local-use NAT64 entries non-global,
+# so the table above passes whether or not the explicit clause exists.
+BLOCKED_REGARDLESS_OF_STDLIB = [
+    "100.64.0.1",  # 100.64.0.0/10 (carrier-grade NAT)
+    "100.127.255.254",
+    "64:ff9b:1::808:808",  # 64:ff9b:1::/48 (local-use NAT64), even with a public inner
+    "::127.0.0.1",  # ::/96 (deprecated IPv4-compatible)
+    "224.0.0.1",  # multicast
+    "ff02::1",
+]
+
+
+@pytest.mark.parametrize("address", BLOCKED_REGARDLESS_OF_STDLIB)
+def test_explicit_guards_block_even_where_stdlib_calls_the_address_global(monkeypatch, address):
+    """A stdlib patch level with different IANA tables must not open the gate:
+    with is_global forced True, only the gate's own clauses stand."""
+    always_global = property(lambda self: True)
+    monkeypatch.setattr(ipaddress.IPv4Address, "is_global", always_global)
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_global", always_global)
+    # Control: the patch really took, so a plain private address now passes.
+    assert is_public_address("10.0.0.1") is True
+    assert is_public_address(address) is False
+
+
 def test_address_gate_raises_on_a_non_address():
     with pytest.raises(ValueError):
         is_public_address("example.org")
@@ -746,6 +771,38 @@ def test_streamed_body_over_the_cap_aborts_at_the_crossing_chunk():
     with pytest.raises(FetchError, match="exceeds"):
         fetch_url("https://example.org/endless", _settings(), resolve=_example())
     assert len(pulled) == 3  # 8192 <= 10000 < 12288: nothing past the crossing chunk
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["streamed", "content-length"])
+@pytest.mark.parametrize(
+    ("content_type", "limit"), [("text/html", 10_000), ("application/pdf", 50_000)]
+)
+def test_a_body_of_exactly_the_cap_is_accepted_and_one_more_byte_is_not(
+    content_type, limit, declared
+):
+    """Pins both size guards at the boundary: the declared Content-Length check
+    (content-length) and the running count of decoded bytes (streamed)."""
+
+    def served(size: int) -> tuple[bytes, httpx.Response]:
+        pdf = content_type == "application/pdf"
+        head = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" if pdf else b"<!DOCTYPE html>"
+        body = head + b"a" * (size - len(head))
+        headers = {"Content-Type": content_type}
+        if declared:
+            headers["Content-Length"] = str(size)
+        chunks = [body[i : i + 4096] for i in range(0, size, 4096)]
+        return body, httpx.Response(200, headers=headers, content=_tracked(chunks, []))
+
+    exact_body, exact = served(limit)
+    _, over = served(limit + 1)
+    assert len(exact_body) == limit
+    with respx.mock:
+        respx.get(f"https://{PUBLIC_V4}/exact").mock(return_value=exact)
+        respx.get(f"https://{PUBLIC_V4}/over").mock(return_value=over)
+        result = fetch_url("https://example.org/exact", _settings(), resolve=_example())
+        with pytest.raises(FetchError, match="exceeds"):
+            fetch_url("https://example.org/over", _settings(), resolve=_example())
+    assert result.body == exact_body
 
 
 @respx.mock
