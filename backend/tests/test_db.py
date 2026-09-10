@@ -663,3 +663,20 @@ def test_create_run_with_upload_specs_records_source_fields(conn):
         "SELECT source_type, url FROM uploads WHERE id = ?", (payload["report_upload_id"],)
     ).fetchone()
     assert (report["source_type"], report["url"]) == ("pdf", None)
+
+
+def test_record_fetch_moves_a_link_upload_to_its_stored_pdf_in_one_update(conn):
+    url = "https://example.org/report.pdf"
+    upload = dbmod.add_upload(conn, "SOURCE", url, "/tmp/u.json", source_type="web", url=url)
+    dbmod.record_fetch(conn, upload, path="/tmp/u.pdf", source_type="pdf", content_hash="abc")
+    row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload,)).fetchone()
+    assert (row["path"], row["source_type"], row["content_hash"], row["url"]) == (
+        "/tmp/u.pdf",
+        "pdf",
+        "abc",
+        url,
+    )
+    with pytest.raises(ValueError, match="source type"):
+        dbmod.record_fetch(conn, upload, path="/tmp/x", source_type="ftp", content_hash=None)
+    with pytest.raises(ValueError, match="Unknown upload"):
+        dbmod.record_fetch(conn, "nope", path="/tmp/x", source_type="pdf", content_hash=None)

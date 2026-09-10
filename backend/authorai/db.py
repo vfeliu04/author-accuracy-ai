@@ -850,6 +850,29 @@ def add_upload(
     return upload_id
 
 
+def record_fetch(
+    conn: sqlite3.Connection,
+    upload_id: str,
+    *,
+    path: str,
+    source_type: str,
+    content_hash: str | None,
+) -> None:
+    """Record what fetching a link source stored, in ONE update: the artifact's
+    final path, what the link turned out to serve (a page, or a PDF), and the
+    content hash when the bytes can dedup. The file must already be in place —
+    files first, then the row — so a crash leaves an orphan file, never a row
+    pointing at nothing."""
+    check_source_type(source_type)
+    with conn:
+        cursor = conn.execute(
+            "UPDATE uploads SET path = ?, source_type = ?, content_hash = ? WHERE id = ?",
+            (path, source_type, content_hash, upload_id),
+        )
+    if cursor.rowcount == 0:
+        raise ValueError(f"Unknown upload {upload_id!r}")
+
+
 def add_document(
     conn: sqlite3.Connection,
     run_id: str,
