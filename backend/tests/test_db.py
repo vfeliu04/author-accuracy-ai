@@ -144,6 +144,13 @@ def test_verdict_rows_carry_prompt_hash(conn):
     assert row["prompt_hash"] == "abc123"
 
 
+# Everything migration 12 added (no indexes, so plain column drops), shared by
+# every rewind below 12 — prefix it BEFORE V11_REWIND.
+V12_REWIND = (
+    "ALTER TABLE uploads DROP COLUMN source_type; ALTER TABLE uploads DROP COLUMN url;"
+    " ALTER TABLE chunks DROP COLUMN start_seconds; ALTER TABLE chunks DROP COLUMN end_seconds;"
+)
+
 # Everything migration 11 added, dropped in one prefix shared by every rewind
 # below 11 (each index drop precedes its column drop — SQLite refuses to drop
 # an indexed column).
@@ -159,7 +166,9 @@ def test_migration_4_to_5_adds_prompt_hash(tmp_path):
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: drop the column the way a v4 database lacks it.
     conn.executescript(
-        V11_REWIND + " DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
+        V12_REWIND
+        + V11_REWIND
+        + " DROP TABLE run_scores; DROP TABLE source_credibility; DROP TABLE jobs;"
         " ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE runs DROP COLUMN title;"
@@ -196,6 +205,7 @@ def test_migration_5_to_6_rebuilds_chunks_vec_preserving_data(tmp_path):
         );
         INSERT INTO chunks_vec(chunk_id, run_id, embedding) SELECT * FROM b;
         DROP TABLE b;
+        {V12_REWIND}
         {V11_REWIND}
         DROP TABLE run_scores;
         DROP TABLE source_credibility;
@@ -227,7 +237,9 @@ def test_migration_9_to_10_adds_run_title(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: a v9 database has no runs.title.
-    conn.executescript(V11_REWIND + " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;")
+    conn.executescript(
+        V12_REWIND + V11_REWIND + " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 9;"
+    )
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
@@ -239,7 +251,7 @@ def test_migration_10_to_11_adds_upload_content_hash(tmp_path):
     path = tmp_path / "db.sqlite"
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind: a v10 database has none of migration 11's columns or indexes.
-    conn.executescript(V11_REWIND + " PRAGMA user_version = 10;")
+    conn.executescript(V12_REWIND + V11_REWIND + " PRAGMA user_version = 10;")
     conn.close()
     conn = dbmod.connect(path, embedding_dim=DIM)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
@@ -254,7 +266,13 @@ def test_migration_10_to_11_adds_upload_content_hash(tmp_path):
 
 def test_create_run_with_uploads_stores_title(conn):
     run_id, _job_id = dbmod.create_run_with_uploads_and_job(
-        conn, [("REPORT", "r.pdf", "/tmp/r.pdf", "hash-a")], title="My Study"
+        conn,
+        [
+            dbmod.UploadSpec(
+                kind="REPORT", file_name="r.pdf", path="/tmp/r.pdf", content_hash="hash-a"
+            )
+        ],
+        title="My Study",
     )
     assert dbmod.get_run(conn, run_id)["title"] == "My Study"
     [stored] = conn.execute(
@@ -262,7 +280,7 @@ def test_create_run_with_uploads_stores_title(conn):
     ).fetchall()
     assert stored["content_hash"] == "hash-a"
     untitled_id, _ = dbmod.create_run_with_uploads_and_job(
-        conn, [("REPORT", "r.pdf", "/tmp/r.pdf", None)]
+        conn, [dbmod.UploadSpec(kind="REPORT", file_name="r.pdf", path="/tmp/r.pdf")]
     )
     assert dbmod.get_run(conn, untitled_id)["title"] is None
 
@@ -278,7 +296,9 @@ def test_migration_3_to_4_adds_verdicts(tmp_path):
     conn = dbmod.connect(path, embedding_dim=DIM)
     # Rewind to a v3 state and reconnect — the v4 block must re-run cleanly.
     conn.executescript(
-        V11_REWIND + " DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
+        V12_REWIND
+        + V11_REWIND
+        + " DROP TABLE verdicts; DROP TABLE run_scores; DROP TABLE source_credibility;"
         " DROP TABLE jobs; ALTER TABLE claims DROP COLUMN stance;"
         " ALTER TABLE claims DROP COLUMN extraction_prompt_hash;"
         " ALTER TABLE runs DROP COLUMN title; PRAGMA user_version = 3;"
@@ -317,7 +337,13 @@ def _donor_run(conn, kind="SOURCE", content_hash="cafe01", embedding_model=EMB, 
     )
     figure_id = dbmod.add_figure(conn, run_id, doc_id, "/tmp/fig-1.png", page=2, caption="cap")
     chunks = [
-        {"text": "alpha wheat statistics", "page": 1, "section": "Intro"},
+        {
+            "text": "alpha wheat statistics",
+            "page": 1,
+            "section": "Intro",
+            "start_seconds": 75.0,
+            "end_seconds": 150.0,
+        },
         {"text": "beta table of yields", "page": 2, "kind": "table"},
         {"text": "figure about crops", "page": 2, "kind": "figure", "figure_id": figure_id},
     ]
@@ -394,13 +420,17 @@ def test_copy_document_data_equivalence(conn):
     )
     assert copied == 3
 
+    columns = "page, section, kind, text, start_seconds, end_seconds"
     donor_rows = conn.execute(
-        "SELECT page, section, kind, text FROM chunks WHERE doc_id = ? ORDER BY id", (donor_doc,)
+        f"SELECT {columns} FROM chunks WHERE doc_id = ? ORDER BY id", (donor_doc,)
     ).fetchall()
     copy_rows = conn.execute(
-        "SELECT page, section, kind, text FROM chunks WHERE doc_id = ? ORDER BY id", (new_doc,)
+        f"SELECT {columns} FROM chunks WHERE doc_id = ? ORDER BY id", (new_doc,)
     ).fetchall()
     assert [tuple(r) for r in donor_rows] == [tuple(r) for r in copy_rows]
+    # The time locator really travelled (a copy dropping it would still match
+    # a donor that never had one).
+    assert (copy_rows[0]["start_seconds"], copy_rows[0]["end_seconds"]) == (75.0, 150.0)
 
     # Embedding blobs are byte-identical, order-aligned.
     copy_chunk_ids = [
@@ -529,3 +559,107 @@ def test_copy_document_data_refuses_incomplete_donor(conn):
             kind="SOURCE",
             figure_map={},
         )
+
+
+# --- migration 12: source types --------------------------------------------
+
+
+def test_migration_12_adds_source_type_url_and_time_locators(conn):
+    conn.execute("SELECT source_type, url FROM uploads")
+    conn.execute("SELECT start_seconds, end_seconds FROM chunks")
+    assert dbmod.SCHEMA_VERSION == 12
+
+
+def test_migration_11_to_12_defaults_legacy_uploads_to_pdf(tmp_path):
+    path = tmp_path / "db.sqlite"
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    # Rewind: a v11 database has none of migration 12's columns. A row written
+    # then is an uploaded PDF by construction.
+    conn.executescript(V12_REWIND + " PRAGMA user_version = 11;")
+    conn.execute(
+        "INSERT INTO uploads(id, kind, file_name, path, created_at)"
+        " VALUES ('legacy', 'SOURCE', 'old.pdf', '/tmp/old.pdf', '2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+    conn = dbmod.connect(path, embedding_dim=DIM)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
+    row = conn.execute("SELECT source_type, url FROM uploads WHERE id = 'legacy'").fetchone()
+    assert (row["source_type"], row["url"]) == ("pdf", None)
+    conn.execute("SELECT start_seconds, end_seconds FROM chunks")
+    conn.close()
+
+
+def test_add_upload_records_source_type_and_url(conn):
+    web = dbmod.add_upload(
+        conn, "SOURCE", "example.org", "/tmp/u.json", source_type="web", url="https://example.org/a"
+    )
+    pdf = dbmod.add_upload(conn, "SOURCE", "a.pdf", "/tmp/a.pdf")
+    rows = {
+        r["id"]: (r["source_type"], r["url"])
+        for r in conn.execute("SELECT id, source_type, url FROM uploads")
+    }
+    assert rows[web] == ("web", "https://example.org/a")
+    assert rows[pdf] == ("pdf", None)
+
+
+@pytest.mark.parametrize("bad", ["ftp", "PDF", "", "html"])
+def test_unknown_source_type_is_refused_before_any_write(conn, bad):
+    with pytest.raises(ValueError, match="source type"):
+        dbmod.add_upload(conn, "SOURCE", "x", "/tmp/x", source_type=bad)
+    with pytest.raises(ValueError, match="source type"):
+        dbmod.create_run_with_uploads_and_job(
+            conn,
+            [
+                dbmod.UploadSpec(kind="REPORT", file_name="r.pdf", path="/tmp/r.pdf"),
+                dbmod.UploadSpec(kind="SOURCE", file_name="x", path="/tmp/x", source_type=bad),
+            ],
+        )
+    assert conn.execute("SELECT count(*) FROM uploads").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
+
+
+def test_add_chunks_stores_time_locators(conn):
+    run_id = dbmod.create_run(conn)
+    doc_id = dbmod.add_document(conn, run_id, "SOURCE")
+    chunks = [
+        {"text": "transcript window one", "start_seconds": 0.0, "end_seconds": 75.0},
+        {"text": "a page chunk", "page": 3},
+    ]
+    dbmod.add_chunks(conn, run_id, doc_id, chunks, _EMBEDDER.embed([c["text"] for c in chunks]))
+    rows = conn.execute(
+        "SELECT page, start_seconds, end_seconds FROM chunks WHERE doc_id = ? ORDER BY id",
+        (doc_id,),
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(None, 0.0, 75.0), (3, None, None)]
+
+
+def test_create_run_with_upload_specs_records_source_fields(conn):
+    run_id, job_id = dbmod.create_run_with_uploads_and_job(
+        conn,
+        [
+            dbmod.UploadSpec(
+                kind="REPORT", file_name="r.pdf", path="/tmp/r.pdf", content_hash="h1"
+            ),
+            dbmod.UploadSpec(
+                kind="SOURCE",
+                file_name="example.org",
+                path="/tmp/u.json",
+                source_type="web",
+                url="https://example.org/facts",
+            ),
+        ],
+        title="Mixed",
+    )
+    payload = dbmod.get_job(conn, job_id)["payload"]
+    [source_id] = payload["source_upload_ids"]
+    row = conn.execute("SELECT * FROM uploads WHERE id = ?", (source_id,)).fetchone()
+    assert (row["source_type"], row["url"], row["content_hash"]) == (
+        "web",
+        "https://example.org/facts",
+        None,
+    )
+    report = conn.execute(
+        "SELECT source_type, url FROM uploads WHERE id = ?", (payload["report_upload_id"],)
+    ).fetchone()
+    assert (report["source_type"], report["url"]) == ("pdf", None)

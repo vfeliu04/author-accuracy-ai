@@ -156,7 +156,7 @@ def create_run(
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     try:
-        rows: list[tuple[str, str, str, str | None]] = []
+        rows: list[dbmod.UploadSpec] = []
         for kind, upload in uploads:
             # Server-generated disk name: the client filename never touches the
             # path (kept only as the uploads.file_name column for display).
@@ -170,7 +170,14 @@ def create_run(
                     hasher.update(block)
                     handle.write(block)
             written.append(path)
-            rows.append((kind, upload.filename, str(path), hasher.hexdigest()))
+            rows.append(
+                dbmod.UploadSpec(
+                    kind=kind,
+                    file_name=upload.filename,
+                    path=str(path),
+                    content_hash=hasher.hexdigest(),
+                )
+            )
         run_id, job_id = dbmod.create_run_with_uploads_and_job(conn, rows, title=title)
     except Exception:
         for path in written:

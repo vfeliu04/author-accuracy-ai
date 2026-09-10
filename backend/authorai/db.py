@@ -8,6 +8,7 @@ runs never overwrite each other — there is no reset step, ever.
 import json
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, get_args
@@ -17,13 +18,27 @@ from sqlite_vec import serialize_float32
 
 from authorai.embeddings import normalize
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 JOB_STATUSES = ("QUEUED", "RUNNING", "DONE", "FAILED")
 
 RUN_STATUSES = frozenset({"CREATED", "RUNNING", "DONE", "FAILED"})
 
 DOC_KINDS = ("SOURCE", "REPORT")
+
+# What an upload IS. Validated in code rather than by an SQL CHECK: SQLite
+# cannot alter an inline CHECK, so a column added by migration 12 could never
+# widen its vocabulary later. Every writer goes through add_upload or
+# create_run_with_uploads_and_job, and both call check_source_type first.
+SOURCE_TYPES = ("pdf", "web", "image", "youtube")
+
+
+def check_source_type(source_type: str) -> None:
+    if source_type not in SOURCE_TYPES:
+        raise ValueError(
+            f"Unknown source type {source_type!r}; expected one of {list(SOURCE_TYPES)}"
+        )
+
 
 # THE verdict vocabulary: the Verdict model annotates with the Literal and the
 # SQL CHECK interpolates the derived tuple, so the two cannot drift apart.
@@ -443,6 +458,29 @@ def _migrate(conn: sqlite3.Connection, embedding_dim: int) -> None:
             COMMIT;
             """
         )
+    if version < 12:
+        conn.executescript(
+            """
+            BEGIN;
+
+            -- What each upload is. Every row that predates this migration is an
+            -- uploaded PDF, which the default records truthfully.
+            ALTER TABLE uploads ADD COLUMN source_type TEXT NOT NULL DEFAULT 'pdf';
+
+            -- Origin URL for web/youtube sources and for a PDF fetched from a
+            -- link; NULL for uploaded files.
+            ALTER TABLE uploads ADD COLUMN url TEXT;
+
+            -- Time locator for transcript chunks. page stays the PDF locator and
+            -- section (already stored) is the web-page locator.
+            ALTER TABLE chunks ADD COLUMN start_seconds REAL;
+            ALTER TABLE chunks ADD COLUMN end_seconds REAL;
+
+            PRAGMA user_version = 12;
+
+            COMMIT;
+            """
+        )
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -538,7 +576,8 @@ def copy_document_data(
         ).fetchone()[0]
         rows = conn.execute(
             """
-            SELECT c.id, c.page, c.section, c.kind, c.text, c.figure_id, v.embedding
+            SELECT c.id, c.page, c.section, c.kind, c.text, c.figure_id,
+                   c.start_seconds, c.end_seconds, v.embedding
             FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id
             WHERE c.doc_id = ? ORDER BY c.id
             """,
@@ -580,8 +619,8 @@ def copy_document_data(
         for row in rows:
             new_figure_id = figure_map[row["figure_id"]][0] if row["figure_id"] else None
             cursor = conn.execute(
-                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text, figure_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text, figure_id,"
+                " start_seconds, end_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     doc_id,
@@ -590,6 +629,8 @@ def copy_document_data(
                     row["kind"],
                     row["text"],
                     new_figure_id,
+                    row["start_seconds"],
+                    row["end_seconds"],
                 ),
             )
             conn.execute(
@@ -793,13 +834,17 @@ def add_upload(
     file_name: str,
     path: str,
     content_hash: str | None = None,
+    *,
+    source_type: str = "pdf",
+    url: str | None = None,
 ) -> str:
+    check_source_type(source_type)
     upload_id = new_id()
     with conn:
         conn.execute(
-            "INSERT INTO uploads(id, kind, file_name, path, content_hash, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (upload_id, kind, file_name, path, content_hash, now_iso()),
+            "INSERT INTO uploads(id, kind, file_name, path, content_hash, source_type, url,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (upload_id, kind, file_name, path, content_hash, source_type, url, now_iso()),
         )
     return upload_id
 
@@ -1009,19 +1054,37 @@ def create_job(
     return job_id
 
 
+@dataclass(frozen=True)
+class UploadSpec:
+    """One upload row for create_run_with_uploads_and_job.
+
+    A URL source has no bytes at POST time: `path` is the PLANNED artifact path
+    the ingest step will write, and `content_hash` stays None until then.
+    """
+
+    kind: str
+    file_name: str
+    path: str
+    content_hash: str | None = None
+    source_type: str = "pdf"
+    url: str | None = None
+
+
 def create_run_with_uploads_and_job(
     conn: sqlite3.Connection,
-    uploads: list[tuple[str, str, str, str | None]],
+    uploads: list[UploadSpec],
     title: str | None = None,
 ) -> tuple[str, str]:
     """Create a run, its upload rows, and its pipeline job in ONE transaction.
 
-    `uploads` is a list of (kind, file_name, path, content_hash); exactly one
-    must be REPORT.
+    Exactly one of `uploads` must be REPORT. Every source type is validated
+    before the transaction opens, so a bad spec writes nothing.
     All-or-nothing so a failure part-way never strands a run with no job, or
     uploads with no run (the API's atomicity guarantee — v1 committed each
     separately and left orphans on the first failure).
     """
+    for spec in uploads:
+        check_source_type(spec.source_type)
     report_upload_id: str | None = None
     source_upload_ids: list[str] = []
     now = now_iso()
@@ -1030,14 +1093,23 @@ def create_run_with_uploads_and_job(
         conn.execute(
             "INSERT INTO runs(id, created_at, title) VALUES (?, ?, ?)", (run_id, now, title)
         )
-        for kind, file_name, path, content_hash in uploads:
+        for spec in uploads:
             upload_id = new_id()
             conn.execute(
-                "INSERT INTO uploads(id, kind, file_name, path, content_hash, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (upload_id, kind, file_name, path, content_hash, now),
+                "INSERT INTO uploads(id, kind, file_name, path, content_hash, source_type, url,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    upload_id,
+                    spec.kind,
+                    spec.file_name,
+                    spec.path,
+                    spec.content_hash,
+                    spec.source_type,
+                    spec.url,
+                    now,
+                ),
             )
-            if kind == "REPORT":
+            if spec.kind == "REPORT":
                 report_upload_id = upload_id
             else:
                 source_upload_ids.append(upload_id)
@@ -1296,7 +1368,8 @@ def add_chunks(
 ) -> list[int]:
     """Insert chunks and their embeddings in one transaction.
 
-    Each chunk dict may carry `text` (required), `page`, `section`, `kind`.
+    Each chunk dict may carry `text` (required), `page`, `section`, `kind`,
+    `figure_id`, and the transcript time locator `start_seconds`/`end_seconds`.
     Embeddings are L2-normalized on write so vector distances behave as cosine.
     """
     if len(chunks) != len(embeddings):
@@ -1312,8 +1385,8 @@ def add_chunks(
     with conn:
         for chunk, embedding in zip(chunks, embeddings, strict=True):
             cursor = conn.execute(
-                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text, figure_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chunks(run_id, doc_id, page, section, kind, text, figure_id,"
+                " start_seconds, end_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     doc_id,
@@ -1322,6 +1395,8 @@ def add_chunks(
                     chunk.get("kind", "text"),
                     chunk["text"],
                     chunk.get("figure_id"),
+                    chunk.get("start_seconds"),
+                    chunk.get("end_seconds"),
                 ),
             )
             chunk_id = cursor.lastrowid
