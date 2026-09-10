@@ -19,16 +19,17 @@ the rest of its private network. The defenses, in the order a fetch meets them:
    on decoded bytes while it streams (a gzip bomb is measured after inflation).
 
 Time: `fetch_timeout_seconds` is one budget for the whole fetch. It is checked
-between hops and after every body chunk, and each request's socket timeouts
-are capped at what remains. Two phases cannot be interrupted part-way: the
-system DNS lookup (bounded by the OS resolver), and the response-header read —
-a server trickling header bytes faster than the read timeout can hold a fetch
-past the budget.
+between hops and after every body chunk, each request's socket timeouts are
+capped at what remains, and a watchdog shuts the connection's socket when the
+budget runs out — a server trickling header bytes just faster than the read
+timeout would otherwise hold the single jobs worker indefinitely. Only the
+system DNS lookup cannot be interrupted part-way (the OS resolver bounds it).
 """
 
 import ipaddress
 import re
 import socket
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -206,6 +207,58 @@ def _default_resolve(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(info[4][0] for info in infos))
 
 
+class _Watchdog:
+    """Shuts one hop's socket when the fetch's time budget runs out.
+
+    Socket timeouts bound each read, not the total, so a server trickling
+    response-header bytes just faster than the read timeout could otherwise
+    hold the fetch indefinitely. httpcore's `trace` extension hands over the
+    network stream the moment TCP (and TLS) connect; a timer shuts that socket
+    down at the deadline, turning the stuck read into an error this module
+    reports as a timeout.
+    """
+
+    _STREAM_EVENTS = ("connection.connect_tcp.complete", "connection.start_tls.complete")
+
+    def __init__(self, seconds: float):
+        self.fired = False
+        self._socket: socket.socket | None = None
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def trace(self, event_name: str, info: dict) -> None:
+        if event_name not in self._STREAM_EVENTS:
+            return
+        stream = info.get("return_value")
+        sock = stream.get_extra_info("socket") if stream is not None else None
+        if sock is None:
+            return
+        with self._lock:
+            self._socket = sock
+            already_fired = self.fired
+        if already_fired:  # the budget ran out while the connection was opening
+            _shutdown(sock)
+
+    def _fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            sock = self._socket
+        if sock is not None:
+            _shutdown(sock)
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+
+def _shutdown(sock: socket.socket) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed by the client: the goal (no further reads) holds
+
+
 def fetch_url(
     url: str,
     settings: Settings,
@@ -257,13 +310,15 @@ def _fetch(
             # the previous name.
             "Connection": "close",
         }
-        timeout = httpx.Timeout(_remaining(deadline, budget, where))
+        remaining = _remaining(deadline, budget, where)
+        timeout = httpx.Timeout(remaining)
+        watchdog = _Watchdog(remaining)
         try:
             with client.stream(
                 "GET",
                 pinned_url,
                 headers=headers,
-                extensions=extensions,
+                extensions={**extensions, "trace": watchdog.trace},
                 timeout=timeout,
                 # Per request, because a supplied client may follow by default —
                 # an automatic redirect would skip validation, the gate, and the pin.
@@ -276,6 +331,10 @@ def _fetch(
         except httpx.TimeoutException as exc:
             raise FetchError(f"Fetching {where} timed out ({budget:g}-second time budget)") from exc
         except httpx.HTTPError as exc:
+            if watchdog.fired:  # the watchdog shut the socket: a timeout, not a network fault
+                raise FetchError(
+                    f"Fetching {where} timed out after its {budget:g}-second time budget"
+                ) from exc
             raise FetchError(f"Fetching {where} failed: {type(exc).__name__}: {exc}") from exc
         except httpx.InvalidURL as exc:
             # Even with follow_redirects=False, httpx parses a redirect's
@@ -284,6 +343,8 @@ def _fetch(
             raise FetchError(
                 f"Fetching {where} failed: the server sent an invalid redirect Location ({exc})"
             ) from exc
+        finally:
+            watchdog.cancel()
     raise FetchError(
         f"Fetching {_shown(requested)} failed: more than {settings.fetch_max_redirects} redirects"
     )

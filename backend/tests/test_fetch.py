@@ -1009,3 +1009,62 @@ def test_real_fetch_pins_the_ip_and_verifies_the_certificate_against_the_hostnam
     assert seen["check_hostname"] is True
     assert seen["verify_mode"] == ssl.CERT_REQUIRED
     assert any(name in ("example.com", "*.example.com") for name in seen["dns_names"])
+
+
+def test_a_server_trickling_headers_cannot_hold_a_fetch_past_its_budget(monkeypatch):
+    """Socket timeouts bound each READ, not the total: a server that sends one
+    header byte faster than the read timeout would otherwise keep the single
+    jobs worker busy indefinitely. A REAL socket, because the defense acts on it."""
+    import socket as socketmod
+    import threading
+    import time as realtime
+
+    from authorai import fetch as fetchmod
+    from authorai.config import Settings
+    from authorai.fetch import FetchError, fetch_url
+
+    listener = socketmod.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def trickle_headers_forever():
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        try:
+            conn.settimeout(0.5)
+            try:
+                conn.recv(65536)
+            except OSError:
+                pass
+            conn.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+            give_up = realtime.monotonic() + 8
+            while not stop.is_set() and realtime.monotonic() < give_up:
+                conn.sendall(b"a")
+                realtime.sleep(0.05)
+        except OSError:
+            pass  # the fetcher shut the connection: the behavior under test
+        finally:
+            conn.close()
+
+    server = threading.Thread(target=trickle_headers_forever, daemon=True)
+    server.start()
+    # The address gate rightly refuses loopback; this test is about time, not the gate.
+    monkeypatch.setattr(fetchmod, "is_public_address", lambda ip: True)
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", fetch_timeout_seconds=1.0)
+    started = realtime.monotonic()
+    try:
+        with pytest.raises(FetchError, match="timed out"):
+            fetch_url(
+                f"http://trickle.example:{port}/",
+                settings,
+                resolve=lambda host, p: ["127.0.0.1"],
+            )
+        assert realtime.monotonic() - started < 4.0
+    finally:
+        stop.set()
+        listener.close()
+        server.join(timeout=10)
