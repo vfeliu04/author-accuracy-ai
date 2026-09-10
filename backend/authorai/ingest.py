@@ -1,12 +1,15 @@
-"""PDF ingestion: Docling parsing → chunking → embeddings → indexes.
+"""Ingestion: a ParsedDocument → chunking → embeddings → indexes.
 
-`parse_pdf` is the only function that touches Docling; everything downstream
-works on plain dataclasses, so tests exercise the full ingestion path without
-Docling's models. Figures are stored as PNG files plus their caption text —
-LLM-written figure descriptions arrive in Phase 3 with the shared client.
+A document arrives either from Docling (`parse_pdf`, the only function that
+touches Docling) or from a stored snapshot (`load_snapshot`: the sections a
+web page or transcript yielded when it was fetched). Everything downstream
+works on plain dataclasses through one path, `ingest_parsed`, so tests
+exercise the full ingestion path without Docling's models. Figures are stored
+as PNG files, their chunk text carrying the caption plus an LLM description.
 """
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -34,6 +37,9 @@ class ParsedSection:
     title: str
     page: int | None
     text: str
+    # Transcript time locator; None for every PDF and web section.
+    start_seconds: float | None = None
+    end_seconds: float | None = None
 
 
 @dataclass
@@ -145,6 +151,76 @@ def parse_pdf(path: Path | str) -> ParsedDocument:
     return ParsedDocument(title=title, sections=sections, tables=tables, figures=figures)
 
 
+_TIME_LOCATOR = ("start_seconds", "end_seconds")
+
+# Version of the snapshot file format. The frontend parses snapshots too, so a
+# file written by an older extractor must be refused loudly, never misread.
+SNAPSHOT_SCHEMA = 1
+
+
+def _section_record(section: ParsedSection) -> dict:
+    """A section as stored JSON: the time locator only when it is set, so a
+    PDF's stored sections keep exactly the {title, page, text} shape they have
+    always had (dedup copies of older documents describe the same shape)."""
+    record = asdict(section)
+    for key in _TIME_LOCATOR:
+        if record[key] is None:
+            del record[key]
+    return record
+
+
+def write_snapshot(path: Path | str, parsed: ParsedDocument, provenance: dict) -> None:
+    """Store what a fetched source yielded, atomically: a `.part` file renamed
+    into place, so a crash can never leave a half-written snapshot that a retry
+    would trust. Bytes depend only on content (sorted keys), never on dict
+    order. Snapshots carry sections only — web pages keep their tables inline
+    as text, and transcripts have neither tables nor figures."""
+    if parsed.tables or parsed.figures:
+        raise ValueError("snapshots carry sections only; tables and figures are not stored")
+    path = Path(path)
+    payload = {
+        "schema": SNAPSHOT_SCHEMA,
+        "document": {
+            "title": parsed.title,
+            "sections": [_section_record(section) for section in parsed.sections],
+        },
+        "provenance": provenance,
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    part = path.with_name(path.name + ".part")
+    try:
+        part.write_text(text, encoding="utf-8")
+        os.replace(part, path)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+
+
+def load_snapshot(path: Path | str) -> tuple[ParsedDocument, dict]:
+    """Read a stored snapshot back. Anything but a well-formed current-schema
+    snapshot raises — re-fetching the source is the only safe recovery."""
+    path = Path(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"unreadable snapshot {path}: {exc}") from exc
+    schema = payload.get("schema") if isinstance(payload, dict) else None
+    if schema != SNAPSHOT_SCHEMA:
+        raise ValueError(
+            f"unsupported snapshot schema {schema!r} in {path} (expected {SNAPSHOT_SCHEMA}) "
+            "— re-fetch the source"
+        )
+    document, provenance = payload.get("document"), payload.get("provenance")
+    if not isinstance(document, dict) or not isinstance(provenance, dict):
+        raise ValueError(f"malformed snapshot {path}: missing document or provenance")
+    try:
+        sections = [ParsedSection(**record) for record in document["sections"]]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"malformed snapshot {path}: {exc}") from exc
+    parsed = ParsedDocument(title=document.get("title"), sections=sections, tables=[], figures=[])
+    return parsed, provenance
+
+
 def ingest_pdf(
     conn,
     embedder: Embedder,
@@ -156,7 +232,67 @@ def ingest_pdf(
     describe: "Callable[[Image], str] | None" = None,
     fallback_title: str | None = None,
 ) -> str:
-    """Ingest one PDF into a run: upload + document rows, chunks, figures.
+    """Ingest one PDF into a run (see ingest_parsed for the write contract)."""
+    path = Path(path)
+    return ingest_parsed(
+        conn,
+        embedder,
+        run_id,
+        parse_pdf(path),
+        path=path,
+        kind=kind,
+        figures_dir=figures_dir,
+        upload_id=upload_id,
+        describe=describe,
+        fallback_title=fallback_title,
+    )
+
+
+def ingest_snapshot(
+    conn,
+    embedder: Embedder,
+    run_id: str,
+    path: Path | str,
+    *,
+    kind: str,
+    figures_dir: Path | str,
+    upload_id: str,
+    fallback_title: str | None = None,
+) -> str:
+    """Ingest a stored web/transcript snapshot. Its provenance (URL, fetch time,
+    the page's declared metadata) is kept in documents.metadata, where
+    credibility scoring reads it and a dedup copy carries it along."""
+    path = Path(path)
+    parsed, provenance = load_snapshot(path)
+    return ingest_parsed(
+        conn,
+        embedder,
+        run_id,
+        parsed,
+        path=path,
+        kind=kind,
+        figures_dir=figures_dir,
+        upload_id=upload_id,
+        fallback_title=fallback_title,
+        extra_metadata={"provenance": provenance},
+    )
+
+
+def ingest_parsed(
+    conn,
+    embedder: Embedder,
+    run_id: str,
+    parsed: ParsedDocument,
+    *,
+    path: Path | None,
+    kind: str,
+    figures_dir: Path | str,
+    upload_id: str | None = None,
+    describe: "Callable[[Image], str] | None" = None,
+    fallback_title: str | None = None,
+    extra_metadata: dict | None = None,
+) -> str:
+    """Ingest one parsed document into a run: upload + document rows, chunks, figures.
 
     All failure-prone external work (parsing, figure descriptions, the
     embedding network call) happens BEFORE anything is written, so an
@@ -168,8 +304,6 @@ def ingest_pdf(
     description — this must happen here, before embedding, because chunk text
     is immutable once written.
     """
-    path = Path(path)
-    parsed = parse_pdf(path)
     doc_id = dbmod.new_id()
 
     chunks: list[dict] = []
@@ -181,6 +315,8 @@ def ingest_pdf(
                     "page": section.page,
                     "section": section.title or None,
                     "kind": "text",
+                    "start_seconds": section.start_seconds,
+                    "end_seconds": section.end_seconds,
                 }
             )
 
@@ -220,6 +356,8 @@ def ingest_pdf(
         figure.image.save(image_path, format="PNG")
 
     if upload_id is None:
+        if path is None:
+            raise ValueError("ingest_parsed needs an upload_id or the source path to record one")
         upload_id = dbmod.add_upload(conn, kind, path.name, str(path.resolve()))
     dbmod.add_document(
         conn,
@@ -228,8 +366,13 @@ def ingest_pdf(
         upload_id=upload_id,
         # API uploads live on disk under generated names — their real name is
         # the fallback, so untitled documents don't display as hex ids.
-        title=parsed.title or fallback_title or path.stem,
-        metadata=json.dumps({"sections": [asdict(section) for section in parsed.sections]}),
+        title=parsed.title or fallback_title or (path.stem if path is not None else None),
+        metadata=json.dumps(
+            {
+                "sections": [_section_record(section) for section in parsed.sections],
+                **(extra_metadata or {}),
+            }
+        ),
         doc_id=doc_id,
         # Which model made this document's vectors — the dedup donor filter:
         # a future ingest under a different model must not reuse them.
