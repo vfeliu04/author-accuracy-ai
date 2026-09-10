@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from authorai import chat as chatmod
 from authorai import db as dbmod
 from authorai.config import Settings
+from authorai.fetch import is_youtube_url, validate_source_url
 from authorai.llm import AnthropicClient
 from authorai.log import setup_logger
 
@@ -121,15 +122,46 @@ def _validate_pdf(upload: UploadFile, max_bytes: int) -> None:
         raise HTTPException(status_code=400, detail=f"{name!r} is not PDF content")
 
 
+def _validate_links(raw_links: list[str]) -> list[str]:
+    """Normalize and check every source link BEFORE anything is written.
+
+    Syntax only — DNS, the private-address gate, and the content type are the
+    ingest step's fetch. A YouTube link is refused until video sources are
+    supported, and a link repeated in one request (after normalization, so a
+    #fragment does not make it different) is refused rather than merged.
+    """
+    links: list[str] = []
+    for raw in raw_links:
+        try:
+            link = validate_source_url(raw)
+        except ValueError as exc:
+            # The fetch module's message already quotes the link, credentials cut.
+            raise HTTPException(status_code=400, detail=f"not a usable link: {exc}") from exc
+        if is_youtube_url(link):
+            raise HTTPException(
+                status_code=400, detail=f"{link!r}: YouTube links are not supported yet"
+            )
+        if link in links:
+            raise HTTPException(status_code=400, detail=f"{link!r} was added twice")
+        links.append(link)
+    return links
+
+
 @router.post("/runs", status_code=202)
 def create_run(
     request: Request,
     report: Annotated[UploadFile, File()],
-    sources: Annotated[list[UploadFile], File()],
     conn: Conn,
+    sources: Annotated[list[UploadFile] | None, File()] = None,
+    source_urls: Annotated[list[str] | None, Form()] = None,
     title: Annotated[str | None, Form()] = None,
 ) -> dict:
     """Accept a report + its sources and queue the full pipeline.
+
+    Sources are PDF files (`sources`) and/or web links (`source_urls`, one text
+    part per link); at least one is required and together they share the
+    source cap. A link is only CHECKED here — the ingest step fetches it, so a
+    link that cannot be read fails the run with the link named.
 
     A sync endpoint (runs on the threadpool, so its blocking file/DB writes
     never freeze the event loop). EVERY file is validated before ANY file is
@@ -137,14 +169,21 @@ def create_run(
     failure anywhere leaves nothing behind (v1 stranded rows and blobs).
     """
     settings: Settings = request.app.state.settings
-    if len(sources) > settings.max_source_files:
+    sources = sources or []
+    raw_links = source_urls or []
+    total = len(sources) + len(raw_links)
+    if total == 0:
         raise HTTPException(
-            status_code=400,
-            detail=f"too many source files ({len(sources)} > {settings.max_source_files})",
+            status_code=400, detail="at least one source (a PDF file or a web link) is required"
+        )
+    if total > settings.max_source_files:
+        raise HTTPException(
+            status_code=400, detail=f"too many sources ({total} > {settings.max_source_files})"
         )
     uploads = [("REPORT", report)] + [("SOURCE", s) for s in sources]
     for _kind, upload in uploads:
         _validate_pdf(upload, settings.max_upload_bytes)
+    links = _validate_links(raw_links)
     # The run's display title: the dialog's Name field when given, else the
     # report filename stem (filename is validated non-empty by _validate_pdf).
     # Capped explicitly — the only other bound is starlette's incidental 1MB
@@ -176,6 +215,18 @@ def create_run(
                     file_name=upload.filename,
                     path=str(path),
                     content_hash=hasher.hexdigest(),
+                )
+            )
+        for link in links:
+            rows.append(
+                dbmod.UploadSpec(
+                    kind="SOURCE",
+                    file_name=link,
+                    # The PLANNED artifact path: the ingest step fetches the page
+                    # and stores it here (a link serving a PDF lands beside it).
+                    path=str(settings.uploads_dir / f"{dbmod.new_id()}.json"),
+                    source_type="web",
+                    url=link,
                 )
             )
         run_id, job_id = dbmod.create_run_with_uploads_and_job(conn, rows, title=title)

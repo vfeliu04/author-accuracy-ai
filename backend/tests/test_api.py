@@ -1056,3 +1056,105 @@ def test_document_file_serves_each_source_type_with_its_media_type(tmp_path):
             resp = client.get(f"/api/runs/{run_id}/documents/{docs[name]}/file", headers=AUTH)
             assert resp.status_code == 200, name
             assert resp.headers["content-type"].split(";")[0] == media, name
+
+
+def test_link_only_run_records_planned_page_uploads(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=[("report", ("report.pdf", PDF_BYTES, "application/pdf"))],
+            data={"source_urls": ["  https://www.who.int/facts#top  "]},
+        )
+        assert resp.status_code == 202, resp.text
+        uploads = client.get(f"/api/runs/{resp.json()['run_id']}", headers=AUTH).json()["uploads"]
+    assert [(u["kind"], u["source_type"], u["url"], u["file_name"]) for u in uploads] == [
+        ("REPORT", "pdf", None, "report.pdf"),
+        ("SOURCE", "web", "https://www.who.int/facts", "https://www.who.int/facts"),
+    ]
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    row = conn.execute(
+        "SELECT path, content_hash FROM uploads WHERE source_type = 'web'"
+    ).fetchone()
+    conn.close()
+    planned = Path(row["path"])
+    assert planned.suffix == ".json"
+    assert planned.parent.resolve() == settings.uploads_dir.resolve()
+    assert not planned.exists()  # the ingest step fetches it, not the upload request
+    assert row["content_hash"] is None
+
+
+def test_files_and_links_are_recorded_files_first(tmp_path):
+    settings = _settings(tmp_path)
+    links = ["https://example.org/a", "https://example.org/b"]
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=_upload_files(source_count=1),
+            data={"source_urls": links},
+        )
+        assert resp.status_code == 202, resp.text
+        uploads = client.get(f"/api/runs/{resp.json()['run_id']}", headers=AUTH).json()["uploads"]
+    assert [(u["kind"], u["source_type"], u["url"]) for u in uploads] == [
+        ("REPORT", "pdf", None),
+        ("SOURCE", "pdf", None),
+        ("SOURCE", "web", links[0]),
+        ("SOURCE", "web", links[1]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("links", "detail"),
+    [
+        (["ftp://example.org/file"], "not a usable link"),
+        (["not a url"], "not a usable link"),
+        ([""], "not a usable link"),
+        (["https://user:pass@example.org/a"], "not a usable link"),
+        (["https://www.youtube.com/watch?v=abc123def45"], "YouTube links are not supported yet"),
+        (["https://youtu.be/abc123def45"], "YouTube links are not supported yet"),
+        (["https://example.org/a", "https://example.org/a#section"], "added twice"),
+    ],
+)
+def test_bad_links_reject_the_whole_request(tmp_path, links, detail):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=_upload_files(source_count=1),
+            data={"source_urls": links},
+        )
+    assert resp.status_code == 400, resp.text
+    assert detail in resp.json()["detail"]
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM uploads").fetchone()[0] == 0
+    conn.close()
+    assert not settings.uploads_dir.exists() or not any(settings.uploads_dir.iterdir())
+
+
+def test_a_run_needs_at_least_one_source(tmp_path):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=[("report", ("report.pdf", PDF_BYTES, "application/pdf"))],
+        )
+    assert resp.status_code == 400, resp.text
+    assert "at least one source" in resp.json()["detail"]
+
+
+def test_links_count_toward_the_source_cap(tmp_path):
+    settings = _settings(tmp_path, max_source_files=2)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=_upload_files(source_count=1),
+            data={"source_urls": ["https://example.org/a", "https://example.org/b"]},
+        )
+    assert resp.status_code == 400, resp.text
+    assert "too many sources" in resp.json()["detail"]
