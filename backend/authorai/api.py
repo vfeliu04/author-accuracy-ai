@@ -271,9 +271,23 @@ def get_job(job_id: str, conn: Conn) -> dict:
     return job
 
 
+_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _media_type(source_type: str, path: Path) -> str:
+    """What the stored artifact is: the PDF, the image, or the JSON snapshot a
+    web page or transcript was stored as (the evidence pane renders it)."""
+    if source_type in ("web", "youtube"):
+        return "application/json"
+    if source_type == "image":
+        return _IMAGE_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    return "application/pdf"
+
+
 @router.get("/runs/{run_id}/documents/{doc_id}/file")
 def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) -> FileResponse:
-    """Stream a run's stored PDF (report or a source) for inline viewing.
+    """Stream a run's stored artifact (report PDF, or a source's PDF, image, or
+    snapshot) for inline viewing.
 
     Access is scoped by (run_id, doc_id): a doc from another run resolves to
     nothing. The served path comes only from the uploads table (a
@@ -284,14 +298,14 @@ def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) ->
     resolved = dbmod.get_document_path(conn, run_id, doc_id)
     if resolved is None:
         raise HTTPException(status_code=404, detail="No such document in this run")
-    path_str, file_name = resolved
+    path_str, file_name, source_type = resolved
     path = Path(path_str).resolve()
     uploads_root = settings.uploads_dir.resolve()
     if not path.is_relative_to(uploads_root) or not path.is_file():
         raise HTTPException(status_code=404, detail="Document file is unavailable")
     return FileResponse(
         path,
-        media_type="application/pdf",
+        media_type=_media_type(source_type, path),
         filename=file_name,
         content_disposition_type="inline",
     )
@@ -418,6 +432,13 @@ def get_report(run_id: str, conn: Conn) -> dict:
                     "doc_id": r["evidence_doc_id"],
                     "title": r["evidence_doc_title"],
                     "page": r["evidence_page"],
+                    # The viewer picks its pane and locator from the type: a PDF
+                    # page, a web section, or a transcript start time.
+                    "source_type": r["evidence_source_type"] or "pdf",
+                    "url": r["evidence_url"],
+                    "section": r["evidence_section"],
+                    "start_seconds": r["evidence_start_seconds"],
+                    "chunk_id": r["evidence_chunk_id"],
                 }
                 if r["evidence_doc_id"]
                 else None

@@ -188,3 +188,44 @@ def test_context_lists_image_and_unscored_sources_honestly(conn):
     assert "- 'World Hunger 2025': tier VERIFIED_DOI, credibility 80.0/100" in context
     assert "- 'Water chart': not scorable (image)" in context
     assert "- 'Unscored Source': not scored" in context
+
+
+def test_context_phrases_each_evidence_locator_by_source_type(conn):
+    run_id = _scored_run(conn)
+    report = conn.execute(
+        "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT'", (run_id,)
+    ).fetchone()["id"]
+    embedder = FakeEmbedder(dim=DIM)
+
+    def cited(source_type, title, chunk):
+        upload = dbmod.add_upload(conn, "SOURCE", title, f"/tmp/{title}", source_type=source_type)
+        doc = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload, title=title)
+        [chunk_id] = dbmod.add_chunks(conn, run_id, doc, [chunk], embedder.embed([chunk["text"]]))
+        [claim] = dbmod.add_claims(conn, run_id, report, [{"text": f"claim about {title}"}])
+        dbmod.add_verdicts(
+            conn,
+            run_id,
+            [
+                {
+                    "claim_id": claim,
+                    "verdict": "SUPPORTED",
+                    "raw_verdict": "SUPPORTED",
+                    "quote": chunk["text"],
+                    "quote_verified": 1,
+                    "quoted_chunk_id": chunk_id,
+                    "rationale": "r",
+                    "model": "m",
+                }
+            ],
+        )
+
+    cited("web", "Drinking-water", {"text": "73 percent", "section": "Access to services"})
+    cited("youtube", "Water talk", {"text": "two billion", "start_seconds": 754.0})
+    cited("youtube", "Long lecture", {"text": "an hour in", "start_seconds": 3723.0})
+    cited("image", "Chart", {"text": "a bar chart", "kind": "figure"})
+    context = chatmod.build_context(conn, run_id)
+    assert "(source 'World Hunger 2025' p.3)" in context  # PDF phrasing unchanged
+    assert "(source 'Drinking-water' § Access to services)" in context
+    assert "(source 'Water talk' at 12:34)" in context
+    assert "(source 'Long lecture' at 1:02:03)" in context
+    assert "(source 'Chart', image)" in context

@@ -805,7 +805,8 @@ def list_run_uploads(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         return []
     placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
-        f"SELECT id, kind, file_name FROM uploads WHERE id IN ({placeholders})", ids
+        f"SELECT id, kind, file_name, source_type, url FROM uploads WHERE id IN ({placeholders})",
+        ids,
     ).fetchall()
     by_id = {row["id"]: dict(row) for row in rows}
     return [by_id[upload_id] for upload_id in ids if upload_id in by_id]
@@ -869,8 +870,12 @@ def add_document(
     return doc_id
 
 
-def get_document_path(conn: sqlite3.Connection, run_id: str, doc_id: str) -> tuple[str, str] | None:
-    """The stored PDF path + original file name for a document, scoped to its run.
+def get_document_path(
+    conn: sqlite3.Connection, run_id: str, doc_id: str
+) -> tuple[str, str, str] | None:
+    """The stored artifact path, original file name, and source type for a
+    document, scoped to its run. The artifact is the PDF, the image, or a
+    web/transcript snapshot; the source type tells the file endpoint which.
 
     Returns None when the (run_id, doc_id) pair does not exist or the document
     has no upload backing it — the file endpoint turns None into a 404. The
@@ -879,13 +884,13 @@ def get_document_path(conn: sqlite3.Connection, run_id: str, doc_id: str) -> tup
     """
     row = conn.execute(
         """
-        SELECT u.path, u.file_name
+        SELECT u.path, u.file_name, u.source_type
         FROM documents d JOIN uploads u ON u.id = d.upload_id
         WHERE d.id = ? AND d.run_id = ?
         """,
         (doc_id, run_id),
     ).fetchone()
-    return (row["path"], row["file_name"]) if row else None
+    return (row["path"], row["file_name"], row["source_type"]) if row else None
 
 
 def get_report_doc_id(conn: sqlite3.Connection, run_id: str) -> str | None:
@@ -1023,17 +1028,23 @@ def list_verdicts_with_evidence(conn: sqlite3.Connection, run_id: str) -> list[d
     """list_verdicts plus where each quoted evidence chunk came from.
 
     LEFT JOINs (a verdict may cite no chunk) resolve quoted_chunk_id to its
-    source document and page, so the report endpoint can show the reader which
-    source backs each verdict without a second round of queries.
+    source document, that source's type and origin URL, and every locator the
+    chunk carries (page for PDFs, section for web pages, start time for
+    transcripts), so the report endpoint and the chat can show the reader which
+    source backs each verdict, and where in it, without a second round of queries.
     """
     rows = conn.execute(
         """
         SELECT v.*, c.text, c.value, c.unit, c.year, c.page, c.stance,
-               ch.page AS evidence_page, d.id AS evidence_doc_id, d.title AS evidence_doc_title
+               ch.page AS evidence_page, ch.section AS evidence_section,
+               ch.start_seconds AS evidence_start_seconds, ch.id AS evidence_chunk_id,
+               d.id AS evidence_doc_id, d.title AS evidence_doc_title,
+               u.source_type AS evidence_source_type, u.url AS evidence_url
         FROM verdicts v
         JOIN claims c ON c.id = v.claim_id
         LEFT JOIN chunks ch ON ch.id = v.quoted_chunk_id
         LEFT JOIN documents d ON d.id = ch.doc_id
+        LEFT JOIN uploads u ON u.id = d.upload_id
         WHERE v.run_id = ? ORDER BY c.page, c.id
         """,
         (run_id,),

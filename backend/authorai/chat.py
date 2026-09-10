@@ -69,6 +69,30 @@ def _fmt_score(scores: dict | None) -> str:
     )
 
 
+def format_timestamp(seconds: float) -> str:
+    """12:34 under an hour, 1:02:03 beyond: how video players label time."""
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _evidence_locator(row: dict) -> str:
+    """Where in its source the quoted evidence sits, phrased by SOURCE TYPE and
+    never inferred from which locator happens to be null: Docling leaves page
+    unset for some PDF items, and that must not read as a web section."""
+    source_type = row.get("evidence_source_type") or "pdf"
+    if source_type == "image":
+        return ", image"
+    if source_type == "youtube":
+        start = row.get("evidence_start_seconds")
+        return f" at {format_timestamp(start)}" if start is not None else ""
+    if source_type == "web":
+        section = row.get("evidence_section")
+        return f" § {section}" if section else ""
+    page = row.get("evidence_page")
+    return f" p.{page}" if page is not None else ""
+
+
 def build_context(conn: sqlite3.Connection, run_id: str) -> str:
     """The static per-run analysis, rendered for the model. Reuses the same db
     reads the /report endpoint uses so the two cannot describe different runs."""
@@ -80,8 +104,10 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
     for row in verdicts:
         evidence = ""
         if row["quote"] and row["evidence_doc_title"]:
-            page = f" p.{row['evidence_page']}" if row["evidence_page"] is not None else ""
-            evidence = f' — evidence: "{row["quote"]}" (source {row["evidence_doc_title"]!r}{page})'
+            locator = _evidence_locator(row)
+            evidence = (
+                f' — evidence: "{row["quote"]}" (source {row["evidence_doc_title"]!r}{locator})'
+            )
         disavowed = " (disavowed by the report)" if row.get("stance") == "disavowed" else ""
         lines.append(
             f'- [{row["verdict"]}]{disavowed} "{row["text"]}" — {row["rationale"]}{evidence}'

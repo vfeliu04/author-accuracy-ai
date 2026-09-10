@@ -907,3 +907,152 @@ def test_report_sources_list_every_source_document_with_type_and_scorability(tmp
         None,
     )
     assert report["credibility_detail"]["excluded"] == credibility["excluded"]
+
+
+def test_run_detail_uploads_carry_source_type_and_url(tmp_path):
+    settings = _settings(tmp_path)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    run_id, _ = dbmod.create_run_with_uploads_and_job(
+        conn,
+        [
+            dbmod.UploadSpec(kind="REPORT", file_name="report.pdf", path=str(tmp_path / "r.pdf")),
+            dbmod.UploadSpec(
+                kind="SOURCE",
+                file_name="www.who.int",
+                path=str(tmp_path / "u.json"),
+                source_type="web",
+                url="https://www.who.int/facts",
+            ),
+        ],
+    )
+    conn.close()
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        uploads = client.get(f"/api/runs/{run_id}", headers=AUTH).json()["uploads"]
+    keys = ("kind", "file_name", "source_type", "url")
+    assert [{k: u[k] for k in keys} for u in uploads] == [
+        {"kind": "REPORT", "file_name": "report.pdf", "source_type": "pdf", "url": None},
+        {
+            "kind": "SOURCE",
+            "file_name": "www.who.int",
+            "source_type": "web",
+            "url": "https://www.who.int/facts",
+        },
+    ]
+
+
+def _cite_chunk(conn, run_id, chunk_id, text):
+    report_doc = dbmod.get_report_doc_id(conn, run_id)
+    [claim] = dbmod.add_claims(conn, run_id, report_doc, [{"text": text, "page": 1}])
+    dbmod.add_verdicts(
+        conn,
+        run_id,
+        [
+            {
+                "claim_id": claim,
+                "verdict": "SUPPORTED",
+                "raw_verdict": "SUPPORTED",
+                "quote": text,
+                "quote_verified": 1,
+                "quoted_chunk_id": chunk_id,
+                "rationale": "r",
+                "model": "fake",
+            }
+        ],
+    )
+
+
+def test_report_evidence_carries_the_locator_for_each_source_type(tmp_path):
+    from authorai.embeddings import FakeEmbedder
+
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    embedder = FakeEmbedder(dim=DIM)
+
+    def source(source_type, title, url, chunk):
+        upload = dbmod.add_upload(
+            conn,
+            "SOURCE",
+            title,
+            str(settings.uploads_dir / f"{title}.json"),
+            source_type=source_type,
+            url=url,
+        )
+        doc = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload, title=title)
+        [chunk_id] = dbmod.add_chunks(conn, run_id, doc, [chunk], embedder.embed([chunk["text"]]))
+        _cite_chunk(conn, run_id, chunk_id, chunk["text"])
+        return doc, chunk_id
+
+    web_doc, web_chunk = source(
+        "web",
+        "Drinking-water",
+        "https://www.who.int/facts",
+        {"text": "73 percent safely managed", "section": "Access to services"},
+    )
+    video_url = "https://www.youtube.com/watch?v=abc123def45"
+    video_doc, video_chunk = source(
+        "youtube",
+        "Water talk",
+        video_url,
+        {"text": "two billion lack water", "start_seconds": 754.0, "end_seconds": 829.0},
+    )
+    conn.close()
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        claims = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()["claims"]
+    evidence = {c["text"]: c["evidence_source"] for c in claims if c["evidence_source"]}
+    assert evidence["73 percent safely managed"] == {
+        "doc_id": web_doc,
+        "title": "Drinking-water",
+        "page": None,
+        "source_type": "web",
+        "url": "https://www.who.int/facts",
+        "section": "Access to services",
+        "start_seconds": None,
+        "chunk_id": web_chunk,
+    }
+    assert evidence["two billion lack water"] == {
+        "doc_id": video_doc,
+        "title": "Water talk",
+        "page": None,
+        "source_type": "youtube",
+        "url": video_url,
+        "section": None,
+        "start_seconds": 754.0,
+        "chunk_id": video_chunk,
+    }
+    pdf = evidence["hunger fell"]
+    assert (pdf["source_type"], pdf["page"], pdf["url"], pdf["start_seconds"]) == (
+        "pdf",
+        3,
+        None,
+        None,
+    )
+
+
+def test_document_file_serves_each_source_type_with_its_media_type(tmp_path):
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    snapshot = settings.uploads_dir / f"{dbmod.new_id()}.json"
+    snapshot.write_text('{"schema": 1}', encoding="utf-8")
+    png = settings.uploads_dir / f"{dbmod.new_id()}.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
+    jpg = settings.uploads_dir / f"{dbmod.new_id()}.jpg"
+    jpg.write_bytes(b"\xff\xd8\xff" + b"0" * 16)
+    cases = [
+        ("web", snapshot, "web", "https://www.who.int/facts", "application/json"),
+        ("video", snapshot, "youtube", "https://youtu.be/abc123def45", "application/json"),
+        ("png", png, "image", None, "image/png"),
+        ("jpg", jpg, "image", None, "image/jpeg"),
+    ]
+    docs = {}
+    for name, path, source_type, url, _media in cases:
+        upload = dbmod.add_upload(conn, "SOURCE", name, str(path), source_type=source_type, url=url)
+        docs[name] = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload, title=name)
+    conn.close()
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        for name, _path, _type, _url, media in cases:
+            resp = client.get(f"/api/runs/{run_id}/documents/{docs[name]}/file", headers=AUTH)
+            assert resp.status_code == 200, name
+            assert resp.headers["content-type"].split(";")[0] == media, name
