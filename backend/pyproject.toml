@@ -27,6 +27,11 @@ dependencies = [
     # FastAPI hard-requires this for multipart form parsing; without it every
     # upload endpoint 500s at request time.
     "python-multipart==0.0.22",
+    # Web-page sources: main-content extraction. Docling's HTML backend was
+    # rejected — it keeps <footer> as content and treats <nav>/<aside> as mere
+    # paragraph breaks, so site chrome would pollute chunks and the credibility
+    # imprint scan.
+    "trafilatura==2.2.0",
 ]
 
 [project.optional-dependencies]

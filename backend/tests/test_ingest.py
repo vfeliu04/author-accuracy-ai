@@ -196,3 +196,28 @@ def test_ingest_empty_document_fails_loudly(conn, tmp_path, monkeypatch):
             kind="SOURCE",
             figures_dir=tmp_path,
         )
+
+
+def test_ingest_chunk_ids_follow_text_then_tables_then_figures(conn, tmp_path, monkeypatch):
+    # Chunk ids ARE the retrieval tie-break order and the eval's byte-identity
+    # rests on them — pinned (order AND text) before ingest_pdf is split, so
+    # the refactor cannot silently reorder or reword text/table/figure chunks.
+    monkeypatch.setattr(ingest_mod, "parse_pdf", lambda path: _parsed_document())
+    run_id = dbmod.create_run(conn)
+    doc_id = ingest_pdf(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        tmp_path / "fake.pdf",
+        kind="SOURCE",
+        figures_dir=tmp_path / "figures",
+    )
+    rows = conn.execute(
+        "SELECT kind, section, page, text FROM chunks WHERE doc_id = ? ORDER BY id", (doc_id,)
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("text", "Overview", 1, "Global hunger affected 735 million people in 2023."),
+        ("text", "Methods", 2, "Data was collected from national surveys."),
+        ("table", None, 3, "Hunger by year\n\n| year | undernourished |\n| 2023 | 735 million |"),
+        ("figure", None, 4, "Trend of undernourishment worldwide"),
+    ]
