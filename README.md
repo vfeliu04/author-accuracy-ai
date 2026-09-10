@@ -3,7 +3,7 @@
 [![CI](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its source PDFs; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
+Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its sources — PDF files, links to web pages, or both; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
 
 ![Run view: sources with credibility tiers, grounded chat, score rings](docs/screenshots/run.png)
 
@@ -11,7 +11,9 @@ Author AI fact-checks a report against the source documents it claims to rest on
 
 ```
  report PDF ──┐
- source PDFs ─┴─► INGEST   Docling parse (text · tables · figure images) ─► chunks
+ source PDFs ─┤
+ web links ───┴─► INGEST   links fetched first (a page's readable text, or the PDF it serves)
+                           Docling parse of PDFs (text · tables · figure images) ─► chunks
                            ─► OpenAI embeddings ─► SQLite (sqlite-vec + FTS5, run-scoped)
                      │
                      ▼
@@ -35,11 +37,24 @@ The whole pipeline runs as a background job (a single worker thread with startup
 
 Accuracy measures agreement with the report's **stated positions**, not raw source support. Each extracted claim carries a stance: `asserted` (the report presents it as true) or `disavowed` (the report itself marks it false — "some analyses claim X, which never happened"). An asserted claim is correct when the sources support it; a disavowed claim is correct when the sources *contradict* it. A report that debunks a falsehood is not penalized for mentioning it — and gets no credit if the "falsehood" turns out to be true.
 
+### Web pages as sources
+
+A source can be a link to a web page instead of a file. Add it in the upload dialog. The page is read once, when the run starts, and the copy is kept with the run, so the evidence you review is the text that was checked, not whatever the site shows later.
+
+- Only public web addresses are fetched: a link, a redirect, or an address lookup that leads to a private or internal network is refused. By default a page is capped at 10,000,000 bytes and each fetch at 30 seconds.
+- The page's article text and tables are kept; navigation, cookie banners, and similar page furniture are left out. Pages that need JavaScript to show their content can't be read.
+- A link that serves a PDF is handled exactly like an uploaded PDF.
+- A link that can't be read stops the run, and the error names the link. Retrying resumes where the run stopped.
+- In the claims view, evidence from a web page opens as the stored text with the quoted passage highlighted, cited by its section heading, with a link to the original page.
+- Credibility uses what the page declares about itself — its title, authors, publisher, date, and DOI — and never the web address.
+- YouTube links are not supported yet; the upload refuses them.
+
 ## Stack
 
 - **Backend** — FastAPI + Pydantic v2, Python 3.11+
 - **Storage** — SQLite with sqlite-vec (vectors) + FTS5 (keywords), fused by reciprocal-rank hybrid search; every table is keyed by `run_id`, so runs are isolated and nothing is ever reset
 - **PDF parsing** — Docling (sections, tables, and figure images are all first-class)
+- **Web pages** — trafilatura for the readable article text, behind a fetcher that refuses private network addresses, connects only to the address it checked, and caps each page's size and fetch time
 - **LLM** — Anthropic SDK: structured outputs (`messages.parse()`) with code-verified evidence quotes, the Batch API for bulk verification, vision for chart evidence, prompt caching for chat. `claude-opus-5` for extraction, verdicts, and the validity rubric; `claude-haiku-4-5` for figure captions and source metadata; `claude-sonnet-5` for chat
 - **Embeddings** — OpenAI `text-embedding-3-large`
 - **Frontend** — React 18 + Vite + TanStack Query
@@ -48,8 +63,9 @@ Accuracy measures agreement with the report's **stated positions**, not raw sour
 
 ```
 backend/
-  authorai/            FastAPI app + pipeline: ingest, claims, verification,
-                       scoring, credibility, jobs, chat, search, CLI
+  authorai/            FastAPI app + pipeline: link fetching, ingest (PDFs and
+                       web pages), claims, verification, scoring, credibility,
+                       jobs, chat, search, CLI
   tests/               pytest suite (runs offline; live tests marked "integration")
   evals/               golden claim/verdict sets + recorded baselines
     holdout/           held-out eval set (scored only at phase boundaries)
@@ -90,7 +106,7 @@ Try it with the bundled PDFs: upload `example_sources/example source one/World_H
 
 ![Home gallery of verifications with score pills](docs/screenshots/home.png)
 
-Every claim opens a focus view with the report page and the cited source page side by side; every run stays in the gallery and can be diffed metric by metric against any other:
+Every claim opens a focus view with the report page and its evidence side by side — the cited source page, or a web page's stored text with the quote highlighted; every run stays in the gallery and can be diffed metric by metric against any other:
 
 ![Claims focus: report and source pages side by side](docs/screenshots/claims.png)
 

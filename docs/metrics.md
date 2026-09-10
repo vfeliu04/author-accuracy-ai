@@ -47,6 +47,8 @@ For each SOURCE document, an LLM (`claude-haiku-4-5`) extracts bibliographic met
 | `METADATA_ONLY` | Metadata extracted but not externally verified | 5 |
 | `NONE` | Nothing extractable | 0 |
 
+**Web pages** use what their markup declares. When a page is fetched, its `citation_*` tags, JSON-LD, and `og:site_name` are read into its provenance (precedence in [architecture.md](architecture.md#web-pages-webpy)); when that provenance has any of authors, a publisher, a publication date, or a DOI, it becomes the source's metadata and no model call is made. A page that declares nothing beyond a title falls back to the same Haiku extraction over its opening chunks as a PDF. The tiers then apply with one difference: a web page gets the Crossref title search only when it carries `citation_*` tags (a scholarly landing page), because a news headline that merely shares a year with some registered work could pass as `VERIFIED_TITLE`. A DOI the page declares still resolves to `VERIFIED_DOI`. The publisher is never read from the web address — publisher authority matches whole words, so `who-cares.com` would otherwise match `WHO`.
+
 Component sum (no floors — **unknown earns nothing**):
 
 | Component | Max | Rule |
@@ -58,7 +60,7 @@ Component sum (no floors — **unknown earns nothing**):
 
 Crossref semantics: 404/4xx is an *answer* (not found); 429/5xx and transport errors retry with backoff and then **raise** — treating a throttled Crossref as "not found" would silently downgrade tiers and make scores non-reproducible.
 
-**Run-level aggregation** is a **usage-weighted mean**: each source's weight is the number of quote-verified verdicts citing it — SUPPORTED **and** CONTRADICTED both count (a source that contradicts claims is doing exactly its job). When no verdict cites any source, the result is an unweighted mean explicitly labeled `unweighted_mean_no_usage`; with no sources at all the score is `null` with method `no_sources` — never a silent zero either way.
+**Run-level aggregation** is a **usage-weighted mean**: each source's weight is the number of quote-verified verdicts citing it — SUPPORTED **and** CONTRADICTED both count (a source that contradicts claims is doing exactly its job). When no verdict cites any source, the result is an unweighted mean explicitly labeled `unweighted_mean_no_usage`; with no sources at all the score is `null` with method `no_sources` — never a silent zero either way. A source of type `image` has no bibliographic identity to score: it is listed under `excluded` with its usage and never enters the mean, and a run whose every source is excluded gets a `null` score with method `no_scorable_sources`. Uploads accept PDF files and web links only, so no run created through the API has an image source.
 
 ## Validity (rubric, 0–100)
 

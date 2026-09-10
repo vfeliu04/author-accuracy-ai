@@ -28,9 +28,20 @@ cp backend/.env.example backend/.env
 | `AUTHORAI_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins (`allow_credentials` is off — auth is a header, not a cookie) |
 | `AUTHORAI_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, and `/openapi.json`. They expose the full route surface — keep for local dev, **disable for an exposed deployment** |
 | `AUTHORAI_MAX_REQUEST_BYTES` | `220000000` | Whole-request ceiling, checked against `Content-Length` **before** the body is read, so an unauthenticated attacker cannot push gigabytes → 413 |
-| `AUTHORAI_MAX_UPLOAD_BYTES` | `50000000` | Per-file upload cap, checked from the spooled part's size without materializing the bytes → 413 |
-| `AUTHORAI_MAX_SOURCE_FILES` | `20` | Max source PDFs per run → 400 |
-| `AUTHORAI_UPLOADS_DIR` | `data/uploads` | Where uploaded PDFs are stored (server-generated names); the file endpoint resolve-checks every served path against this directory |
+| `AUTHORAI_MAX_UPLOAD_BYTES` | `50000000` | Per-file upload cap, checked from the spooled part's size without materializing the bytes → 413. Also caps a PDF fetched from a link |
+| `AUTHORAI_MAX_SOURCE_FILES` | `20` | Max sources per run, uploaded files and links together → 400 |
+| `AUTHORAI_UPLOADS_DIR` | `data/uploads` | Where uploaded PDFs, web-page snapshots (JSON), and PDFs fetched from links are stored (server-generated names); the file endpoint resolve-checks every served path against this directory |
+
+## Source links
+
+How the ingest step fetches links added as sources (`backend/authorai/fetch.py`). A web page's body is capped by `AUTHORAI_FETCH_MAX_BYTES`; a PDF served by a link is capped by `AUTHORAI_MAX_UPLOAD_BYTES`.
+
+| Env var | Default | What it does |
+|---|---|---|
+| `AUTHORAI_FETCH_TIMEOUT_SECONDS` | `30.0` | Wall-clock budget for one link's whole fetch, every redirect hop included. Checked between hops and after each body chunk, applied as each request's socket timeouts, and enforced by a watchdog that shuts the connection's socket; the OS DNS lookup is the one wait it cannot interrupt |
+| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on a web page's body, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it |
+| `AUTHORAI_FETCH_MAX_REDIRECTS` | `5` | Redirect hops followed; each target is re-checked, re-resolved, and re-gated against private addresses |
+| `AUTHORAI_FETCH_USER_AGENT` | `AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)` | `User-Agent` sent with every fetch |
 
 ## Storage and embeddings
 
@@ -51,15 +62,15 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | `AUTHORAI_VERDICT_MODEL` | `claude-opus-5` | Per-claim verdicts with schema-quoted evidence |
 | `AUTHORAI_VALIDITY_MODEL` | `claude-opus-5` | The validity rubric over the whole report |
 | `AUTHORAI_CAPTION_MODEL` | `claude-haiku-4-5` | Figure descriptions (vision) baked into chunk text |
-| `AUTHORAI_METADATA_MODEL` | `claude-haiku-4-5` | Bibliographic metadata extraction for source credibility |
+| `AUTHORAI_METADATA_MODEL` | `claude-haiku-4-5` | Bibliographic metadata extraction for source credibility. A web page uses it only when its markup declares nothing beyond a title |
 
 ## Scoring
 
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity components. Parsed loudly: unknown names, duplicates, non-finite/negative weights, or a sum ≠ 1 raise instead of falling back |
-| `AUTHORAI_AUTHORITY_TIER1` | `FAO,UN,United Nations,World Bank,IMF,WHO,UNICEF,OECD,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow |
-| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,International Water Management Institute,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
+| `AUTHORAI_AUTHORITY_TIER1` | `FAO,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,WHO,World Health Organization,UNICEF,OECD,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow |
+| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,NDMC,International Water Management Institute,IWMI,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
 | `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers) |
 
 ## Jobs

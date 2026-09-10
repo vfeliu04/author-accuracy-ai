@@ -7,8 +7,17 @@ Run-grounded Q&A over a completed analysis: `POST /api/runs/{run_id}/chat`, impl
 `build_context` renders the run's entire stored analysis into one text block, using the same DB reads as `GET /api/runs/{run_id}/report` (so chat and the report page can never describe different data):
 
 1. **Scores** — accuracy (with the correct/incorrect stance-agreement breakdown when present), coverage, credibility /100, validity /100, and the supported/contradicted/unverifiable counts, from `get_run_scores`.
-2. **Claims** — every verdict row from `list_verdicts_with_evidence`: verdict, claim text, rationale, and (when a chunk was cited) the evidence quote with its source document title and page. Disavowed claims are tagged `(disavowed by the report)`.
-3. **Sources** — each source's credibility tier and 0–100 total from `list_source_credibility`.
+2. **Claims** — every verdict row from `list_verdicts_with_evidence`: verdict, claim text, rationale, and (when a chunk was cited) the evidence quote with its source document title and where in the source it sits. Disavowed claims are tagged `(disavowed by the report)`.
+3. **Sources** — every source document from `list_run_sources`, the read behind the report's `sources`: `tier <TIER>, credibility <total>/100` when scored, `not scorable (image)` for an image, `not scored` otherwise.
+
+The evidence locator is phrased by the source's **type** (`_evidence_locator`), never inferred from which locator field is empty — Docling leaves the page unset for some PDF items, and that must not read as a web section:
+
+| Source type | Evidence as the model reads it |
+|---|---|
+| `pdf` | `(source 'World Hunger 2025' p.3)`; no locator when the chunk has no page |
+| `web` | `(source 'Drinking-water' § Access to services)` — the heading the quoted text sits under; no locator when it has none |
+
+The code also phrases `youtube` evidence by start time (`at 12:34`, or `at 1:02:03` past an hour) and `image` evidence as `, image`; no upload creates either type.
 
 The system prompt (`CHAT_SYSTEM`) tells the model to answer **only** from this block, to say plainly when the analysis does not cover something, and never to invent claims, verdicts, or sources.
 
