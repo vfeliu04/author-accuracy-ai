@@ -355,13 +355,15 @@ def test_a_pipe_inside_a_table_cell_stays_escaped_so_the_row_keeps_its_columns()
 
 
 def test_superscripts_subscripts_and_footnote_markers():
-    # Policy: digits and signs become Unicode super/subscripts, so 10<sup>6</sup>
-    # stays a million instead of reading "106"; a superscript that holds a link
-    # is a footnote marker and is dropped; anything else is kept as plain text.
+    # Policy: digits and signs are written in plain text, a superscript as ^6, so
+    # 10<sup>6</sup> stays a million instead of reading "106" and a quote, a claim
+    # or a keyword search spelled "CO2" matches (the verdict quote check does not
+    # fold Unicode sub/superscripts); a superscript that holds a link is a footnote
+    # marker and is dropped; anything else is kept as plain text.
     document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
     assert (
-        "Pumping raised CO₂ emissions 5% over an irrigated area of 4.2 km², and about "
-        "10⁶ m³ of water was lifted each day."
+        "Pumping raised CO2 emissions 5% over an irrigated area of 4.2 km^2, and about "
+        "10^6 m^3 of water was lifted each day."
     ) in _sections(document)["Energy and emissions"]
     assert "<sub>" not in _body(document) and "<sup>" not in _body(document)
 
@@ -488,8 +490,9 @@ def test_jsonld_graph_supplies_metadata_and_a_malformed_block_is_skipped_loudly(
         # The Report node's headline beats the WebPage node listed before it,
         # og:title and <title>.
         title="Transboundary Water Cooperation Report 2025",
-        # Entity-decoded and deduplicated; an Organization author is named too.
-        authors=["Leila Haddad", "Tomás Ruiz", "RBI Research Unit"],
+        # Entity-decoded, deduplicated PERSONAL names: the Organization author is
+        # not a person (SourceMetadata.authors), and this page declares a publisher.
+        authors=["Leila Haddad", "Tomás Ruiz"],
         publisher="River Basin Institute",  # beats og:site_name "RBI"
         publication_date="2025-01-22",  # beats WebPage's date and article:published_time
         doi="10.5555/rbi.2025.014",  # the DOI PropertyValue, "doi:" prefix cleaned
@@ -632,8 +635,11 @@ def test_the_work_node_that_names_this_url_is_the_page():
     assert (metadata.title, metadata.authors) == ("Study finds aquifers shrinking", ["Kim Osei"])
 
 
-def test_organization_authors_are_named():
-    markup = _markup(
+def test_organization_authors_are_not_personal_authors_but_can_name_the_publisher():
+    """Authors are personal names, as the PDF path extracts them, so an institution
+    credited as author earns no author points. It names the publisher only when the
+    page declares none."""
+    org_only = _markup(
         _ld(
             {
                 "@type": "MedicalWebPage",
@@ -642,9 +648,24 @@ def test_organization_authors_are_named():
             }
         )
     )
-    assert _page_metadata(markup, url="https://example.org/o").authors == [
-        "World Health Organization"
-    ]
+    metadata = _page_metadata(org_only, url="https://example.org/o")
+    assert (metadata.authors, metadata.publisher) == ([], "World Health Organization")
+
+    declared = _markup(
+        _ld(
+            {
+                "@type": "Article",
+                "headline": "Reservoirs at record lows",
+                "author": [
+                    {"@type": "Person", "name": "Ana Pérez"},
+                    {"@type": "GovernmentOrganization", "name": "Water Ministry"},
+                ],
+                "publisher": {"@type": "NewsMediaOrganization", "name": "Daily Water"},
+            }
+        )
+    )
+    metadata = _page_metadata(declared, url="https://example.org/p")
+    assert (metadata.authors, metadata.publisher) == (["Ana Pérez"], "Daily Water")
 
 
 def test_first_doi_source_wins_and_an_invalid_one_becomes_none():
@@ -1137,3 +1158,55 @@ def test_document_title_falls_back_to_first_heading_then_none():
     document, _ = extract_web(headless, url="https://example.org/b")
     assert [s.title for s in document.sections] == [""]
     assert document.title is None
+
+
+def test_a_jsonld_block_ending_in_a_semicolon_still_declares_the_page(web_log):
+    """Shaped like a real institutional fact sheet (synthetic text): a
+    BreadcrumbList, then the Article block — valid JSON followed by a stray ";" —
+    holding the page's only publisher and date, then an ItemPage block."""
+    article = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "Article",
+            "headline": "Drinking-water",
+            "datePublished": "2023-09-13T07:10:00.0000000+00:00",
+            "author": {"@type": "Organization", "name": "Example Health Agency: EHA"},
+            "publisher": {"@type": "Organization", "name": "Example Health Agency: EHA"},
+        }
+    )
+    markup = _markup(
+        "<title>\n\tDrinking-water</title>",
+        _ld({"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": []}),
+        f'<script type="application/ld+json">{article};</script>',
+        _ld({"@context": "https://schema.org", "@type": "ItemPage", "name": "Detail"}),
+    )
+    metadata = _page_metadata(markup, url="https://www.health.example/fact-sheets/drinking-water")
+    assert metadata.publisher == "Example Health Agency: EHA"
+    assert metadata.publication_date == "2023-09-13"
+    assert metadata.title == "Drinking-water"
+    assert metadata.authors == []
+    assert [r for r in web_log.records if r.levelno == logging.WARNING] == []
+
+
+def test_other_content_after_a_jsonld_value_is_still_malformed(web_log):
+    markup = _markup(
+        '<script type="application/ld+json">{"@type": "Article", "headline": "A"} '
+        '{"@type": "Article", "headline": "B"}</script>'
+    )
+    assert _page_metadata(markup, url="https://example.org/x").title is None
+    assert len([r for r in web_log.records if r.levelno == logging.WARNING]) == 1
+
+
+@pytest.mark.parametrize("page_type", ["ItemPage", "CollectionPage", "FAQPage", "AboutPage"])
+def test_webpage_subtypes_describe_the_page(page_type):
+    markup = _markup(
+        _ld(
+            {
+                "@type": page_type,
+                "name": "Groundwater levels",
+                "publisher": {"@type": "Organization", "name": "Basin Authority"},
+            }
+        )
+    )
+    metadata = _page_metadata(markup, url="https://example.org/g")
+    assert (metadata.title, metadata.publisher) == ("Groundwater levels", "Basin Authority")

@@ -7,7 +7,7 @@ One page, two independent readings:
   shapes trafilatura returns them as the article). Emphasis tags are
   unwrapped: chunk text is later quoted verbatim as evidence, and markdown
   markers cannot be stripped afterwards because trafilatura does not escape a
-  page's own asterisks. Super/subscripts become Unicode or plain text, and a
+  page's own asterisks. Super/subscripts become plain text (10^6, CO2), and a
   table nested in a table is flattened into its cell (trafilatura drops such
   tables, and the tables around them). Sections are split on the heading
   elements of trafilatura's extracted tree, never by parsing its markdown,
@@ -209,8 +209,7 @@ _PRUNE_XPATH = """
 # Yoast FAQ questions are <strong> elements trafilatura turns into headings.
 _EMPHASIS_XPATH = "//b | //strong[not(contains(@class, 'schema-faq-question'))] | //i | //em | //u"
 _SCRIPT_CHARACTERS = frozenset("0123456789+-−=()")
-_SUPERSCRIPT = str.maketrans("0123456789+-−=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁻⁼⁽⁾")
-_SUBSCRIPT = str.maketrans("0123456789+-−=()", "₀₁₂₃₄₅₆₇₈₉₊₋₋₌₍₎")
+_ASCII_MINUS = str.maketrans({"−": "-"})
 _HEADING_PREFIX = re.compile(r"^#{1,6} ?")
 
 
@@ -257,8 +256,11 @@ def _prepare_tree(tree) -> None:
     """Edit the parsed page in place, before trafilatura reads it:
 
     - emphasis tags are unwrapped, keeping their text;
-    - a <sup>/<sub> holding only digits and signs becomes Unicode super- or
-      subscript (10<sup>6</sup> must not read "106"); a <sup> holding a link
+    - a <sup>/<sub> holding only digits and signs is written in plain text, a
+      superscript as ^6 (10<sup>6</sup> must not read "106") and a subscript
+      inline (CO2), so quotes, claims and keyword search spell it the same way
+      (the verdict quote check does not fold Unicode sub/superscripts); a <sup>
+      holding a link
       is a footnote or reference marker and is removed; any other
       <sup>/<sub> is unwrapped to plain text;
     - a table nested in a table becomes its text inside the outer cell —
@@ -271,8 +273,8 @@ def _prepare_tree(tree) -> None:
         if element.tag == "sup" and element.find(".//a") is not None:
             element.drop_tree()
         elif content and set(content) <= _SCRIPT_CHARACTERS:
-            script = _SUPERSCRIPT if element.tag == "sup" else _SUBSCRIPT
-            _replace_with_text(element, content.translate(script))
+            plain = content.translate(_ASCII_MINUS)
+            _replace_with_text(element, f"^{plain}" if element.tag == "sup" else plain)
         else:
             element.drop_tag()
     # Reverse document order visits a nested table before the table holding it.
@@ -334,7 +336,23 @@ def _markdown(element) -> str:
 # --- metadata ----------------------------------------------------------------
 
 _ARTICLE_TYPES = frozenset({"Article", "NewsArticle", "BlogPosting", "Report", "ScholarlyArticle"})
-_PAGE_TYPES = frozenset({"WebPage", "MedicalWebPage"})
+# WebPage and schema.org's page-shaped subtypes (CMS detail pages often say ItemPage).
+_PAGE_TYPES = frozenset(
+    {
+        "WebPage",
+        "AboutPage",
+        "CollectionPage",
+        "ContactPage",
+        "FAQPage",
+        "ItemPage",
+        "MedicalWebPage",
+        "ProfilePage",
+        "QAPage",
+        "SearchResultsPage",
+    }
+)
+# schema.org Organization and its subtypes whose names do not end in "Organization".
+_ORGANIZATION_TYPES = frozenset({"Organization", "NGO", "Corporation", "Consortium"})
 _DOI_LIKE = re.compile(r"\s*(?:https?://(?:dx\.)?doi\.org/|doi:|10\.\d{4,9}/)", re.IGNORECASE)
 _ISO_DATE = re.compile(r"(\d{4})(?:[-/](\d{1,2})(?:[-/](\d{1,2}))?)?(?:[T ]\d{1,2}:\d{2}.*)?")
 # Inline SVG and MathML have <title> elements of their own (an icon's label).
@@ -407,8 +425,9 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     winning DOI that fails validation is None, never a fall-through:
 
     title       citation_title > JSON-LD headline/name > og:title > <title>
-    authors     citation_author (all) > JSON-LD author names > meta author (one)
+    authors     citation_author (all) > JSON-LD personal author names > meta author (one)
     publisher   citation_publisher > JSON-LD publisher name > og:site_name
+                > JSON-LD Organization author name
     date        citation_publication_date > citation_date > JSON-LD datePublished
                 > article:published_time
     doi         citation_doi > JSON-LD identifier/sameAs DOI
@@ -445,13 +464,16 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     )
     authors = (
         meta.get("citation_author")
-        or _names(work.get("author"), by_id)
+        or _names(work.get("author"), by_id, kind="person")
         or meta.get("author", [])[:1]
     )
     publisher = (
         first("citation_publisher")
         or next(iter(_names(work.get("publisher"), by_id)), None)
         or first("og:site_name")
+        # An institution credited as the author published the page when nothing
+        # else says so. It is never a PERSONAL author (SourceMetadata.authors).
+        or next(iter(_names(work.get("author"), by_id, kind="organization")), None)
     )
     published = (
         first("citation_publication_date", "citation_date")
@@ -469,6 +491,22 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     )
 
 
+# strict=False: CMSes emit raw newlines inside JSON-LD strings.
+_JSONLD_DECODER = json.JSONDecoder(strict=False)
+
+
+def _load_jsonld(block: str) -> object:
+    """One JSON value, tolerating what templates leave after it: whitespace and
+    semicolons (a real WHO fact sheet ends the Article block holding its only
+    publisher and date with a stray ";"). Anything else after the value is still
+    malformed."""
+    text = block.strip()
+    data, end = _JSONLD_DECODER.raw_decode(text)
+    if text[end:].strip(" \t\r\n;"):
+        raise ValueError(f"unexpected content after the JSON value (character {end})")
+    return data
+
+
 def _jsonld_nodes(blocks: list[str], url: str) -> list[dict]:
     """Every object in the page's JSON-LD — a block may hold one object, a
     list, or an {"@graph": [...]} wrapper. A malformed block is the page's
@@ -478,8 +516,7 @@ def _jsonld_nodes(blocks: list[str], url: str) -> list[dict]:
         if not block.strip():
             continue
         try:
-            # strict=False: CMSes emit raw newlines inside JSON-LD strings.
-            data = json.loads(block, strict=False)
+            data = _load_jsonld(block)
         except (ValueError, RecursionError) as exc:
             # RecursionError: nesting deeper than the interpreter's limit.
             logger.warning("%s: skipping malformed JSON-LD block %d (%s)", url, number, exc)
@@ -527,18 +564,29 @@ def _types(node: dict) -> set[str]:
     return {n.rsplit("/", 1)[-1].rsplit(":", 1)[-1] for n in names if isinstance(n, str)}
 
 
-def _names(value: object, by_id: dict[str, dict]) -> list[str]:
+def _is_organization(node: dict) -> bool:
+    return any(t in _ORGANIZATION_TYPES or t.endswith("Organization") for t in _types(node))
+
+
+def _names(value: object, by_id: dict[str, dict], *, kind: str | None = None) -> list[str]:
     """Names from a string, an object (a Person or an Organization), or a list
     of either. An object that is only an {"@id": ...} reference resolves
-    against the page's graph."""
+    against the page's graph. kind="person" skips Organization-typed objects (a
+    plain string counts as a person); kind="organization" keeps only them."""
     names: list[str] = []
     for item in value if isinstance(value, list) else [value]:
         name = item
+        is_organization = False
         if isinstance(item, dict):
             node = item
             if "name" not in node and isinstance(node.get("@id"), str):
                 node = by_id.get(node["@id"], node)
+            is_organization = _is_organization(node)
             name = _first_str(node.get("name"))
+        if (kind == "person" and is_organization) or (
+            kind == "organization" and not is_organization
+        ):
+            continue
         if cleaned := _clean_jsonld(name):
             names.append(cleaned)
     return names
