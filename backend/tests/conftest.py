@@ -24,6 +24,10 @@ def poison_providers(monkeypatch):
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
     monkeypatch.setattr(
+        jobsmod, "ingest_snapshot", lambda *a, **k: pytest.fail("re-ingested a stored page")
+    )
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda *a, **k: pytest.fail("fetched a link"))
+    monkeypatch.setattr(
         jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
     )
     monkeypatch.setattr(

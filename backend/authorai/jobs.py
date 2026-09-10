@@ -19,22 +19,28 @@ Design constraints, each the negation of a v1 defect:
   drop-in change later, but it would need a lease column first.
 """
 
+import codecs
+import hashlib
+import os
 import shutil
 import sqlite3
 import threading
 import traceback
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 
 from authorai import db as dbmod
 from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
+from authorai.fetch import FetchedResponse, fetch_url
+from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf, ingest_snapshot, write_snapshot
 from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
+from authorai.web import extract_web
 
 logger = setup_logger(__name__)
 
@@ -208,6 +214,22 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
     if _maybe_reuse_ingest(context, run_id, upload):
         return True
 
+    if upload["source_type"] in LINK_SOURCE_TYPES:
+        # A link's page was stored by the fetch pre-pass; ingesting it needs no
+        # figure captions (a stored page carries sections only).
+        ingest_snapshot(
+            conn,
+            context.embedder,
+            run_id,
+            Path(upload["path"]),
+            kind=upload["kind"],
+            figures_dir=settings.figures_dir,
+            upload_id=upload_id,
+            # A link's display name IS the link: no filename stem to strip.
+            fallback_title=upload["file_name"],
+        )
+        return False
+
     llm = context.llm
     caption_model = settings.caption_model
 
@@ -232,11 +254,101 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
     return False
 
 
+# Upload source types whose content is fetched by the ingest step itself.
+LINK_SOURCE_TYPES = ("web", "youtube")
+
+
+def _fetch_pending_links(context: PipelineContext, upload_ids: list[str]) -> int:
+    """Fetch every link whose page is not stored yet, BEFORE any document is
+    processed: a link that cannot be read fails the run in seconds, not after
+    the report's parse, figure captions, and embeddings have spent money.
+    A stored page is never fetched again, so a retry resumes where it stopped.
+    Returns how many links this attempt fetched."""
+    conn = context.conn
+    fetched = 0
+    for upload_id in upload_ids:
+        upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+        if upload is None or upload["source_type"] not in LINK_SOURCE_TYPES:
+            continue  # an unknown upload id is reported loudly by _reconcile_upload
+        if upload["source_type"] == "youtube":
+            raise ValueError(f"YouTube sources are not supported yet: {upload['url']!r}")
+        if Path(upload["path"]).exists():
+            continue
+        _fetch_link(context, upload)
+        fetched += 1
+    return fetched
+
+
+def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
+    """Fetch one link and store what it serves, files first.
+
+    A page becomes a snapshot at the planned path — never hashed: link pages do
+    not dedup. A PDF is stored beside it at .pdf and recorded (record_fetch) as
+    a PDF upload with its content hash, so it is ingested, and dedups, exactly
+    like an uploaded PDF. FetchError / ThinPageError propagate: the step fails
+    with the link named, and the retry fetches again.
+    """
+    fetched = fetch_url(upload["url"], context.settings)
+    planned = Path(upload["path"])
+    planned.parent.mkdir(parents=True, exist_ok=True)
+    if fetched.is_pdf:
+        target = planned.with_suffix(".pdf")
+        part = target.with_name(target.name + ".part")
+        try:
+            part.write_bytes(fetched.body)
+            os.replace(part, target)
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+        dbmod.record_fetch(
+            context.conn,
+            upload["id"],
+            path=str(target),
+            source_type="pdf",
+            content_hash=hashlib.sha256(fetched.body).hexdigest(),
+        )
+        return
+    parsed, page = extract_web(_page_text(fetched), url=fetched.final_url)
+    provenance = {
+        "url": upload["url"],
+        "final_url": fetched.final_url,
+        "fetched_at": dbmod.now_iso(),
+        "content_type": fetched.content_type,
+        **asdict(page),
+    }
+    write_snapshot(planned, parsed, provenance)
+
+
+def _page_text(fetched: FetchedResponse) -> bytes | str:
+    """The page as extract_web should read it. Raw bytes by default —
+    extract_web honors a byte-order mark, valid UTF-8, and a <meta> charset —
+    except when the bytes are NOT UTF-8 and the HTTP Content-Type names a
+    charset: the one declaration only the fetch has seen."""
+    if fetched.charset is None:
+        return fetched.body
+    try:
+        fetched.body.decode("utf-8")
+        return fetched.body
+    except UnicodeDecodeError:
+        pass
+    try:
+        codec = codecs.lookup(fetched.charset).name
+    except LookupError:
+        return fetched.body  # an unknown label: the page's own declaration decides
+    if codec in ("iso8859-1", "ascii"):
+        codec = "cp1252"  # WHATWG: browsers decode these labels as windows-1252
+    return fetched.body.decode(codec, errors="replace")
+
+
 def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:
     upload_ids = [payload["report_upload_id"], *payload["source_upload_ids"]]
+    fetched = _fetch_pending_links(context, upload_ids)
     reused = sum(_reconcile_upload(context, run_id, upload_id) for upload_id in upload_ids)
     label = f"Ingested {len(upload_ids)} documents"
-    return f"{label} ({reused} reused)" if reused else label
+    notes = [
+        f"{count} {what}" for count, what in ((fetched, "fetched"), (reused, "reused")) if count
+    ]
+    return f"{label} ({', '.join(notes)})" if notes else label
 
 
 def step_extract(context: PipelineContext, run_id: str, payload: dict) -> str:

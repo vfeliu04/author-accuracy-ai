@@ -760,3 +760,261 @@ def test_worker_start_twice_is_loud_and_restart_after_stop_works(conn, tmp_path)
     worker.start()
     assert not worker._stop.is_set()
     worker.stop()
+
+
+# --- link sources: fetch pre-pass, snapshot, per-type dispatch -------------
+
+
+def _completed_report(conn, tmp_path, run_id):
+    """A REPORT upload whose ingest already finished, so reconcile skips it."""
+    pdf = tmp_path / f"{dbmod.new_id()}.pdf"
+    pdf.write_bytes(b"%PDF-report")
+    upload_id = dbmod.add_upload(conn, "REPORT", "report.pdf", str(pdf), dbmod.new_id())
+    doc_id = dbmod.add_document(conn, run_id, "REPORT", upload_id=upload_id)
+    dbmod.add_chunks(
+        conn,
+        run_id,
+        doc_id,
+        [{"text": "report text"}],
+        FakeEmbedder(dim=DIM).embed(["report text"]),
+    )
+    return upload_id
+
+
+def _link_upload(conn, tmp_path, url, *, source_type="web"):
+    planned = tmp_path / "uploads" / f"{dbmod.new_id()}.json"
+    planned.parent.mkdir(parents=True, exist_ok=True)
+    upload_id = dbmod.add_upload(
+        conn, "SOURCE", url, str(planned), source_type=source_type, url=url
+    )
+    return upload_id, planned
+
+
+def _fetched(
+    url, *, body=b"<html><body>page</body></html>", content_type="text/html", final_url=None
+):
+    from authorai.fetch import FetchedResponse
+
+    return FetchedResponse(
+        url=url,
+        final_url=final_url or url,
+        content_type=content_type,
+        charset="utf-8",
+        body=body,
+        is_pdf=body.startswith(b"%PDF-"),
+    )
+
+
+def test_unreadable_link_fails_ingest_before_any_document_is_processed(conn, tmp_path, monkeypatch):
+    """A bad link must fail the run in seconds: before the report's Docling
+    parse, figure captions, or embeddings run — none of which a retry needs."""
+    from authorai import jobs as jobsmod
+    from authorai.fetch import FetchError
+
+    run_id = dbmod.create_run(conn)
+    report_pdf = tmp_path / "r.pdf"
+    report_pdf.write_bytes(b"%PDF-r")
+    report = dbmod.add_upload(
+        conn, "REPORT", "r.pdf", str(report_pdf), "aaaa09"
+    )  # NOT yet ingested
+    source, _ = _link_upload(conn, tmp_path, "https://intranet.example/secret")
+    poison_providers(monkeypatch)
+
+    def refuse(url, settings, **kwargs):
+        raise FetchError(f"{url} resolves to a private or reserved network address")
+
+    monkeypatch.setattr(jobsmod, "fetch_url", refuse)
+    payload = {"report_upload_id": report, "source_upload_ids": [source]}
+    with pytest.raises(FetchError, match="https://intranet.example/secret"):
+        step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+    assert (
+        conn.execute("SELECT count(*) FROM documents WHERE run_id = ?", (run_id,)).fetchone()[0]
+        == 0
+    )
+
+
+def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection, ingest_snapshot, load_snapshot
+    from authorai.web import PageMetadata
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    fetches: list[str] = []
+
+    def fake_fetch(u, settings, **kwargs):
+        fetches.append(u)
+        return _fetched(u, final_url=u + "/")
+
+    def fake_extract(html, *, url):
+        document = ParsedDocument(
+            title="Drinking-water",
+            sections=[
+                ParsedSection(title="Key facts", page=None, text="2.2 billion lack safe water.")
+            ],
+            tables=[],
+            figures=[],
+        )
+        page = PageMetadata(
+            title="Drinking-water",
+            publisher="World Health Organization",
+            publication_date="2026-03-01",
+        )
+        return document, page
+
+    ingested: list[tuple] = []
+
+    def fake_ingest_snapshot(
+        conn_, embedder, run_id_, path, *, kind, figures_dir, upload_id, fallback_title
+    ):
+        inspect.signature(ingest_snapshot).bind(
+            conn_,
+            embedder,
+            run_id_,
+            path,
+            kind=kind,
+            figures_dir=figures_dir,
+            upload_id=upload_id,
+            fallback_title=fallback_title,
+        )
+        ingested.append((str(path), kind, upload_id, fallback_title))
+        return "doc"
+
+    monkeypatch.setattr(jobsmod, "fetch_url", fake_fetch)
+    monkeypatch.setattr(jobsmod, "extract_web", fake_extract)
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", fake_ingest_snapshot)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == (
+        "Ingested 2 documents (1 fetched)"
+    )
+    assert fetches == [url]
+    parsed, provenance = load_snapshot(planned)
+    assert parsed.sections[0].text == "2.2 billion lack safe water."
+    assert (provenance["url"], provenance["final_url"]) == (url, url + "/")
+    assert provenance["publisher"] == "World Health Organization"
+    assert provenance["content_type"] == "text/html"
+    assert provenance["fetched_at"]
+    row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+    # A page snapshot is never hashed: link sources do not dedup this round.
+    assert (row["source_type"], row["content_hash"], row["path"]) == ("web", None, str(planned))
+    assert ingested == [(str(planned), "SOURCE", upload_id, url)]
+
+
+def test_retry_with_an_existing_snapshot_never_fetches_again(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection, write_snapshot
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, "https://www.who.int/facts")
+    write_snapshot(
+        planned,
+        ParsedDocument(
+            title="T",
+            sections=[ParsedSection(title="", page=None, text="kept")],
+            tables=[],
+            figures=[],
+        ),
+        {"url": "https://www.who.int/facts"},
+    )
+    monkeypatch.setattr(
+        jobsmod, "fetch_url", lambda *a, **k: pytest.fail("re-fetched a stored page")
+    )
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Ingested 2 documents"
+
+
+def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
+    conn, tmp_path, monkeypatch
+):
+    import hashlib
+
+    from authorai import jobs as jobsmod
+
+    body = b"%PDF-donor"
+    digest = hashlib.sha256(body).hexdigest()
+    _ingested_upload(conn, tmp_path, content_hash=digest)  # a prior ingest of these exact bytes
+    poison_providers(monkeypatch)
+    monkeypatch.setattr(
+        jobsmod,
+        "fetch_url",
+        lambda u, s, **k: _fetched(u, body=body, content_type="application/pdf"),
+    )
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, "https://example.org/report.pdf")
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    label = step_ingest(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, payload)
+    assert label == "Ingested 2 documents (1 fetched, 1 reused)"
+    row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+    assert (row["source_type"], row["content_hash"]) == ("pdf", digest)
+    assert row["url"] == "https://example.org/report.pdf"
+    stored = Path(row["path"])
+    assert stored == planned.with_suffix(".pdf") and stored.read_bytes() == body
+    assert not planned.exists()
+
+
+def test_youtube_links_fail_loudly_until_supported(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, _ = _link_upload(
+        conn, tmp_path, "https://www.youtube.com/watch?v=abc123def45", source_type="youtube"
+    )
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda *a, **k: pytest.fail("fetched a video page"))
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    with pytest.raises(ValueError, match="YouTube"):
+        step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+
+def test_a_page_whose_charset_only_the_http_header_names_is_decoded_with_it(
+    conn, tmp_path, monkeypatch
+):
+    """Latin-1 bytes, no <meta> charset: only the Content-Type header says how to
+    read them, and only the fetch step has that header."""
+    from authorai import jobs as jobsmod
+    from authorai.fetch import FetchedResponse
+    from authorai.ingest import load_snapshot
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.salud.example.gob/agua"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    paragraph = (
+        "La Organización Mundial de la Salud informó que el acceso al agua potable mejoró "
+        "en la región durante la última década, aunque millones de personas todavía "
+        "carecen de servicios básicos."
+    )
+    # Two DIFFERENT paragraphs: trafilatura drops a repeated identical paragraph,
+    # and one alone is under the thin-page floor.
+    second = (
+        "Los gobiernos regionales ampliaron las redes de distribución y los sistemas de "
+        "tratamiento, con inversiones concentradas en las zonas rurales afectadas por la sequía."
+    )
+    html = (
+        "<html><head><title>Agua potable</title></head><body><article><h1>Agua potable</h1>"
+        f"<p>{paragraph}</p><p>{second}</p></article></body></html>"
+    ).encode("latin-1")
+    monkeypatch.setattr(
+        jobsmod,
+        "fetch_url",
+        lambda u, s, **k: FetchedResponse(
+            url=u,
+            final_url=u,
+            content_type="text/html",
+            charset="iso-8859-1",
+            body=html,
+            is_pdf=False,
+        ),
+    )
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+    parsed, _ = load_snapshot(planned)
+    assert "Organización Mundial de la Salud" in " ".join(s.text for s in parsed.sections)
