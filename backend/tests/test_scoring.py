@@ -409,3 +409,214 @@ def test_score_run_refuses_stale_verdicts(conn, scored_run):
         conn, llm, scored_run["run"], settings, crossref=_NoNetworkCrossref(), allow_stale=True
     )
     assert dbmod.get_run_scores(conn, scored_run["run"]) is not None
+
+
+# --- source types: web provenance and image exclusion ----------------------
+
+
+def _add_source(conn, run_id, *, source_type, title, metadata, text, chunk_kind="text", url=None):
+    from authorai.embeddings import FakeEmbedder
+
+    upload_id = dbmod.add_upload(
+        conn, "SOURCE", title, f"/tmp/{title}", source_type=source_type, url=url
+    )
+    doc_id = dbmod.add_document(
+        conn, run_id, "SOURCE", upload_id=upload_id, title=title, metadata=json.dumps(metadata)
+    )
+    [chunk_id] = dbmod.add_chunks(
+        conn,
+        run_id,
+        doc_id,
+        [{"text": text, "kind": chunk_kind}],
+        FakeEmbedder(dim=DIM).embed([text]),
+    )
+    return doc_id, chunk_id
+
+
+def _cite(conn, run_id, chunk_id, claim_text):
+    report = conn.execute(
+        "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT'", (run_id,)
+    ).fetchone()["id"]
+    [claim_id] = dbmod.add_claims(conn, run_id, report, [{"text": claim_text}])
+    dbmod.add_verdicts(
+        conn,
+        run_id,
+        [
+            {
+                "claim_id": claim_id,
+                "verdict": "SUPPORTED",
+                "raw_verdict": "SUPPORTED",
+                "quote": "cited text here",
+                "quote_verified": 1,
+                "quoted_chunk_id": chunk_id,
+                "evidence_chunk_ids": [chunk_id],
+                "rationale": "r",
+                "model": "m",
+                "prompt_hash": verdict_stamp(),
+            }
+        ],
+    )
+
+
+WHO_PROVENANCE = {
+    "url": "https://www.who.int/news-room/fact-sheets/detail/drinking-water",
+    "final_url": "https://www.who.int/news-room/fact-sheets/detail/drinking-water",
+    "title": "Drinking-water",
+    "authors": [],
+    "publisher": "World Health Organization",
+    "publication_date": "2026-03-01",
+    "doi": None,
+    "scholarly": False,
+}
+
+
+class _RecordingCrossref(_NoNetworkCrossref):
+    def __init__(self):
+        self.titles: list[str] = []
+
+    def by_title(self, title, rows=5):
+        self.titles.append(title)
+        return []
+
+
+def _metadata_calls(llm):
+    return [c for c in llm.parse_calls if c["output_type"] is SourceMetadata]
+
+
+def test_web_source_is_scored_from_page_provenance_without_a_metadata_call(conn, scored_run):
+    run_id = scored_run["run"]
+    web_doc, web_chunk = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Drinking-water",
+        metadata={"sections": [], "provenance": WHO_PROVENANCE},
+        text="Safely managed drinking water reached 73 percent.",
+        url=WHO_PROVENANCE["url"],
+    )
+    _cite(conn, run_id, web_chunk, "Safely managed water reached 73 percent.")
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(
+                title="Source A", publisher="FAO", publication_date="2025"
+            ),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    crossref = _RecordingCrossref()
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=crossref)
+
+    # Only the PDF source costs a metadata extraction; the page declared its own.
+    assert len(_metadata_calls(llm)) == 1
+    rows = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}
+    web = rows[web_doc]
+    assert web["metadata"]["publisher"] == "World Health Organization"
+    assert web["components"]["authority"] == 30.0  # tier-1 publisher list, same as a PDF
+    assert web["tier"] == "METADATA_ONLY"
+    # A non-scholarly page never enters Crossref title search (headline false positives).
+    assert "Drinking-water" not in crossref.titles
+
+
+def test_scholarly_web_page_keeps_crossref_title_search(conn, scored_run):
+    run_id = scored_run["run"]
+    provenance = {**WHO_PROVENANCE, "title": "A Scholarly Landing Page", "scholarly": True}
+    _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Landing",
+        metadata={"sections": [], "provenance": provenance},
+        text="Landing page abstract text.",
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    crossref = _RecordingCrossref()
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=crossref)
+    assert "A Scholarly Landing Page" in crossref.titles
+
+
+def test_web_page_declaring_only_a_title_falls_back_to_the_metadata_call(conn, scored_run):
+    run_id = scored_run["run"]
+    bare = {"url": "https://example.org/a", "final_url": "https://example.org/a", "title": "A"}
+    _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="A",
+        metadata={"sections": [], "provenance": bare},
+        text="Some page text about water.",
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Extracted", publisher="FAO"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_NoNetworkCrossref())
+    assert len(_metadata_calls(llm)) == 2  # the PDF source AND the title-only page
+
+
+def test_image_source_is_excluded_from_credibility_but_its_usage_is_kept(conn, scored_run):
+    run_id = scored_run["run"]
+    image_doc, image_chunk = _add_source(
+        conn,
+        run_id,
+        source_type="image",
+        title="chart",
+        metadata={"sections": []},
+        text="chart\n\nA bar chart of water access by region.",
+        chunk_kind="figure",
+    )
+    _cite(conn, run_id, image_chunk, "Water access varies by region.")
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A", publisher="FAO"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    result = score_run(conn, llm, run_id, settings, crossref=_NoNetworkCrossref())
+
+    assert len(_metadata_calls(llm)) == 1  # the image never reaches metadata extraction
+    assert [r["doc_id"] for r in dbmod.list_source_credibility(conn, run_id)] != []
+    assert image_doc not in {r["doc_id"] for r in dbmod.list_source_credibility(conn, run_id)}
+    assert result["credibility"]["excluded"] == [
+        {"doc_id": image_doc, "reason": "image", "usage": 1}
+    ]
+    persisted = dbmod.get_run_scores(conn, run_id)
+    assert persisted["credibility"]["excluded"] == result["credibility"]["excluded"]
+
+
+def test_run_whose_only_source_is_an_image_is_labeled_not_zeroed(conn):
+    run_id = dbmod.create_run(conn)
+    dbmod.add_document(
+        conn,
+        run_id,
+        "REPORT",
+        metadata=json.dumps(
+            {"sections": [{"title": "Intro", "page": 1, "text": "Water access varies."}]}
+        ),
+    )
+    image_doc, image_chunk = _add_source(
+        conn,
+        run_id,
+        source_type="image",
+        title="chart",
+        metadata={"sections": []},
+        text="chart",
+        chunk_kind="figure",
+    )
+    _cite(conn, run_id, image_chunk, "Water access varies.")
+    llm = FakeLLM(parse_results={ValidityAssessment: _assessment(quote="Water access varies.")})
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    result = score_run(conn, llm, run_id, settings, crossref=_NoNetworkCrossref())
+    assert result["credibility"]["score"] is None
+    assert result["credibility"]["method"] == "no_scorable_sources"
+    assert result["credibility"]["excluded"][0]["doc_id"] == image_doc

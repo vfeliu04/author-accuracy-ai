@@ -5,6 +5,7 @@ TestClient is always used as a context manager — otherwise the lifespan
 against an app that can't actually start.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -847,3 +848,62 @@ def test_chat_answers_a_done_run(tmp_path, monkeypatch):
     assert resp.json() == {"answer": "One claim is unverifiable.", "mode": "evidence"}
     # The endpoint actually built the context and called chat with the cache block.
     assert fake.chat_calls[0]["system_blocks"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_report_sources_list_every_source_document_with_type_and_scorability(tmp_path):
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    image_upload = dbmod.add_upload(
+        conn, "SOURCE", "chart.png", str(settings.uploads_dir / "c.png"), source_type="image"
+    )
+    image_doc = dbmod.add_document(conn, run_id, "SOURCE", upload_id=image_upload, title="chart")
+    web_upload = dbmod.add_upload(
+        conn,
+        "SOURCE",
+        "who.int",
+        str(settings.uploads_dir / "w.json"),
+        source_type="web",
+        url="https://www.who.int/facts",
+    )
+    web_doc = dbmod.add_document(
+        conn, run_id, "SOURCE", upload_id=web_upload, title="Drinking-water"
+    )
+    stored = conn.execute("SELECT credibility FROM run_scores WHERE run_id = ?", (run_id,))
+    credibility = json.loads(stored.fetchone()["credibility"])
+    credibility["excluded"] = [{"doc_id": image_doc, "reason": "image", "usage": 0}]
+    with conn:
+        conn.execute(
+            "UPDATE run_scores SET credibility = ? WHERE run_id = ?",
+            (json.dumps(credibility), run_id),
+        )
+    conn.close()
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        report = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()
+
+    by_id = {s["doc_id"]: s for s in report["sources"]}
+    assert len(by_id) == 3  # every SOURCE document, scored or not
+    pdf = next(s for s in report["sources"] if s["title"] == "The Source Report")
+    assert (pdf["source_type"], pdf["url"], pdf["scorable"]) == ("pdf", None, True)
+    assert pdf["total"] is not None
+    assert report["sources"][0]["doc_id"] == pdf["doc_id"]  # scored first
+    assert by_id[image_doc] == {
+        "doc_id": image_doc,
+        "title": "chart",
+        "source_type": "image",
+        "url": None,
+        "scorable": False,
+        "total": None,
+        "tier": None,
+        "components": None,
+        "metadata": None,
+    }
+    web = by_id[web_doc]
+    assert (web["source_type"], web["url"], web["scorable"], web["total"]) == (
+        "web",
+        "https://www.who.int/facts",
+        True,
+        None,
+    )
+    assert report["credibility_detail"]["excluded"] == credibility["excluded"]

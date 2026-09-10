@@ -1349,6 +1349,37 @@ def list_source_credibility(conn: sqlite3.Connection, run_id: str) -> list[dict]
     return out
 
 
+def list_run_sources(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """Every SOURCE document of a run, with its credibility row when one exists.
+
+    The report and the chat list sources from here rather than from
+    source_credibility alone: an image is never scored and a run that failed
+    before scoring has no rows, and neither may silently vanish from the
+    product. Scored sources come first by total, then the rest in ingest
+    order. Documents with no upload row (CLI and hand-seeded runs) are PDFs.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.id AS doc_id, d.title AS doc_title, u.source_type, u.url,
+               s.metadata, s.components, s.total, s.tier
+        FROM documents d
+        LEFT JOIN source_credibility s ON s.doc_id = d.id
+        LEFT JOIN uploads u ON u.id = d.upload_id
+        WHERE d.run_id = ? AND d.kind = 'SOURCE'
+        ORDER BY s.total IS NULL, s.total DESC, d.rowid
+        """,
+        (run_id,),
+    ).fetchall()
+    out = []
+    for row in rows:
+        record = dict(row)
+        record["source_type"] = record["source_type"] or "pdf"
+        for key in ("metadata", "components"):
+            record[key] = None if record[key] is None else json.loads(record[key])
+        out.append(record)
+    return out
+
+
 def list_claims(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     rows = conn.execute(
         "SELECT * FROM claims WHERE run_id = ? ORDER BY page, id", (run_id,)

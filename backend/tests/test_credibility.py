@@ -333,6 +333,83 @@ def test_aggregation_no_sources_is_explicit():
     result = aggregate_credibility([], {})
     assert result["score"] is None
     assert result["method"] == "no_sources"
+    assert result["excluded"] == []
+
+
+def test_aggregation_carries_excluded_sources_with_their_usage():
+    per_source = [{"doc_id": "a", "total": 80.0, "tier": "METADATA_ONLY"}]
+    result = aggregate_credibility(
+        per_source, {"a": 2, "img": 3}, excluded=[{"doc_id": "img", "reason": "image"}]
+    )
+    assert result["score"] == 80.0
+    assert result["method"] == "usage_weighted_mean"
+    # Usage of an excluded source is reported, never folded into the mean.
+    assert result["excluded"] == [{"doc_id": "img", "reason": "image", "usage": 3}]
+
+
+def test_aggregation_with_only_excluded_sources_is_labeled_not_zeroed():
+    result = aggregate_credibility([], {"img": 1}, excluded=[{"doc_id": "img", "reason": "image"}])
+    assert result["score"] is None
+    assert result["method"] == "no_scorable_sources"
+
+
+def test_metadata_from_provenance_maps_declared_fields():
+    from authorai.credibility import metadata_from_provenance
+
+    meta = metadata_from_provenance(
+        {
+            "url": "https://example.org/a",
+            "final_url": "https://example.org/a",
+            "title": "T",
+            "authors": ["Ana Pérez"],
+            "publisher": "World Health Organization",
+            "publication_date": "2026-03-01",
+            "doi": "10.1000/xyz",
+            "scholarly": True,
+        }
+    )
+    assert meta == SourceMetadata(
+        title="T",
+        authors=["Ana Pérez"],
+        publisher="World Health Organization",
+        publication_date="2026-03-01",
+        doi="10.1000/xyz",
+    )
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {},
+        {"url": "https://example.org/a", "title": "Only a title"},
+        {"title": "T", "authors": [], "publisher": None, "publication_date": "", "doi": None},
+    ],
+)
+def test_metadata_from_provenance_is_none_without_structured_fields(provenance):
+    from authorai.credibility import metadata_from_provenance
+
+    # A bare <title> is not bibliographic metadata: the caller falls back to
+    # the model extraction instead of scoring a title-only source.
+    assert metadata_from_provenance(provenance) is None
+
+
+class _MatchingTitleCrossref:
+    def __init__(self):
+        self.title_calls = 0
+
+    def by_doi(self, doi):
+        return None
+
+    def by_title(self, title, rows=5):
+        self.title_calls += 1
+        return [{"title": ["Global Hunger Index 2025"], "author": [{"family": "Author"}]}]
+
+
+def test_resolve_tier_title_search_defaults_on_and_can_be_disabled():
+    crossref = _MatchingTitleCrossref()
+    assert resolve_tier(META, crossref)[0] == "VERIFIED_TITLE"
+    assert resolve_tier(META, crossref, title_search=False)[0] == "METADATA_ONLY"
+    assert crossref.title_calls == 1  # the disabled call never queried
 
 
 # --- ISBN verification (Wave 2) --------------------------------------------

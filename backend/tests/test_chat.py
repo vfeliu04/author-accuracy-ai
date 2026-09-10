@@ -177,3 +177,14 @@ def test_context_reports_unscored_run(conn):
     dbmod.add_document(conn, run_id, "REPORT")
     context = chatmod.build_context(conn, run_id)
     assert "not been scored" in context
+
+
+def test_context_lists_image_and_unscored_sources_honestly(conn):
+    run_id = _scored_run(conn)
+    image = dbmod.add_upload(conn, "SOURCE", "chart.png", "/tmp/chart.png", source_type="image")
+    dbmod.add_document(conn, run_id, "SOURCE", upload_id=image, title="Water chart")
+    dbmod.add_document(conn, run_id, "SOURCE", title="Unscored Source")
+    context = chatmod.build_context(conn, run_id)
+    assert "- 'World Hunger 2025': tier VERIFIED_DOI, credibility 80.0/100" in context
+    assert "- 'Water chart': not scorable (image)" in context
+    assert "- 'Unscored Source': not scored" in context

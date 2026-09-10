@@ -74,7 +74,7 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
     reads the /report endpoint uses so the two cannot describe different runs."""
     verdicts = dbmod.list_verdicts_with_evidence(conn, run_id)
     scores = dbmod.get_run_scores(conn, run_id)
-    sources = dbmod.list_source_credibility(conn, run_id)
+    sources = dbmod.list_run_sources(conn, run_id)
 
     lines = ["=== ANALYSIS ===", "", "SCORES: " + _fmt_score(scores), "", "CLAIMS:"]
     for row in verdicts:
@@ -88,9 +88,13 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
         )
     lines += ["", "SOURCES:"]
     for source in sources:
-        lines.append(
-            f"- {source['doc_title']!r}: tier {source['tier']}, credibility {source['total']}/100"
-        )
+        if source["source_type"] == "image":
+            standing = "not scorable (image)"
+        elif source["total"] is None:
+            standing = "not scored"
+        else:
+            standing = f"tier {source['tier']}, credibility {source['total']}/100"
+        lines.append(f"- {source['doc_title']!r}: {standing}")
     return "\n".join(lines)
 
 

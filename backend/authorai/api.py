@@ -353,7 +353,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
 
         verdict_rows = dbmod.list_verdicts_with_evidence(conn, run_id)
         stored = dbmod.get_run_scores(conn, run_id)
-        source_rows = dbmod.list_source_credibility(conn, run_id)
+        source_rows = dbmod.list_run_sources(conn, run_id)
         report_doc_id = dbmod.get_report_doc_id(conn, run_id)
     finally:
         conn.rollback()  # read-only; release the snapshot
@@ -395,6 +395,7 @@ def get_report(run_id: str, conn: Conn) -> dict:
         credibility_detail = {
             "method": stored["credibility"].get("method"),
             "sources": stored["credibility"].get("sources"),
+            "excluded": stored["credibility"].get("excluded", []),
         }
 
     claims = [
@@ -429,6 +430,11 @@ def get_report(run_id: str, conn: Conn) -> dict:
         {
             "doc_id": row["doc_id"],
             "title": row["doc_title"],
+            "source_type": row["source_type"],
+            "url": row["url"],
+            # An image has no bibliographic identity to score (credibility lists
+            # it under `excluded`); a null total on a scorable source = unscored.
+            "scorable": row["source_type"] != "image",
             "total": row["total"],
             "tier": row["tier"],
             "components": row["components"],

@@ -78,6 +78,31 @@ class SourceMetadata(BaseModel):
     isbn: str | None = None
 
 
+# Fields that make a page's declared metadata bibliographic. A bare <title>
+# alone is not: every page has one.
+_PROVENANCE_STRUCTURED = ("authors", "publisher", "publication_date", "doi")
+
+
+def metadata_from_provenance(provenance: dict) -> SourceMetadata | None:
+    """A fetched page's own declared metadata as SourceMetadata, or None when it
+    declares nothing beyond a title.
+
+    Ingestion already read the page's structured tags (citation_*, JSON-LD,
+    og:site_name), so no model call is needed to learn what the page states
+    about itself. None tells the caller to fall back to the model extraction
+    over the page text rather than score a title-only source.
+    """
+    if not any(provenance.get(field) for field in _PROVENANCE_STRUCTURED):
+        return None
+    return SourceMetadata(
+        title=provenance.get("title") or None,
+        authors=list(provenance.get("authors") or []),
+        publisher=provenance.get("publisher") or None,
+        publication_date=provenance.get("publication_date") or None,
+        doi=provenance.get("doi") or None,
+    )
+
+
 def extract_metadata(llm: LLM, model: str, opening_text: str) -> SourceMetadata:
     return llm.parse(
         model=model,
@@ -446,12 +471,18 @@ def resolve_tier(
     metadata: SourceMetadata,
     crossref: CrossrefClient,
     isbn_lookup: "IsbnClient | None" = None,
+    *,
+    title_search: bool = True,
 ) -> tuple[Tier, dict | None]:
+    """`title_search=False` skips the Crossref title path (the DOI and ISBN
+    paths still run). Web pages pass False unless they carry scholarly
+    citation_* tags: a news headline that merely shares a year with some
+    registered work is a false positive the PDF path does not face."""
     if metadata.doi:
         record = crossref.by_doi(metadata.doi)
         if record:
             return "VERIFIED_DOI", record
-    if metadata.title:
+    if title_search and metadata.title:
         for record in crossref.by_title(metadata.title):
             if _title_match(metadata, record):
                 return "VERIFIED_TITLE", record
@@ -599,11 +630,19 @@ def evidence_usage(conn: sqlite3.Connection, run_id: str) -> dict[str, int]:
     return {row["doc_id"]: row["n"] for row in rows}
 
 
-def aggregate_credibility(per_source: list[dict], usage: dict[str, int]) -> dict:
+def aggregate_credibility(
+    per_source: list[dict], usage: dict[str, int], excluded: list[dict] | None = None
+) -> dict:
     """Usage-weighted mean of source scores; explicitly labeled unweighted mean
-    when no verdict cites any source (never None → 0.0)."""
+    when no verdict cites any source (never None → 0.0).
+
+    `excluded` sources (images: nothing bibliographic to score) are reported
+    with their usage but never enter the mean, and a run whose every source
+    was excluded is labeled no_scorable_sources rather than scored."""
+    excluded_rows = [{**row, "usage": usage.get(row["doc_id"], 0)} for row in excluded or []]
     if not per_source:
-        return {"score": None, "method": "no_sources", "sources": []}
+        method = "no_scorable_sources" if excluded_rows else "no_sources"
+        return {"score": None, "method": method, "sources": [], "excluded": excluded_rows}
     total_usage = sum(usage.get(row["doc_id"], 0) for row in per_source)
     if total_usage:
         method = "usage_weighted_mean"
@@ -623,4 +662,5 @@ def aggregate_credibility(per_source: list[dict], usage: dict[str, int]) -> dict
             }
             for row in per_source
         ],
+        "excluded": excluded_rows,
     }

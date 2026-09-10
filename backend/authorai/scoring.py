@@ -12,6 +12,7 @@ code checks against the report text. Weights are configured, parsed loudly,
 and there are NO floors (v1's floors made a total failure score ~51/100).
 """
 
+import json
 import math
 import re
 import sqlite3
@@ -28,6 +29,7 @@ from authorai.credibility import (
     evidence_usage,
     extract_metadata,
     merge_record,
+    metadata_from_provenance,
     resolve_tier,
     score_source,
 )
@@ -381,28 +383,49 @@ def score_run(
     accuracy = accuracy_scores(verdict_rows)
 
     sources = conn.execute(
-        "SELECT * FROM documents WHERE run_id = ? AND kind = 'SOURCE'", (run_id,)
+        """
+        SELECT d.*, u.source_type
+        FROM documents d LEFT JOIN uploads u ON u.id = d.upload_id
+        WHERE d.run_id = ? AND d.kind = 'SOURCE'
+        ORDER BY d.rowid
+        """,
+        (run_id,),
     ).fetchall()
+    # An image has no bibliographic identity to score: it is listed under
+    # `excluded` (with its evidence usage) and never averaged. Documents with no
+    # upload row (CLI and hand-seeded runs) are PDFs.
+    scorable = [d for d in sources if (d["source_type"] or "pdf") != "image"]
+    excluded = [
+        {"doc_id": d["id"], "reason": "image"} for d in sources if d["source_type"] == "image"
+    ]
     tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
     tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
     current_year = datetime.now(UTC).year
 
     # Built only when sources exist, closed only if built here — a caller's
     # injected client stays theirs to manage.
-    owns_crossref = crossref is None and bool(sources)
+    owns_crossref = crossref is None and bool(scorable)
     if owns_crossref:
         crossref = CrossrefClient(settings.crossref_mailto)
-    owns_isbn = isbn_lookup is None and bool(sources)
+    owns_isbn = isbn_lookup is None and bool(scorable)
     if owns_isbn:
         isbn_lookup = IsbnClient(settings.crossref_mailto)
     per_source: list[dict] = []
     source_years: list[int] = []
     try:
-        for document in sources:
-            metadata = extract_metadata(
-                llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
-            )
-            tier, record = resolve_tier(metadata, crossref, isbn_lookup)
+        for document in scorable:
+            metadata, title_search = None, True
+            if document["source_type"] in ("web", "youtube"):
+                # The page declared its own metadata at ingest; a model call is the
+                # fallback only when it declared nothing beyond a title.
+                provenance = json.loads(document["metadata"]).get("provenance") or {}
+                metadata = metadata_from_provenance(provenance)
+                title_search = bool(provenance.get("scholarly"))
+            if metadata is None:
+                metadata = extract_metadata(
+                    llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
+                )
+            tier, record = resolve_tier(metadata, crossref, isbn_lookup, title_search=title_search)
             merged = merge_record(metadata, record)
             scored = score_source(
                 merged,
@@ -428,7 +451,7 @@ def score_run(
             crossref.close()
         if owns_isbn:
             isbn_lookup.close()
-    credibility = aggregate_credibility(per_source, evidence_usage(conn, run_id))
+    credibility = aggregate_credibility(per_source, evidence_usage(conn, run_id), excluded=excluded)
 
     # The last failure-prone step (a network LLM call), computed BEFORE any
     # write so a failure here persists nothing and the prior scores stand.
