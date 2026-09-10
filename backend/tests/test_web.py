@@ -1,12 +1,17 @@
 """Web-page extraction: trafilatura body -> sections, the page's own markup -> metadata.
 
 The fixtures under fixtures/web/ are shaped like real pages — site chrome,
-consent banners, analytics scripts, CMS markup, entity-encoded attributes,
-malformed JSON-LD — because surviving that noise is the extractor's whole job.
+consent banners, paywalls, analytics scripts, CMS markup, entity-encoded
+attributes, malformed JSON-LD, nested tables, footnote markers — because
+surviving that noise is the extractor's whole job.
 """
 
+import dataclasses
 import json
 import logging
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -20,8 +25,6 @@ from authorai.web import (
     ThinPageError,
     _normalize_date,
     _page_metadata,
-    _split_sections,
-    _strip_emphasis,
     extract_web,
 )
 
@@ -33,14 +36,23 @@ REPORT_URL = "https://www.riverbasininstitute.org/reports/transboundary-water-20
 SPA_URL = "https://app.reservoirwatch.io/basins/upper-kessa"
 DIARIO_URL = "https://www.diariodelagua.com/salud/desnutricion-cronica-infantil-america-latina"
 BLOG_URL = "https://who-cares.com/posts/drought-myths/"
+BULLETIN_URL = "https://www.hydrology.example.gov/bulletins/groundwater-drought-2025-03"
+PAYWALL_URL = "https://www.valleycourier.example/news/2025/04/11/aquifer-collapse"
+ZH_URL = "https://www.shuili.example.cn/guoji/2025-03/20/c_1130.htm"
+STATS_URL = "https://www.drought-observatory.example.org/statistics/2023-2024"
 
-# The body call extract_web makes, minus the formatting switch under test.
+# The body options extract_web passes to trafilatura, minus the formatting switch.
 BODY_ARGS = dict(
     output_format="markdown",
     include_tables=True,
     include_comments=False,
     include_images=False,
     include_links=False,
+)
+
+PROSE = (
+    "Rainfall in the upper basin fell by a third in 2024 compared with the long-term "
+    "average, and reservoir operators cut releases to the lower valley twice. "
 )
 
 
@@ -52,10 +64,20 @@ def _body(document) -> str:
     return "\n\n".join(section.text for section in document.sections)
 
 
+def _sections(document) -> dict[str, str]:
+    return {section.title: section.text for section in document.sections}
+
+
 def _assert_no_chrome(document, chrome: tuple[str, ...]) -> None:
     for section in document.sections:
         for text in chrome:
             assert text not in section.text, (section.title, text)
+
+
+def _prose(length: int) -> str:
+    """Real sentences cut to exactly `length` characters, never ending in a space."""
+    text = (PROSE * (length // len(PROSE) + 1))[:length]
+    return text if not text.endswith(" ") else text[:-1] + "."
 
 
 @pytest.fixture()
@@ -112,7 +134,7 @@ def test_news_factsheet_keeps_the_article_and_drops_site_chrome():
 
 def test_emphasis_markers_are_stripped_so_quotes_match_verbatim():
     document, _ = extract_web(_page("news_factsheet.html"), url=NEWS_URL)
-    sections = {section.title: section.text for section in document.sections}
+    sections = _sections(document)
 
     # Copied from the source paragraph carrying <em>, <strong> and <b>: chunk
     # text is later quoted as evidence and substring-checked, so a marker left
@@ -138,77 +160,39 @@ def test_emphasis_markers_are_stripped_so_quotes_match_verbatim():
     ]
 
 
-def test_formatting_switch_cannot_replace_emphasis_stripping():
-    """The path considered first: trafilatura 2.2.0's include_formatting=False
-    does drop the emphasis markers, but it also drops the heading hashes and
-    the paragraph breaks that sections are split on — so markers are stripped
-    in post-processing instead. Pinned so an upgrade that changes either
-    behavior is noticed."""
-    page = _page("news_factsheet.html")
+def test_emphasis_is_removed_from_the_page_tree_not_by_either_rejected_path():
+    """Three ways to keep emphasis markers out of quoted text were tried.
 
-    plain = trafilatura.extract(page, url=NEWS_URL, include_formatting=False, **BODY_ARGS)
+    1. trafilatura's include_formatting=False drops the markers, but also the
+       blank lines between paragraphs (which chunking splits on) — rejected.
+    2. Stripping markers from the markdown afterwards cannot work: the markdown
+       does not escape literal asterisks, so a page's own "(*)" and a marker
+       glued to a number ("US$**2.3**bn") are the same characters — rejected
+       after it both left glued markers in and ate literal ones.
+    3. Unwrapping <b>/<strong>/<i>/<em>/<u> in the parsed page before extraction
+       — what extract_web does. Pinned so an upgrade that changes 1 or 2 is noticed.
+    """
+    news = _page("news_factsheet.html")
+    plain = trafilatura.extract(news, url=NEWS_URL, include_formatting=False, **BODY_ARGS)
     assert "**" not in plain
     assert "| Sub-Saharan Africa | 430 million | 36% |" in plain
-    assert not [line for line in plain.splitlines() if line.startswith("#")]
     assert "\n\n" not in plain
 
-    formatted = trafilatura.extract(page, url=NEWS_URL, **BODY_ARGS)
-    assert "## Who is affected" in formatted.splitlines()
-    assert "**55 million people**" in formatted  # what extract_web must remove
+    bulletin = _page("hydrology_bulletin.html")
+    markdown = trafilatura.extract(bulletin, url=BULLETIN_URL, **BODY_ARGS)
+    assert "US$**2.3**bn" in markdown  # a marker glued to digits...
+    assert "cases (*) and suspected cases (**)" in markdown  # ...and the page's own asterisks
 
-
-@pytest.mark.parametrize(
-    ("markdown", "expected"),
-    [
-        ("affected **2.3 billion people** in 2024", "affected 2.3 billion people in 2024"),
-        (
-            "an *abnormally low* rate, __underlined__, _also italic_",
-            "an abnormally low rate, underlined, also italic",
-        ),
-        (
-            "***Bold italic lead.*** Then **bold *nested* text**",
-            "Bold italic lead. Then bold nested text",
-        ),
-        ("rose **45**% to $**5** (*a*, *b*)", "rose 45% to $5 (a, b)"),
-        ("*spans a\nsoft line break* here", "spans a\nsoft line break here"),
-        ("- **Key finding:** rainfall fell", "- Key finding: rainfall fell"),
-        # Literal characters inside words or numbers, or loose, are text.
-        ("snake_case_name and file_name.py", "snake_case_name and file_name.py"),
-        ("2*3*4 and 5 * 3 = 15 and Data* here", "2*3*4 and 5 * 3 = 15 and Data* here"),
-        ("un**believ**able", "un**believ**able"),
-        # Emphasis never spans a paragraph break or a table-cell boundary.
-        ("*first paragraph\n\nsecond paragraph*", "*first paragraph\n\nsecond paragraph*"),
-        ("| *note | x* |", "| *note | x* |"),
-        (
-            "| **Region** | Value |\n|---|---|\n| *Africa* | **650** |\n| a*b | c_d |",
-            "| Region | Value |\n|---|---|\n| Africa | 650 |\n| a*b | c_d |",
-        ),
-        ("## Heading ##", "## Heading ##"),
-        # A * never pairs with a _, and unequal runs pair only what they can.
-        ("mixed _open and close* runs", "mixed _open and close* runs"),
-        ("*lopsided** run", "lopsided* run"),
-        # A run glued to a word, or loose after a space, closes nothing.
-        ("call _internal_name now", "call _internal_name now"),
-        ("*Estimated figure: 5 * 3 = 15", "*Estimated figure: 5 * 3 = 15"),
-    ],
-)
-def test_strip_emphasis_removes_markers_without_touching_literal_text(markdown, expected):
-    assert _strip_emphasis(markdown) == expected
-
-
-@pytest.mark.parametrize("unit", ["*a ", " _a", "**a "])
-def test_strip_emphasis_is_linear_on_unmatched_openers(unit):
-    # The first implementation (a regex with lazy spans) re-scanned to the end
-    # of the paragraph from every unmatched opener: 90 KB of "*a " took minutes.
-    text = unit * 30_000
-    started = time.perf_counter()
-    assert _strip_emphasis(text) == text
-    assert time.perf_counter() - started < 2.0
+    document, _ = extract_web(bulletin, url=BULLETIN_URL)
+    body = _body(document)
+    assert "The programme cost US$2.3bn and cut losses 10x faster than planned." in body
+    assert "Confirmed cases (*) and suspected cases (**) of water-borne disease" in body
+    assert "\n\n" in _sections(document)["Household survey"]
 
 
 def test_large_jsonld_graph_is_ordered_in_linear_time():
-    # Putting article nodes ahead of page nodes once used list-membership
-    # tests: quadratic in dict comparisons (~2.5 s at 10,000 nodes, ~9x that here).
+    # Choosing the work node once used list-membership tests: quadratic in
+    # dict comparisons (~2.5 s at 10,000 nodes, ~9x that here).
     graph = {
         "@graph": [
             {"@type": ["WebPage", "Article"], "@id": f"#node-{i}", "headline": f"Item {i}"}
@@ -222,39 +206,220 @@ def test_large_jsonld_graph_is_ordered_in_linear_time():
     assert metadata.title == "Item 0"
 
 
-def test_sections_split_on_headings_but_never_inside_a_fenced_code_block():
-    markdown = (
-        "Intro before any heading, with **bold**.\n"
-        "\n"
-        "# Top ##\n"
-        "\n"
-        "## Empty\n"
-        "\n"
-        "## **Code** sample\n"
-        "\n"
-        "````\n"
-        "```\n"
-        "## still inside the fence\n"
-        "**kwargs stays**\n"
-        "````\n"
-        "## After the fence, in C#\n"
-        "Body with C# and #hashtag.\n"
-        "\n"
-        "####### seven hashes is text\n"
-    )
-    sections, first_heading = _split_sections(markdown)
-    assert [(s.title, s.page, s.text) for s in sections] == [
-        ("", None, "Intro before any heading, with bold."),
-        ("Code sample", None, "````\n```\n## still inside the fence\n**kwargs stays**\n````"),
-        (
-            "After the fence, in C#",  # a hash glued to a word is not a closing sequence
-            None,
-            "Body with C# and #hashtag.\n\n####### seven hashes is text",
-        ),
+# --- body fidelity: a technical bulletin with every awkward construct ---------
+
+
+def test_bulletin_sections_follow_the_page_headings_and_drop_its_chrome():
+    document, metadata = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+
+    assert [s.title for s in document.sections] == [
+        "Groundwater and drought bulletin: March 2025",
+        "Household survey",
+        "Regional figures",
+        "Energy and emissions",
+        "Data access",
+        "Results for 31 aquifers",  # the heading's <em> is unwrapped too
     ]
-    # "Top" and "Empty" had no body and were dropped — the first heading is
-    # still the document's first heading.
-    assert first_heading == "Top"
+    _assert_no_chrome(
+        document,
+        (
+            "Skip to main content",
+            "About the service",
+            "Close menu",  # the menu button's inline <svg><title>
+            "Open Government Licence",
+            "Accessibility statement",
+            "analytics cookies",  # consent notice outside <main>
+        ),
+    )
+    # A <meta> carrying both name= and property= counts under both keys.
+    assert metadata == PageMetadata(
+        title="Groundwater and drought bulletin: March 2025",  # og:title via property=
+        publisher="National Hydrology Service",
+        publication_date="2025-04-02",  # article:published_time via property=
+    )
+
+
+def test_a_paragraph_starting_with_a_hash_is_text_not_a_heading():
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    survey = _sections(document)["Household survey"]
+    assert survey.startswith(
+        "# of households without piped water: 1,240 in 2024, up from 860 in 2020.\n\n"
+        "The survey covered 18 districts."
+    )
+
+
+def test_a_backtick_paragraph_and_a_code_block_never_swallow_headings():
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    sections = _sections(document)
+
+    data_access = sections["Data access"]
+    assert "```yaml is how the portal expects the data dictionary to start." in data_access
+    assert "## not a heading\nloader = Loader(**kwargs)" in data_access  # code kept verbatim
+    assert "## not a heading" not in [s.title for s in document.sections]
+    # The unclosed-looking ``` paragraph did not open a fence over the rest of the page.
+    assert sections["Results for 31 aquifers"].startswith(
+        "Recovery was incomplete in 31 of 42 aquifers after the most recent drought, and "
+        "median storage loss reached 0.41 metres per year"
+    )
+
+
+def test_emphasis_glued_to_letters_digits_and_punctuation_is_removed():
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    body = _body(document)
+    assert "The programme cost US$2.3bn and cut losses 10x faster than planned." in body
+    assert "Status: Emergency(provisional) declared in 14 districts." in body
+
+
+def test_literal_asterisks_underscores_and_code_spans_survive():
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    body = _body(document)
+    assert "Confirmed cases (*) and suspected cases (**) of water-borne disease" in body
+    assert (
+        "Configure the loader through the `__init__` method; column names use snake_case "
+        "such as well_id, and the grid is 2*3 cells."
+    ) in body
+
+
+def test_nested_and_rowspan_tables_keep_every_value_in_its_row():
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    lines = [line.rstrip() for line in _sections(document)["Regional figures"].splitlines()]
+
+    rowspan = lines.index("| Region | 2023 | 2024 |")
+    assert lines[rowspan + 1 : rowspan + 4] == [
+        "|---|---|---|",
+        "| East Africa | 20.3 | 23.0 |",
+        "|  | 21.0 | 24.5 |",  # the spanned cell keeps its column
+    ]
+    # trafilatura cut a nested table's row loose from its cell ("| Sahel |  |",
+    # then "| Niger | 4.4 million |" after the Horn row). The inner table is
+    # flattened into its cell first, so every value stays in its own row.
+    nested = lines.index("| Sahel | Niger, 4.4 million |")
+    assert lines[nested + 1] == "| Horn | 23 million |"
+    assert "| Indicator | Value |" in lines
+
+
+def test_a_table_heavy_page_keeps_every_table_and_rowspan_cell():
+    # With more tables than paragraphs, trafilatura's default cascade swaps its
+    # own extraction for readability's, which dropped the rowspan placeholder
+    # (21.0 slid under "Region") and, on pages with less prose, whole tables.
+    document, metadata = extract_web(_page("drought_statistics.html"), url=STATS_URL)
+
+    lines = document.sections[0].text.splitlines()
+    assert [line.rstrip() for line in lines if line.startswith("|")] == [
+        "| Region | 2023 | 2024 |",
+        "|---|---|---|",
+        "| East Africa | 20.3 | 23.0 |",
+        "|  | 21.0 | 24.5 |",
+        "| Sahel | Niger, 4.4 million |",
+        "| Horn | 23 million |",
+        "| Indicator | Value |",
+        "|---|---|",
+        "| Wells tested (pass \\| fail) | 312 \\| 48 |",
+    ]
+    assert all(line == line.lstrip() for line in lines)  # no re-indented rows
+    assert "Source: national hydrological services" in document.sections[0].text
+    _assert_no_chrome(document, ("Methodology", "Terms of use", "Privacy"))
+    assert metadata.title == "Drought impact statistics, 2023–2024"
+
+
+def test_a_layout_only_the_full_cascade_reads_is_not_thin():
+    # Fast mode runs first (it keeps tables intact); its own extractor reads
+    # little of this legacy <center><font> page, so the full cascade runs.
+    links = "".join(
+        f'<a href="/{slug}.html">{label}</a> | '
+        for slug, label in (
+            ("index", "Home"),
+            ("reports", "Reports"),
+            ("data", "Data"),
+            ("staff", "Staff"),
+            ("links", "Links"),
+        )
+    )
+    page = (
+        "<html><head><title>Upper basin rainfall, 2024</title></head>"
+        '<body bgcolor="#FFFFFF"><center><font face="Arial" size="2">'
+        + (PROSE + "<p>") * 4
+        + f"</font></center><hr><center><font size=1>{links}</font></center></body></html>"
+    )
+    document, _ = extract_web(page, url="https://www.basin-authority.example/rain2024.html")
+    assert _body(document).count("Rainfall in the upper basin fell by a third in 2024") >= 3
+
+
+def test_a_pipe_inside_a_table_cell_stays_escaped_so_the_row_keeps_its_columns():
+    # Policy: a literal "|" in a cell stays as trafilatura's GFM escape "\|".
+    # Unescaped, "pass | fail" would read as two cells and shift "312 | 48"
+    # into columns that do not exist; a value's column is part of its meaning.
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    lines = [line.rstrip() for line in _sections(document)["Regional figures"].splitlines()]
+    assert "| Wells tested (pass \\| fail) | 312 \\| 48 |" in lines
+
+
+def test_superscripts_subscripts_and_footnote_markers():
+    # Policy: digits and signs become Unicode super/subscripts, so 10<sup>6</sup>
+    # stays a million instead of reading "106"; a superscript that holds a link
+    # is a footnote marker and is dropped; anything else is kept as plain text.
+    document, _ = extract_web(_page("hydrology_bulletin.html"), url=BULLETIN_URL)
+    assert (
+        "Pumping raised CO₂ emissions 5% over an irrigated area of 4.2 km², and about "
+        "10⁶ m³ of water was lifted each day."
+    ) in _sections(document)["Energy and emissions"]
+    assert "<sub>" not in _body(document) and "<sup>" not in _body(document)
+
+
+def test_inline_svg_title_is_never_the_page_title():
+    page = _page("hydrology_bulletin.html")
+    for tag in (
+        "<title>Groundwater and drought bulletin: March 2025 - National Hydrology Service</title>",
+        '<meta name="twitter:title" property="og:title" '
+        'content="Groundwater and drought bulletin: March 2025">',
+    ):
+        assert tag in page
+        page = page.replace(tag, "")
+
+    document, metadata = extract_web(page, url=BULLETIN_URL)
+
+    assert metadata.title is None  # not the menu icon's "Close menu"
+    assert document.title == "Groundwater and drought bulletin: March 2025"
+
+    # An SVG sprite sheet ahead of the real <title> (or on a page without a
+    # <body> tag, which is read whole) is skipped too.
+    sprite = (
+        '<svg xmlns="http://www.w3.org/2000/svg" style="display:none"><symbol id="i-search">'
+        "<title>Search</title><path d='M1 1'/></symbol></svg><title>Rivers run low</title>"
+    )
+    assert _page_metadata(_markup(sprite), url="https://example.org/s").title == "Rivers run low"
+
+
+def test_cjk_text_keeps_its_characters_when_emphasis_is_removed():
+    raw = (FIXTURES / "shuili_news_zh.html").read_bytes()
+    document, metadata = extract_web(raw, url=ZH_URL)
+
+    body = _body(document)
+    assert "世界卫生组织报告显示，2024年全球有5500万人受到干旱影响" in body
+    assert "安全饮用水的获取仍然是最紧迫的问题" in body
+    assert "*" not in body
+    _assert_no_chrome(document, ("客户端下载", "版权所有", "评论"))
+    assert metadata == PageMetadata(
+        title="世界卫生组织：2024年全球5500万人受干旱影响",
+        authors=["李明"],
+        publisher="水利日报",
+        publication_date="2025-03-20",
+    )
+
+
+def test_literal_asterisk_runs_survive_verbatim_and_fast():
+    # The markdown post-pass this replaced went quadratic on unmatched openers
+    # (90 KB of "*a " took minutes) and deleted literal asterisks.
+    literal = "*a " * 30_000
+    page = (
+        "<!DOCTYPE html><html><head><title>Notes</title></head><body><main><article>"
+        f"<h1>Field notes</h1><p>{_prose(400)}</p><p>{literal.strip()}</p>"
+        "</article></main></body></html>"
+    )
+    started = time.perf_counter()
+    document, _ = extract_web(page, url="https://example.org/notes")
+    assert time.perf_counter() - started < 10.0
+    assert literal.strip() in _body(document)
 
 
 # --- (b) scholarly article landing page --------------------------------------
@@ -323,8 +488,8 @@ def test_jsonld_graph_supplies_metadata_and_a_malformed_block_is_skipped_loudly(
         # The Report node's headline beats the WebPage node listed before it,
         # og:title and <title>.
         title="Transboundary Water Cooperation Report 2025",
-        # Entity-decoded, deduplicated, and the Organization author is not a person.
-        authors=["Leila Haddad", "Tomás Ruiz"],
+        # Entity-decoded and deduplicated; an Organization author is named too.
+        authors=["Leila Haddad", "Tomás Ruiz", "RBI Research Unit"],
         publisher="River Basin Institute",  # beats og:site_name "RBI"
         publication_date="2025-01-22",  # beats WebPage's date and article:published_time
         doi="10.5555/rbi.2025.014",  # the DOI PropertyValue, "doi:" prefix cleaned
@@ -361,8 +526,8 @@ def test_jsonld_graph_supplies_metadata_and_a_malformed_block_is_skipped_loudly(
     )
 
 
-def _markup(*head: str) -> str:
-    return "<!DOCTYPE html><html><head>" + "\n".join(head) + "</head><body><p>x</p></body></html>"
+def _markup(*head: str, body: str = "<p>x</p>") -> str:
+    return f"<!DOCTYPE html><html><head>{''.join(head)}</head><body>{body}</body></html>"
 
 
 def _ld(data) -> str:
@@ -392,6 +557,16 @@ def test_jsonld_top_level_list_with_plain_string_fields():
     )
 
 
+def test_a_website_node_is_not_a_description_of_the_page():
+    markup = _markup(
+        '<meta property="og:title" content="Rivers run low">',
+        _ld({"@type": "WebSite", "name": "Daily Ledger", "publisher": "Ledger Group"}),
+    )
+    assert _page_metadata(markup, url="https://example.org/w") == PageMetadata(
+        title="Rivers run low"
+    )
+
+
 def test_jsonld_id_references_resolve_within_the_graph():
     graph = {
         "@context": "https://schema.org",
@@ -415,15 +590,179 @@ def test_jsonld_id_references_resolve_within_the_graph():
     )
 
 
-def test_first_valid_doi_wins_and_a_malformed_one_becomes_none():
+def test_every_jsonld_field_comes_from_one_work_node():
+    # A news story that embeds the study it reports on: the study's authors
+    # and DOI must never be attributed to the news page (credibility would
+    # verify the page against someone else's record).
+    markup = _markup(
+        _ld(
+            {
+                "@type": "NewsArticle",
+                "headline": "Study finds aquifers shrinking",
+                "datePublished": "2025-02-01",
+            }
+        ),
+        _ld(
+            {
+                "@type": "ScholarlyArticle",
+                "headline": "Global groundwater decline",
+                "author": [{"@type": "Person", "name": "A. Researcher"}],
+                "publisher": {"@type": "Organization", "name": "Nature Portfolio"},
+                "datePublished": "2019-05-01",
+                "identifier": "https://doi.org/10.1038/s41586-019-0000-0",
+            }
+        ),
+    )
+    assert _page_metadata(markup, url="https://news.example/aquifers") == PageMetadata(
+        title="Study finds aquifers shrinking",
+        publication_date="2025-02-01",
+    )
+
+
+def test_the_work_node_that_names_this_url_is_the_page():
+    url = "https://news.example/2025/aquifers"
+    cited = {"@type": "ScholarlyArticle", "headline": "Global groundwater decline"}
+    own = {
+        "@type": "NewsArticle",
+        "headline": "Study finds aquifers shrinking",
+        "mainEntityOfPage": {"@type": "WebPage", "@id": url + "/"},
+        "author": {"@type": "Person", "name": "Kim Osei"},
+    }
+    metadata = _page_metadata(_markup(_ld({"@graph": [cited, own]})), url=url + "#top")
+    assert (metadata.title, metadata.authors) == ("Study finds aquifers shrinking", ["Kim Osei"])
+
+
+def test_organization_authors_are_named():
+    markup = _markup(
+        _ld(
+            {
+                "@type": "MedicalWebPage",
+                "name": "Drought and health",
+                "author": {"@type": "Organization", "name": "World Health Organization"},
+            }
+        )
+    )
+    assert _page_metadata(markup, url="https://example.org/o").authors == [
+        "World Health Organization"
+    ]
+
+
+def test_first_doi_source_wins_and_an_invalid_one_becomes_none():
     malformed = '<meta name="citation_doi" content="doi: not-a-doi">'
     jsonld = _ld(
         {"@type": "ScholarlyArticle", "headline": "X", "identifier": "https://doi.org/10.5555/x.9"}
     )
-    assert _page_metadata(_markup(malformed, jsonld), url="https://example.org/d").doi == (
-        "10.5555/x.9"
+    url = "https://example.org/d"
+    # A malformed citation_doi is the first non-empty source: it becomes None
+    # rather than falling through to another source's DOI.
+    assert _page_metadata(_markup(malformed, jsonld), url=url).doi is None
+    assert _page_metadata(_markup(malformed), url=url).doi is None
+    assert _page_metadata(_markup(jsonld), url=url).doi == "10.5555/x.9"
+    # The same within JSON-LD: a declared DOI identifier comes before sameAs.
+    declared = _ld(
+        {
+            "@type": "ScholarlyArticle",
+            "identifier": {"@type": "PropertyValue", "propertyID": "DOI", "value": "pending"},
+            "sameAs": "https://doi.org/10.5555/x.9",
+        }
     )
-    assert _page_metadata(_markup(malformed), url="https://example.org/d").doi is None
+    assert _page_metadata(_markup(declared), url=url).doi is None
+
+
+def test_citation_doi_beats_a_valid_jsonld_doi():
+    markup = _markup(
+        '<meta name="citation_doi" content="10.5555/own.1">',
+        _ld({"@type": "ScholarlyArticle", "identifier": "https://doi.org/10.5555/other.2"}),
+    )
+    assert _page_metadata(markup, url="https://example.org/d").doi == "10.5555/own.1"
+
+
+def test_jsonld_author_names_beat_the_meta_author():
+    markup = _markup(
+        '<meta name="author" content="Site Editor">',
+        _ld({"@type": "BlogPosting", "author": [{"name": "Ann Lee"}, {"name": "Bo Chen"}]}),
+    )
+    assert _page_metadata(markup, url="https://example.org/b").authors == ["Ann Lee", "Bo Chen"]
+
+
+def test_citation_publication_date_beats_citation_date():
+    markup = _markup(
+        '<meta name="citation_date" content="2023/11/30">',
+        '<meta name="citation_publication_date" content="2024/01/15">',
+    )
+    assert _page_metadata(markup, url="https://example.org/s").publication_date == "2024-01-15"
+
+
+def test_jsonld_name_beats_og_title_when_there_is_no_headline():
+    markup = _markup(
+        '<meta property="og:title" content="Drought | Health topics">',
+        _ld({"@type": "MedicalWebPage", "name": "Drought"}),
+    )
+    assert _page_metadata(markup, url="https://example.org/h").title == "Drought"
+
+
+def test_author_names_dedupe_case_insensitively_keeping_the_first():
+    markup = _markup(
+        '<meta name="citation_author" content="Ann Lee">',
+        '<meta name="citation_author" content="ANN LEE">',
+        '<meta name="citation_author" content="Bo Chen">',
+    )
+    assert _page_metadata(markup, url="https://example.org/c").authors == ["Ann Lee", "Bo Chen"]
+
+
+@pytest.mark.parametrize("declared", ["schema:Article", "https://schema.org/NewsArticle"])
+def test_prefixed_schema_org_types_are_recognized(declared):
+    markup = _markup(_ld({"@type": declared, "headline": "Rivers run low"}))
+    assert _page_metadata(markup, url="https://example.org/p").title == "Rivers run low"
+
+
+def test_jsonld_nested_past_the_recursion_limit_is_skipped_with_a_warning(web_log):
+    url = "https://attacker.example/page"
+    array_bomb = "[" * 1000 + "]" * 1000
+    object_bomb = '{"@type":"Article","headline":"H","x":' + "[" * 3000 + "]" * 3000 + "}"
+    page = _page("diario_agua_es.html").replace(
+        "</head>",
+        f'<script type="application/ld+json">{array_bomb}</script>'
+        f'<script type="application/ld+json">{object_bomb}</script></head>',
+    )
+
+    document, metadata = extract_web(page, url=url)
+
+    assert metadata.authors == ["Lucía Fernández Ibáñez"]  # the page's other metadata stands
+    assert document.sections
+    warnings = [r for r in web_log.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert all(url in record.getMessage() for record in warnings)
+
+
+def test_attribute_and_title_entities_are_decoded_exactly_once():
+    markup = _markup(
+        '<meta property="og:title" content="What does &amp;nbsp; mean in HTML?">',
+        '<meta name="citation_author" content="Ann &amp;amp; Bo">',
+    )
+    metadata = _page_metadata(markup, url="https://example.org/u")
+    assert metadata.title == "What does &nbsp; mean in HTML?"
+    assert metadata.authors == ["Ann &amp; Bo"]
+    title_only = _markup("<title>Escaping &amp;lt;p&amp;gt; tags</title>")
+    assert (
+        _page_metadata(title_only, url="https://example.org/t").title == "Escaping &lt;p&gt; tags"
+    )
+
+
+def test_meta_tags_in_the_body_are_not_page_metadata():
+    markup = _markup(
+        "<title>Rivers run low</title>",
+        body=(
+            '<div class="embed-card"><meta property="og:title" content="Another story">'
+            '<meta name="citation_doi" content="10.5555/other.3"></div><p>Body text.</p>'
+        ),
+    )
+    assert _page_metadata(markup, url="https://example.org/e") == PageMetadata(
+        title="Rivers run low"
+    )
+    # Nor is a <title> element in the body — pasted or embedded markup.
+    embedded = _markup(body="<div class='embed'><title>Widget - Maps</title></div><p>Body.</p>")
+    assert _page_metadata(embedded, url="https://example.org/e").title is None
 
 
 def test_empty_values_fall_through_and_meta_author_is_one_string():
@@ -463,7 +802,7 @@ def test_publication_dates_normalize_only_when_they_parse(raw, expected):
     assert _normalize_date(raw) == expected
 
 
-# --- (d) JavaScript-only shell -------------------------------------------------
+# --- (d) thin pages: JavaScript shells, consent banners, paywalls -------------
 
 
 def test_javascript_shell_raises_thin_page_error_naming_the_url():
@@ -476,25 +815,139 @@ def test_javascript_shell_raises_thin_page_error_naming_the_url():
     assert isinstance(excinfo.value, ValueError)
 
 
-def test_thin_page_floor_is_measured_on_section_text(monkeypatch):
-    def serve(markdown):
-        monkeypatch.setattr(web_mod.trafilatura, "extract", lambda *args, **kwargs: markdown)
+@pytest.mark.parametrize(
+    "banner",
+    [
+        'id="cookie-banner" class="consent consent--bottom"',  # as served
+        'class="cookie-banner"',
+        'class="gdpr-overlay" role="dialog"',
+        'class="cmp-container" aria-modal="true"',
+    ],
+)
+def test_a_consent_banner_is_never_the_article_text_of_a_javascript_shell(banner):
+    page = _page("spa_consent_shell.html")
+    served = 'id="cookie-banner" class="consent consent--bottom"'
+    assert served in page
+    with pytest.raises(ThinPageError, match=SPA_URL):
+        extract_web(page.replace(served, banner), url=SPA_URL)
 
-    serve("# Title only\n\n" + "a" * MIN_BODY_CHARS)
-    document, _ = extract_web("<html></html>", url="https://example.org/enough")
-    assert [len(section.text) for section in document.sections] == [MIN_BODY_CHARS]
 
-    thin_bodies = (
-        "# Title only\n\n" + "a" * (MIN_BODY_CHARS - 1),  # headings do not count
-        "**" + "a" * (MIN_BODY_CHARS - 2) + "**",  # neither do stripped markers
-        "# A heading\n\n## Another heading\n",
-        "",
-        None,  # trafilatura found nothing at all
+def test_a_paywall_prompt_is_not_article_text_so_a_teaser_page_is_thin():
+    with pytest.raises(ThinPageError) as excinfo:
+        extract_web(_page("paywall_teaser.html"), url=PAYWALL_URL)
+    assert PAYWALL_URL in str(excinfo.value)
+
+
+LEAKY_PARAGRAPHS = [
+    "Survey crews measured subsidence at 214 benchmarks along the valley floor, and the "
+    "fastest-sinking points dropped 6 cm in the last year alone, according to the "
+    "regional water authority's latest monitoring report.",
+    "The authority said irrigation wells drilled during the 2021 drought are the main "
+    "cause. Pumping from the lower aquifer tripled between 2019 and 2023, while recharge "
+    "from winter rain fell to less than half of its long-term average.",
+    "Town engineers in Marlow and Ester Creek have already repaired cracked water mains "
+    "twice this year, and a canal that carries drinking water to 40,000 residents has "
+    "lost a fifth of its capacity where the ground beneath it subsided.",
+    "State officials will vote next month on pumping limits that would cut groundwater "
+    "use by 30 percent over five years, with compensation for farmers who fallow land.",
+]
+LEAKY_SUBSCRIBERS = (
+    "The water utility says 12,000 of its subscribers in the valley have reported low "
+    "pressure since January, and it has asked the state for emergency funding to replace "
+    "the pumps at its two deepest wells before the summer demand peak arrives."
+)
+
+
+@pytest.mark.parametrize(
+    "paragraphs",
+    [
+        LEAKY_PARAGRAPHS,  # short, not worded as an offer
+        [*LEAKY_PARAGRAPHS, LEAKY_SUBSCRIBERS],  # says "subscribers", but article-length
+    ],
+    ids=["short", "long-mentions-subscribers"],
+)
+def test_article_text_inside_a_paywall_wrapper_is_kept(paragraphs):
+    # Google's structured-data guidance wraps the PAYWALLED ARTICLE TEXT in
+    # class="paywall"; when a server delivers that text, it is the article.
+    page = _page("paywall_teaser.html")
+    start = page.index('<div class="paywall')
+    end = page.index("</div>", start) + len("</div>")
+    leaky = '<div class="paywall">' + "".join(f"<p>{p}</p>" for p in paragraphs) + "</div>"
+    assert (sum(map(len, paragraphs)) < 1000) == (paragraphs is LEAKY_PARAGRAPHS)
+
+    document, _ = extract_web(page[:start] + leaky + page[end:], url=PAYWALL_URL)
+
+    body = _body(document)
+    assert "Engineers warned on Friday that falling groundwater" in body
+    for paragraph in paragraphs:
+        assert paragraph in body
+
+
+def test_a_page_about_cookies_keeps_its_cookie_sections():
+    # The consent pruning must not eat content that merely mentions cookies in
+    # its class names. (trafilatura itself drops a <section> whose FIRST
+    # attribute is a cookie class, so the section carries an id first.)
+    guide = (
+        "<p>First-party cookies are set by the site you visit and usually keep you signed in. "
+        "Third-party cookies are set by other domains embedded in the page, such as ad "
+        "networks, and can follow you from one site to the next.</p>"
     )
-    for markdown in thin_bodies:
-        serve(markdown)
-        with pytest.raises(ThinPageError, match="https://example.org/thin"):
-            extract_web("<html></html>", url="https://example.org/thin")
+    page = (
+        "<!DOCTYPE html><html><head><title>How cookies track you</title></head>"
+        '<body class="has-cookie-banner">'
+        '<article class="cookie-guide"><h1>How third-party cookies track you</h1>'
+        f"<p>{_prose(300)}</p>"
+        f'<section id="types" class="cookie-types"><h2>Types of cookies</h2>{guide}</section>'
+        "</article>"
+        '<div class="cookie-banner"><p>We use cookies to improve this site.</p>'
+        "<button>OK</button></div></body></html>"
+    )
+    document, _ = extract_web(page, url="https://example.org/privacy/cookies")
+    sections = _sections(document)
+    assert "First-party cookies are set by the site you visit" in sections["Types of cookies"]
+    assert "We use cookies to improve this site." not in _body(document)
+
+
+def _short_article(article_text: str, heading: str = "Short note") -> str:
+    return (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><title>Short note</title>"
+        "</head><body><header><nav><ul><li><a href='/'>Home</a></li><li><a href='/about'>"
+        "About the institute</a></li></ul></nav></header><main><article>"
+        f"<h1>{heading}</h1><p>{article_text}</p></article></main><footer><p>The River "
+        "Basin Institute is a registered charity (no. 1187345). All rights reserved.</p>"
+        "</footer></body></html>"
+    )
+
+
+@pytest.mark.parametrize("length", [199, 200, 201, MIN_BODY_CHARS - 1])
+def test_a_short_article_is_thin_even_where_trafilatura_fuses_its_heading(length):
+    # Below its own 250-character threshold trafilatura swaps its structured
+    # result for a whole-text rescue that fuses the <h1> into the first word
+    # ("Short noteRainfall...") and counts it as body text.
+    with pytest.raises(ThinPageError, match="https://example.org/thin"):
+        extract_web(_short_article(_prose(length)), url="https://example.org/thin")
+
+
+def test_heading_text_does_not_count_toward_the_floor():
+    heading = "Rainfall deficits in the upper Kessa basin and their effect on reservoir storage"
+    with pytest.raises(ThinPageError):
+        extract_web(_short_article(_prose(MIN_BODY_CHARS - 1), heading), url="https://ex.org/a")
+
+    document, _ = extract_web(
+        _short_article(_prose(MIN_BODY_CHARS), heading), url="https://ex.org/b"
+    )
+    assert [(s.title, len(s.text)) for s in document.sections] == [(heading, MIN_BODY_CHARS)]
+
+
+def test_min_body_chars_is_trafilaturas_rescue_threshold():
+    rescue = trafilatura.settings.DEFAULT_CONFIG.getint("DEFAULT", "MIN_EXTRACTED_SIZE")
+    assert MIN_BODY_CHARS == rescue
+
+
+def test_nothing_extractable_is_a_thin_page():
+    for page in ("", "<html></html>", "<html><body><div id='app'></div></body></html>"):
+        with pytest.raises(ThinPageError, match="https://example.org/empty"):
+            extract_web(page, url="https://example.org/empty")
 
 
 # --- (e) encodings -------------------------------------------------------------
@@ -541,6 +994,35 @@ def test_declared_legacy_charset_decodes_like_a_browser():
     assert metadata.authors == ["Lucía Fernández Ibáñez"]
 
 
+def test_charset_inside_another_meta_value_is_not_a_declaration(web_log):
+    page = _page("diario_agua_es.html").replace(
+        '<meta charset="utf-8">',
+        '<meta name="description" content="How to declare charset=utf-8 on legacy pages">'
+        '<meta charset="windows-1252">',
+    )
+    document, _ = extract_web(page.encode("cp1252"), url=DIARIO_URL)
+    assert "“La reducción es real, pero frágil”" in _body(document)
+    assert not web_log.records
+
+
+def test_utf16_page_with_a_byte_order_mark_decodes():
+    page = _page("diario_agua_es.html").replace('<meta charset="utf-8">', '<meta charset="utf-16">')
+    document, metadata = extract_web(page.encode("utf-16"), url=DIARIO_URL)
+    assert "La Organización Mundial de la Salud informó" in _body(document)
+    assert metadata.authors == ["Lucía Fernández Ibáñez"]
+
+
+def test_utf16_label_on_ascii_compatible_bytes_means_utf8(web_log):
+    # WHATWG: a declaration readable as ASCII cannot be UTF-16, so the label
+    # means UTF-8 — decoding these bytes as UTF-16 would yield CJK-looking noise.
+    page = _page("diario_agua_es.html").replace('<meta charset="utf-8">', '<meta charset="utf-16">')
+    document, _ = extract_web(page.encode("cp1252"), url=DIARIO_URL)
+    body = _body(document)
+    assert "Mundial de la Salud inform" in body
+    assert "�" in body  # the cp1252 accents, replaced
+    assert [r for r in web_log.records if r.levelno == logging.WARNING]
+
+
 def test_undeclared_non_utf8_bytes_fail_loudly_naming_the_url():
     page = _page("diario_agua_es.html").replace('<meta charset="utf-8">', "")
     with pytest.raises(ValueError) as excinfo:
@@ -566,7 +1048,8 @@ def test_declared_utf8_with_a_stray_invalid_byte_decodes_with_a_warning(web_log)
     document, _ = extract_web(damaged, url=DIARIO_URL)
 
     assert "S�o Paulo" in _body(document)
-    assert [record for record in web_log.records if DIARIO_URL in record.getMessage()]
+    naming = [record for record in web_log.records if DIARIO_URL in record.getMessage()]
+    assert naming and all(record.levelno == logging.WARNING for record in naming)
 
 
 # --- (f) hostname is not a publisher -------------------------------------------
@@ -602,17 +1085,55 @@ def test_extraction_is_deterministic(name, url):
     assert extract_web(page, url=url) == extract_web(page, url=url)
 
 
-def test_document_title_falls_back_to_first_heading_then_none(monkeypatch):
-    body = "a" * MIN_BODY_CHARS
-    monkeypatch.setattr(
-        web_mod.trafilatura,
-        "extract",
-        lambda *args, **kwargs: f"# **First** heading\n\n## Second\n\n{body}",
+def test_extraction_is_deterministic_across_hash_seeds():
+    # Same-process calls share one string-hash seed, so set- or hash-ordered
+    # output would still compare equal there. Separate interpreters do not.
+    backend = Path(web_mod.__file__).resolve().parents[1]
+    script = (
+        "import dataclasses, json, pathlib, sys\n"
+        "import authorai.web as web\n"
+        "print(pathlib.Path(web.__file__).resolve())\n"
+        "page = pathlib.Path(sys.argv[1]).read_bytes()\n"
+        "document, metadata = web.extract_web(page, url=sys.argv[2])\n"
+        "output = [dataclasses.asdict(document), dataclasses.asdict(metadata)]\n"
+        "print(json.dumps(output, sort_keys=True))\n"
     )
-    document, metadata = extract_web("<html><head></head></html>", url="https://example.org/a")
-    assert metadata.title is None
-    assert document.title == "First heading"
+    outputs = []
+    for seed in ("1", "2", "3"):
+        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(backend)}
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(FIXTURES / "report_jsonld_graph.html"), REPORT_URL],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=backend,
+            check=True,
+        )
+        imported, payload = result.stdout.splitlines()
+        assert imported == str(Path(web_mod.__file__).resolve())  # this checkout's code ran
+        outputs.append(payload)
+    assert outputs[0] == outputs[1] == outputs[2]
+    document, metadata = extract_web(_page("report_jsonld_graph.html"), url=REPORT_URL)
+    assert json.loads(outputs[0]) == json.loads(
+        json.dumps([dataclasses.asdict(document), dataclasses.asdict(metadata)])
+    )
 
-    monkeypatch.setattr(web_mod.trafilatura, "extract", lambda *args, **kwargs: body)
-    document, _ = extract_web("<html></html>", url="https://example.org/b")
+
+def test_document_title_falls_back_to_first_heading_then_none():
+    page = (
+        "<!DOCTYPE html><html><head></head><body><main><article>"
+        "<h1><strong>First</strong> heading</h1><h2>Second</h2>"
+        f"<p>{_prose(400)}</p></article></main></body></html>"
+    )
+    document, metadata = extract_web(page, url="https://example.org/a")
+    assert metadata.title is None
+    assert [s.title for s in document.sections] == ["Second"]
+    assert document.title == "First heading"  # its own section was empty and dropped
+
+    headless = (
+        f"<!DOCTYPE html><html><body><main><article><p>{_prose(400)}</p></article></main>"
+        "</body></html>"
+    )
+    document, _ = extract_web(headless, url="https://example.org/b")
+    assert [s.title for s in document.sections] == [""]
     assert document.title is None
