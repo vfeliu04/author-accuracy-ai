@@ -1,5 +1,5 @@
 import type { JobProgressStep, Report, ReportSource, RunUpload, SourceType } from "../api/types";
-import { humanizeError, namedLink } from "../lib/errors";
+import { humanizeError, linksNamedIn } from "../lib/errors";
 import { linkHostPath, sourceName } from "../lib/links";
 import { scoreBand } from "../lib/score";
 
@@ -38,10 +38,12 @@ function SourceGlyph({ type }: { type: SourceType }) {
 function UploadStatus({
   upload,
   ingestStatus,
+  failed,
   runError
 }: {
   upload: RunUpload;
   ingestStatus: JobProgressStep["status"] | undefined;
+  failed: boolean;
   runError: string | null;
 }) {
   if (upload.url === null || ingestStatus === "done") {
@@ -52,7 +54,7 @@ function UploadStatus({
     );
   }
   if (ingestStatus === "failed") {
-    return runError !== null && namedLink(runError) === upload.url ? (
+    return failed ? (
       <span className="src-status src-status--failed" title={humanizeError(runError) ?? undefined}>
         {"Couldn't open"}
       </span>
@@ -90,6 +92,15 @@ export default function SourcesPanel({
   const reportUpload = uploads.find((upload) => upload.kind === "REPORT");
   const sourceUploads = uploads.filter((upload) => upload.kind === "SOURCE");
   const claimCount = report?.stats.claims_total ?? 0;
+  // The links a failed read names, found among the links as added: the message
+  // may quote a link, cut a long one short, or name where it redirected first.
+  const failedLinks =
+    ingestStatus === "failed" && runError !== null
+      ? linksNamedIn(
+          runError,
+          sourceUploads.flatMap((upload) => (upload.url === null ? [] : [upload.url]))
+        )
+      : [];
 
   return (
     <aside className="panel panel--sources">
@@ -159,7 +170,12 @@ export default function SourcesPanel({
                     <div className="src-row__name">{upload.file_name}</div>
                   )}
                 </div>
-                <UploadStatus upload={upload} ingestStatus={ingestStatus} runError={runError} />
+                <UploadStatus
+                  upload={upload}
+                  ingestStatus={ingestStatus}
+                  failed={upload.url !== null && failedLinks.includes(upload.url)}
+                  runError={runError}
+                />
               </div>
             ))}
           </>

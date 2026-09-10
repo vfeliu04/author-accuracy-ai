@@ -22,6 +22,10 @@ const uploads: RunUpload[] = [
   }
 ];
 
+function linkUpload(id: string, url: string): RunUpload {
+  return { id, kind: "SOURCE", file_name: url, source_type: "web", url };
+}
+
 const sources: ReportSource[] = [
   {
     doc_id: "a",
@@ -127,6 +131,89 @@ describe("SourcesPanel", () => {
     expect(flag).toHaveAttribute("title", expect.stringContaining("The site returned an error (404)."));
     expect(screen.getAllByText("Couldn't open")).toHaveLength(1);
     expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+  });
+
+  it("flags a failed link whose address has parentheses, with the reason on hover", () => {
+    const wiki = "https://en.wikipedia.org/wiki/Mercury_(planet)";
+    render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("w", wiki)]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={`FetchError: Could not read ${wiki}: HTTP 404`}
+      />
+    );
+    expect(screen.getByText("Couldn't open")).toHaveAttribute(
+      "title",
+      `${wiki} — The site returned an error (404).`
+    );
+  });
+
+  it("flags only the failed link, not another link its address starts with", () => {
+    const report = "https://example.org/report";
+    const yearly = "https://example.org/report-2024";
+    render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("a", report), linkUpload("b", yearly)]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={`FetchError: Fetching '${yearly}' failed: the server answered HTTP 404`}
+      />
+    );
+    expect(screen.getAllByText("Couldn't open")).toHaveLength(1);
+    const row = screen.getByText("example.org/report-2024").closest(".src-row");
+    expect(row).toContainElement(screen.getByText("Couldn't open"));
+  });
+
+  it("flags the added link when the failure names where it redirected first", () => {
+    render(
+      <SourcesPanel
+        uploads={uploads}
+        report={undefined}
+        ingestStatus="failed"
+        runError="FetchError: Fetching 'https://www.example.org/water/report-2024/' (redirected from 'https://example.org/water/report-2024') failed: the server answered HTTP 404"
+      />
+    );
+    expect(screen.getAllByText("Couldn't open")).toHaveLength(1);
+    const row = screen.getByText("example.org/water/report-2024").closest(".src-row");
+    expect(row).toContainElement(screen.getByText("Couldn't open"));
+  });
+
+  it("flags a long link the failure message cut short", () => {
+    const long = `https://example.org/${"a".repeat(300)}`;
+    render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("l", long)]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={`FetchError: Fetching '${long.slice(0, 200)}...' failed: the server answered HTTP 404`}
+      />
+    );
+    expect(screen.getByText("Couldn't open")).toBeInTheDocument();
+  });
+
+  it("keeps listing the uploads until the run is done, even once its documents exist", () => {
+    const { rerender } = render(
+      <SourcesPanel
+        uploads={uploads}
+        report={{ ...doneReport, status: "RUNNING", scores: null }}
+        ingestStatus="running"
+      />
+    );
+    expect(screen.getByText("Sources (3)")).toBeInTheDocument();
+    expect(screen.getAllByText("Queued")).toHaveLength(2);
+    expect(screen.queryByText("IPCC Chapter 3")).not.toBeInTheDocument();
+
+    rerender(
+      <SourcesPanel
+        uploads={uploads}
+        report={{ ...doneReport, status: "FAILED", scores: null }}
+        ingestStatus="done"
+      />
+    );
+    expect(screen.getByText("Sources (3)")).toBeInTheDocument();
+    expect(screen.getAllByTitle("Received")).toHaveLength(3);
+    expect(screen.queryByText("IPCC Chapter 3")).not.toBeInTheDocument();
   });
 
   it("lists every source of a finished report, scored, unscored, and not scorable", () => {

@@ -42,8 +42,14 @@ describe("checkLink", () => {
     const atLimit = `${prefix}${"a".repeat(MAX_LINK_LENGTH - prefix.length)}`;
     expect(atLimit).toHaveLength(MAX_LINK_LENGTH);
     expect(checkLink(atLimit, [])).toEqual({ link: atLimit });
-    const result = checkLink(`${atLimit}b`, []);
-    expect("error" in result && result.error).toMatch(/2,048 characters/);
+    expect(checkLink(`${atLimit}b`, [])).toEqual({ error: "That link is too long to add." });
+  });
+
+  it("measures a link as it will be sent, and never quotes a length the typed text doesn't reach", () => {
+    // 1,020 characters as typed; each "é" is sent as "%C3%A9".
+    const typed = `https://example.org/${"é".repeat(1000)}`;
+    expect(typed.length).toBeLessThan(MAX_LINK_LENGTH);
+    expect(checkLink(typed, [])).toEqual({ error: "That link is too long to add." });
   });
 
   it("refuses a duplicate, including one that differs only by its #fragment or spacing", () => {
@@ -93,6 +99,23 @@ describe("link display helpers", () => {
       "example.org/water/report 2024"
     );
     expect(linkHostPath("https://example.org/bad%E0%A4%A")).toBe("example.org/bad%E0%A4%A");
+  });
+
+  it("shows an international host as it is written", () => {
+    // Compared and sent in one spelling; shown the way people read it.
+    expect(checkLink("https://bücher.de/katalog", [])).toEqual({
+      link: "https://xn--bcher-kva.de/katalog"
+    });
+    expect(linkHost("https://xn--bcher-kva.de/katalog")).toBe("bücher.de");
+    expect(linkHostPath("https://xn--mnchen-3ya.de:8080/stadt")).toBe("münchen.de:8080/stadt");
+    expect(linkHost("https://www.xn--wgv71a119e.jp/")).toBe("www.日本語.jp");
+    expect(sourceName({ title: null, url: "https://xn--fiqs8s.cn/news" }, "x")).toBe("中国.cn/news");
+  });
+
+  it("keeps a host that mixes Latin with look-alike letters in its encoded form", () => {
+    // "аpple.com" with a Cyrillic "а" must not pass for apple.com.
+    expect(linkHost("https://аpple.com/")).toBe("xn--pple-43d.com");
+    expect(linkHostPath("https://xn--pple-43d.com/login")).toBe("xn--pple-43d.com/login");
   });
 
   it("falls back to the raw text when it isn't a link", () => {

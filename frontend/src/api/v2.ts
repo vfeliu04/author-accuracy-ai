@@ -135,7 +135,14 @@ export async function fetchDocumentJson(runId: string, docId: string): Promise<u
   if (!response.ok) {
     await raise(response);
   }
-  return response.json() as Promise<unknown>;
+  try {
+    return (await response.json()) as unknown;
+  } catch {
+    // Not a stored page at all (a damaged file, or something other than the
+    // app answering): asking again can't change that, and the parser's words
+    // are not the reader's.
+    throw new UnreadablePageError("This page's saved text can't be read.");
+  }
 }
 
 // A stored page this version can't show. The message is written for the

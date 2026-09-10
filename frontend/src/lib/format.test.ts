@@ -33,6 +33,7 @@ describe("citeLabel", () => {
   });
 
   it("cites a video by start time, with hours past the hour", () => {
+    expect(citeLabel({ ...none, source_type: "youtube", start_seconds: 0 })).toBe("0:00");
     expect(citeLabel({ ...none, source_type: "youtube", start_seconds: 754 })).toBe("12:34");
     expect(citeLabel({ ...none, source_type: "youtube", start_seconds: 3723 })).toBe("1:02:03");
     expect(citeLabel({ ...none, source_type: "youtube", page: 4 })).toBeNull();

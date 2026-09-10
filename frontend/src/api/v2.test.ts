@@ -152,6 +152,16 @@ describe("v2 fetchers", () => {
     );
     await expect(fetchDocumentJson("r1", "nope")).rejects.toThrow("No such document in this run");
   });
+
+  it("fetchDocumentJson refuses a body that isn't a stored page, with a sentence for the reader", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("%PDF-1.4 binary", { status: 200 }))
+    );
+    const read = fetchDocumentJson("r1", "d1");
+    await expect(read).rejects.toThrow(UnreadablePageError);
+    await expect(read).rejects.toThrow(/^This page's saved text can't be read\.$/);
+  });
 });
 
 const page: PageSnapshot = {

@@ -63,21 +63,94 @@ const ERROR_HINTS: ErrorHint[] = [
   }
 ];
 
-// The first link a message names, without the quotes or sentence punctuation
-// wrapped around it.
+// A link in a message runs to the first space, double quote, or angle bracket.
+// Parentheses, square brackets, and apostrophes can belong to a link
+// (".../wiki/Mercury_(planet)", ".../it's-here"), so they are kept here and
+// trimmed below only when they belong to the sentence instead.
+const LINK = /https?:\/\/[^\s"<>]+/gi;
+
+// How the server marks a long link it shortened for the message.
+const CUT_MARK = "...";
+
+type NamedLink = { link: string; cut: boolean };
+
+function count(text: string, char: string): number {
+  return text.split(char).length - 1;
+}
+
+// One matched link without what follows it in the sentence: punctuation, the
+// quote around it, a bracket closing text the link never opened, and a cut
+// mark come off the end until the last character belongs to the link.
+function trimLink(raw: string): NamedLink {
+  let link = raw;
+  let cut = false;
+  for (;;) {
+    const last = link.slice(-1);
+    if (link.endsWith(CUT_MARK)) {
+      link = link.slice(0, -CUT_MARK.length);
+      cut = true;
+    } else if (
+      /[.,;:!?]/.test(last) ||
+      (last === "'" && count(link, "'") % 2 === 1) ||
+      (last === ")" && count(link, "(") < count(link, ")")) ||
+      (last === "]" && count(link, "[") < count(link, "]"))
+    ) {
+      link = link.slice(0, -1);
+    } else {
+      return { link, cut };
+    }
+  }
+}
+
+function namedLinks(error: string): NamedLink[] {
+  return Array.from(error.matchAll(LINK), (found) => trimLink(found[0]));
+}
+
+// The first link a message names, without the quotes, brackets, or sentence
+// punctuation around it.
 export function namedLink(error: string): string | null {
-  const found = /https?:\/\/[^\s'"<>()[\]]+/i.exec(error);
-  return found ? found[0].replace(/[.,;:!?]+$/, "") : null;
+  return namedLinks(error)[0]?.link ?? null;
+}
+
+// The message with every link blanked out, so words in an address
+// (".../billing", ".../batch-jobs", ".../deadlines") never pick a translation.
+function withoutLinks(error: string): string {
+  return error.replace(LINK, (raw) => ` ${raw.slice(trimLink(raw).link.length)}`);
+}
+
+function appearsWhole(error: string, link: string, links: readonly string[]): boolean {
+  if (link === "") return false;
+  for (let at = error.indexOf(link); at !== -1; at = error.indexOf(link, at + 1)) {
+    const longer = links.some((other) => other.length > link.length && error.startsWith(other, at));
+    if (!longer) return true;
+  }
+  return false;
+}
+
+// Which of a run's added links a failure message names. A link counts where
+// it appears whole, unless a longer added link starting the same way is what
+// appears there (".../report" inside ".../report-2024"), or where the message
+// cut a long link short and the added link starts with what is left.
+export function linksNamedIn(error: string, links: readonly string[]): string[] {
+  const cutStarts = namedLinks(error)
+    .filter((named) => named.cut)
+    .map((named) => named.link);
+  return links.filter(
+    (link) =>
+      appearsWhole(error, link, links) || cutStarts.some((start) => link.startsWith(start))
+  );
 }
 
 export function humanizeError(error: string | null): string | null {
   if (!error) return null;
-  const link = namedLink(error);
+  const first = namedLinks(error)[0];
+  const shown = first ? `${first.link}${first.cut ? "…" : ""}` : null;
+  const words = withoutLinks(error);
   for (const { match, hint, aboutLink, needsLink } of ERROR_HINTS) {
-    const found = match.exec(error);
-    if (found === null || (needsLink && link === null)) continue;
+    const found = match.exec(words);
+    if (found === null || (needsLink && shown === null)) continue;
     const sentence = hint(found);
-    return aboutLink && link !== null ? `${link} — ${sentence}` : sentence;
+    return aboutLink && shown !== null ? `${shown} — ${sentence}` : sentence;
   }
   return null;
 }

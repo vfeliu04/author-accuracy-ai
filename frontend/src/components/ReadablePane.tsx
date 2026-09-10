@@ -37,17 +37,19 @@ function splitBlocks(text: string): Block[] {
 type Located = { section: number; range: TextRange };
 
 // The cited section is searched first — the same words can appear in more
-// than one — then every other section in page order.
+// than one — then every other section in page order. A quote from an untitled
+// section is cited with no section name, so no name means the untitled ones.
 function findQuote(
   sections: PageSection[],
   quote: string | null,
   cited: string | null
 ): Located | null {
   if (!quote) return null;
+  const name = cited ?? "";
   const indexes = sections.map((_, index) => index);
   const ordered = [
-    ...indexes.filter((index) => sections[index].title === cited),
-    ...indexes.filter((index) => sections[index].title !== cited)
+    ...indexes.filter((index) => sections[index].title === name),
+    ...indexes.filter((index) => sections[index].title !== name)
   ];
   for (const index of ordered) {
     const range = locateQuote(sections[index].text, quote);
@@ -132,7 +134,8 @@ export default function ReadablePane({
   }
 
   const { provenance, document: content } = page;
-  const original = provenance.final_url || url || "";
+  // Where the page ended up, else the link as added, else the address it recorded.
+  const original = provenance.final_url || url || provenance.url;
   const href = safeHttpUrl(original);
   const title = content.title || provenance.title || (href ? linkHost(href) : "Untitled page");
 

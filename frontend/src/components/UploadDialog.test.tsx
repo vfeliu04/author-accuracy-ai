@@ -198,6 +198,55 @@ describe("UploadDialog", () => {
     expect(form.getAll("source_urls")).toEqual(["https://example.org/a", "https://example.org/b"]);
   });
 
+  it("sends a link typed into the box but not yet added", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ run_id: "r", job_id: "j" }), {
+          status: 202,
+          headers: { "Content-Type": "application/json" }
+        })
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onClose = renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), pdf("s.pdf")] } });
+    await waitFor(() => expect(screen.getByText("s.pdf")).toBeInTheDocument());
+
+    typeLink("https://example.org/the-key-source");
+    fireEvent.click(verify());
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const form = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
+    expect(form.getAll("source_urls")).toEqual(["https://example.org/the-key-source"]);
+  });
+
+  it("holds Verify on a link in the box that can't be added, and says why", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    const onClose = renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), pdf("s.pdf")] } });
+    await waitFor(() => expect(screen.getByText("s.pdf")).toBeInTheDocument());
+
+    typeLink("https://youtu.be/abc123def45");
+    fireEvent.click(verify());
+    expect(screen.getByText("YouTube links aren't supported yet.")).toBeInTheDocument();
+    expect(linkInput()).toHaveValue("https://youtu.be/abc123def45");
+    expect(create).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("adds a link in the box that would pass the source limit, instead of sending anything", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    renderDialog();
+    const files = Array.from({ length: 21 }, (_, index) => pdf(`doc${index}.pdf`));
+    fireEvent.change(fileInput(), { target: { files } });
+    await waitFor(() => expect(screen.getByText("Sources (20)")).toBeInTheDocument());
+
+    typeLink("https://example.org/one-more");
+    fireEvent.click(verify());
+    expect(screen.getByText("Sources (21)")).toBeInTheDocument();
+    expect(screen.getByText("At most 20 sources per verification.")).toBeInTheDocument();
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("counts links toward the source limit", async () => {
     renderDialog();
     const files = Array.from({ length: 21 }, (_, index) => pdf(`doc${index}.pdf`));

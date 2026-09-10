@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { queryKeys, useDeleteRun, useRuns } from "./queries";
+import { queryKeys, useDeleteRun, useRuns, useSnapshot } from "./queries";
 import * as v2 from "./v2";
 
 function makeWrapper(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
@@ -80,5 +80,25 @@ describe("useDeleteRun", () => {
     expect(client.getQueryData(queryKeys.snapshot("r1", "d2"))).toBeUndefined();
     // Another run's pages stay cached.
     expect(client.getQueryData(queryKeys.snapshot("r2", "d3"))).toEqual({ schema: 1 });
+  });
+});
+
+describe("useSnapshot", () => {
+  it("reads a run's stored page once, and not again when the page is shown again", async () => {
+    const read = vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue({
+      schema: 1,
+      document: { title: "Water in Crisis", sections: [{ title: "", page: null, text: "Body" }] },
+      provenance: { url: "https://example.org/w", final_url: "https://example.org/w" }
+    });
+    const wrapper = makeWrapper();
+
+    const first = renderHook(() => useSnapshot("r1", "d1"), { wrapper });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+    first.unmount();
+
+    const second = renderHook(() => useSnapshot("r1", "d1"), { wrapper });
+    expect(second.result.current.data?.document.title).toBe("Water in Crisis");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(read).toHaveBeenCalledTimes(1);
   });
 });

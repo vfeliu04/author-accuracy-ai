@@ -69,17 +69,23 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
-  // A rejected link stays in the box so it can be corrected in place.
-  const addLink = () => {
-    if (linkText.trim() === "") return;
+  // Adds the link in the box and returns the new list. A rejected link stays in
+  // the box, with the reason, so it can be corrected in place.
+  const commitLink = (): string[] | null => {
     const result = checkLink(linkText, links);
     if ("error" in result) {
       setLinkError(result.error);
-      return;
+      return null;
     }
-    setLinks([...links, result.link]);
+    const next = [...links, result.link];
+    setLinks(next);
     setLinkText("");
     setLinkError(null);
+    return next;
+  };
+
+  const addLink = () => {
+    if (linkText.trim() !== "") commitLink();
   };
 
   const removeReport = () => {
@@ -117,8 +123,16 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
 
   const submit = () => {
     if (!report) return;
+    // A link still in the box was meant to go too, so it is added first; one
+    // that can't be added, or that passes the limit, holds the upload.
+    let submitted = links;
+    if (linkText.trim() !== "") {
+      const next = commitLink();
+      if (next === null || sources.length + next.length > MAX_SOURCES) return;
+      submitted = next;
+    }
     create.mutate(
-      { report, sources, links, title: name },
+      { report, sources, links: submitted, title: name },
       {
         onSuccess: (data) => {
           onClose();

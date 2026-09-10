@@ -138,6 +138,21 @@ describe("FocusCredibility", () => {
     expect(document.body.textContent).not.toMatch(/NaN|undefined/);
   });
 
+  it("says a run with no sources has none to score, instead of a number", () => {
+    renderAt(
+      reportWith({
+        scores: { accuracy: 0.9, coverage: 0.6, credibility: null, validity: 0.5 },
+        credibility_detail: { method: "no_sources", sources: [], excluded: [] },
+        sources: []
+      })
+    );
+    const text = aggregate().textContent ?? "";
+    expect(text).toContain("—");
+    expect(text).toContain("No sources to score");
+    expect(text).not.toMatch(/\d/);
+    expect(document.body.textContent).not.toMatch(/NaN|undefined/);
+  });
+
   it("stays null-safe for a run without stored credibility detail", () => {
     renderAt(reportWith({ scores: null, credibility_detail: null, sources: [unscored] }));
     expect(aggregate().textContent).toContain("—");

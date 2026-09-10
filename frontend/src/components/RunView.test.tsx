@@ -126,7 +126,8 @@ afterEach(() => vi.restoreAllMocks());
 describe("RunView", () => {
   it("shows progress, upload filenames, and a locked chat while running", async () => {
     vi.spyOn(v2, "getRun").mockResolvedValue(runningDetail);
-    vi.spyOn(v2, "getReport").mockResolvedValue(runningReport);
+    // The documents exist once they have been read; the panel still lists the uploads.
+    vi.spyOn(v2, "getReport").mockResolvedValue({ ...runningReport, sources: doneReport.sources });
     renderAt("r");
     await waitFor(() =>
       expect(screen.getByText("Verifying this report against its sources")).toBeInTheDocument()
@@ -140,6 +141,7 @@ describe("RunView", () => {
     expect(screen.getByText("coastal_brief.pdf")).toBeInTheDocument();
     expect(screen.getByText("example.org/water/report")).toBeInTheDocument();
     expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+    expect(screen.queryByText("Src")).not.toBeInTheDocument();
     expect(
       screen.getByPlaceholderText("Chat unlocks when verification completes…")
     ).toBeDisabled();

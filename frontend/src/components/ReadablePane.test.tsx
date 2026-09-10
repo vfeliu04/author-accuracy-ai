@@ -66,6 +66,7 @@ beforeEach(() => {
 afterEach(() => {
   Element.prototype.scrollIntoView = originalScrollIntoView;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ReadablePane", () => {
@@ -91,6 +92,16 @@ describe("ReadablePane", () => {
     const open = await screen.findByRole("link", { name: "Open original ↗" });
     expect(open).toHaveAttribute("href", "https://example.org/water?ref=1");
     expect(screen.queryByText("Example Institute")).not.toBeInTheDocument();
+  });
+
+  it("links the address the page recorded when nothing else names one", async () => {
+    vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue({
+      ...page,
+      provenance: { ...page.provenance, final_url: "" }
+    });
+    renderPane({ url: null });
+    const open = await screen.findByRole("link", { name: "Open original ↗" });
+    expect(open).toHaveAttribute("href", "https://example.org/water");
   });
 
   it("renders sections as headings and paragraphs, and table rows in their own block", async () => {
@@ -159,6 +170,40 @@ describe("ReadablePane", () => {
     expect(section).toContainElement(screen.getByRole("heading", { name: "Data" }));
   });
 
+  it("finds a quote that sits outside the cited section", async () => {
+    vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(page);
+    const { container } = renderPane({ quote: "Surveys ran in 2023", section: "Findings" });
+    await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(1));
+    const section = (container.querySelector("mark") as HTMLElement).closest("section");
+    expect(section).toContainElement(screen.getByRole("heading", { name: "Methods" }));
+  });
+
+  it("finds a quote cited without a section name, wherever it sits", async () => {
+    vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(page);
+    const { container } = renderPane({ quote: "two billion people lack", section: null });
+    await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(1));
+    const section = (container.querySelector("mark") as HTMLElement).closest("section");
+    expect(section).toContainElement(screen.getByRole("heading", { name: "Findings" }));
+  });
+
+  it("prefers an untitled section for a quote cited without a section name", async () => {
+    // An untitled section's quotes arrive with no section name at all.
+    vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue({
+      ...page,
+      document: {
+        title: "Repeats",
+        sections: [
+          { title: "Intro", page: null, text: "Water use rose." },
+          { title: "", page: null, text: "Water use rose." }
+        ]
+      }
+    });
+    const { container } = renderPane({ quote: "Water use rose", section: null });
+    await waitFor(() => expect(container.querySelectorAll("mark")).toHaveLength(1));
+    const section = (container.querySelector("mark") as HTMLElement).closest("section");
+    expect(section).toHaveAttribute("data-section", "1");
+  });
+
   it("scrolls to the cited section when the quote isn't on the page", async () => {
     vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(page);
     const { container } = renderPane({
@@ -207,6 +252,18 @@ describe("ReadablePane", () => {
     const origin = await screen.findByText("javascript:alert(1)");
     expect(origin.closest("a")).toBeNull();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("says at once, in plain words, when a stored page can't be read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(new Response("%PDF-1.4 binary", { status: 200 })))
+    );
+    renderPane();
+    expect(await screen.findByText("This page's saved text can't be read.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/JSON|Unexpected token|Could not load/);
   });
 
   it("refuses, visibly, a page stored in a format it can't read", async () => {
