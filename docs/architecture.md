@@ -21,7 +21,7 @@ flowchart TD
     D --> E["verify<br/>per-claim SOURCE-only hybrid retrieval →<br/>Batch API verdicts → code-side quote check → verdicts"]
     E --> F["score<br/>stance-aware accuracy (code) + Crossref credibility<br/>+ validity rubric → run_scores"]
     F --> G["finish_job_and_run<br/>job DONE + run DONE in one transaction"]
-    G --> H["Frontend polls /api/runs/:id + /report<br/>run view, claims forkspace, chat"]
+    G --> H["Frontend polls /api/runs/:id + /report<br/>run view, claims focus, chat"]
 ```
 
 Each step is recorded in the job's `progress` JSON (`{step, label, status, ts}`, upserted by step name). A restart re-queues any `RUNNING` job and resumes from its first incomplete step — see [Jobs](#jobs-jobspy).
@@ -117,7 +117,7 @@ All failure-prone external work (parsing, figure descriptions, the embedding cal
 
 - consent banners (`cookie` or `consent` in an id or class, but never on, inside, or around the `<article>` or `<main>`), modal dialogs (`role="dialog"`, `role="alertdialog"`, or `aria-modal="true"`, unless they hold the article), and paywall prompts (`paywall` in an id or class, under 1000 characters, and worded as a subscription offer) are pruned;
 - comments, images, and links are not extracted;
-- emphasis tags are unwrapped, so chunk text quoted as evidence carries no Markdown markers;
+- emphasis tags are unwrapped, so chunk text quoted as evidence carries no Markdown emphasis markers;
 - a `<sup>` or `<sub>` holding only digits and signs becomes plain text (`10<sup>6</sup>` → `10^6`, `CO<sub>2</sub>` → `CO2`), a `<sup>` holding a link (a footnote marker) is removed, and any other is unwrapped;
 - a table nested in a table is flattened into its cell (cells joined by `, `, rows by `; `).
 
@@ -133,7 +133,7 @@ trafilatura runs in fast mode, and its full extraction cascade runs only when fa
 | publication date | `citation_publication_date` > `citation_date` > JSON-LD `datePublished` > `article:published_time` |
 | DOI | `citation_doi` > JSON-LD `identifier` or `sameAs` DOI |
 
-Every JSON-LD value comes from one node, the page's own work: among article-type nodes (`Article`, `NewsArticle`, `BlogPosting`, `Report`, `ScholarlyArticle`), the one whose `url`, `@id`, or `mainEntityOfPage` names this URL, else the first; page-type nodes (`WebPage` and its subtypes) are considered only when there is no article node. A page can embed records of other works — the study a news story reports on — whose authors and DOI are not the page's. A winning DOI that fails validation becomes null rather than falling through. Dates normalize to ISO (`YYYY-MM-DD`, `YYYY-MM`, or `YYYY`) when they parse and stay as printed otherwise, and `scholarly` is true when the page carries any `citation_*` tag. A malformed JSON-LD block is skipped with a warning naming the page.
+Every JSON-LD value comes from one node, the page's own work, except that an author or publisher that node gives only as an `@id` reference is resolved within the page's graph. That node is, among article-type nodes (`Article`, `NewsArticle`, `BlogPosting`, `Report`, `ScholarlyArticle`), the one whose `url`, `@id`, or `mainEntityOfPage` names this URL, else the first; page-type nodes (`WebPage` and its subtypes) are considered only when there is no article node. A page can embed records of other works — the study a news story reports on — whose authors and DOI are not the page's. A winning DOI that fails validation becomes null rather than falling through. Dates normalize to ISO (`YYYY-MM-DD`, `YYYY-MM`, or `YYYY`) when they parse and stay as printed otherwise, and `scholarly` is true when the page carries any `citation_*` tag. A malformed JSON-LD block is skipped with a warning naming the page.
 
 Metadata is never taken from trafilatura's own metadata (its site name can be derived from the hostname, and its date search is heuristic), never from the hostname (publisher authority matches whole words, so `who-cares.com` would match `WHO` on the tier-1 list), and never from body text (reference lists describe other works).
 
@@ -141,7 +141,7 @@ Metadata is never taken from trafilatura's own metadata (its site name can be de
 
 `POST /api/runs` checks a link's syntax and records it as an upload with `source_type='web'`, the normalized link as both `url` and `file_name`, no `content_hash`, and a **planned** path, `uploads_dir/<id>.json`. The request fetches nothing.
 
-The ingest step begins with a **fetch pass**: every link upload whose stored file does not exist yet is fetched ([Fetching links](#fetching-links-fetchpy)) before any document is processed, so a link that cannot be read fails the run in seconds — before the report's Docling parse, figure captions, or embeddings run. What the link serves decides what is stored:
+The ingest step begins with a **fetch pass**: each link upload whose stored file does not exist yet is fetched ([Fetching links](#fetching-links-fetchpy)), one at a time in the order the links were added, before any document is processed, so a link that cannot be read fails the run in seconds — before the report's Docling parse, figure captions, or embeddings run. The pass stops at the first link that fails; links after it are not fetched until the retry. What the link serves decides what is stored:
 
 - **A web page** is read by `extract_web` and written to the planned path as a **snapshot**, atomically (a `.part` file, then `os.replace`) and with sorted keys, so its bytes depend only on its content.
 - **A PDF** is written beside it as `<id>.pdf` (the same `.part`, then rename), and one update (`record_fetch`) records the path, `source_type='pdf'`, and the SHA-256 `content_hash`. From then on it is an uploaded PDF in every respect — Docling parse, figure captions, and dedup by its bytes — and `url` still records the link.
@@ -163,13 +163,13 @@ A snapshot (shown indented), which is also what the file endpoint serves for a w
 }
 ```
 
-`provenance` records the link as added (`url`), where it ended up after redirects (`final_url`), when it was fetched, the served media type, and the page's declared metadata. `load_snapshot` refuses any schema other than 1 and any malformed file, and the frontend refuses an unknown schema too. Ingesting a snapshot copies its `provenance` into `documents.metadata`, where credibility scoring reads it.
+`provenance` records the link as normalized at upload (`url`), where it ended up after redirects (`final_url`), when it was fetched, the served media type, and the page's declared metadata. `load_snapshot` refuses any schema other than 1 and any malformed file, and the frontend refuses an unknown schema too. Ingesting a snapshot copies its `provenance` into `documents.metadata`, where credibility scoring reads it.
 
 Files are written before the row changes, so a crash leaves at most an orphan file, never a row pointing at nothing. A stored file is never fetched again: a retry or startup recovery skips any link whose file exists, and a torn page ingest re-ingests from its snapshot. Pages are not hashed, so a page never reuses, or donates to, another run's ingest.
 
 **Decoding.** When the fetched body is not valid UTF-8 and the HTTP `Content-Type` names a charset, the ingest step decodes the body with that charset (`iso-8859-1` and `ascii` as windows-1252, as browsers do; an unknown label is ignored). Otherwise `extract_web` decodes the bytes itself: a UTF-16 byte-order mark first, then UTF-8 whenever the bytes are valid UTF-8, then a `<meta>` charset declared in the first 4096 bytes (ISO-8859-1 and ASCII labels as windows-1252, a UTF-16 label as UTF-8). Bytes that fit none of these fail loudly, naming the URL — a guessed encoding would corrupt text that is later quoted as evidence.
 
-**Failures name the link.** A `FetchError` (blocked address, DNS failure, HTTP error status, unsupported content type, a response over its cap, timed out, too many redirects) or a `ThinPageError` fails the step, and the run's error, `<ExceptionType>: <message>`, names the link. The retry endpoint re-runs the step, fetching only what is still missing. A `youtube` upload fails the pass with `YouTube sources are not supported yet`; the API refuses YouTube links before such a row can exist. The step label counts both kinds of saved work: `Ingested N documents (F fetched, M reused)`.
+**Failures name the link.** A `FetchError` (blocked address, DNS failure, HTTP error status, unsupported content type, a response over its cap, timed out, too many redirects) or a `ThinPageError` fails the step, and the run's error, `<ExceptionType>: <message>`, names the link. A fetch error that fails at a redirect target names both addresses: `'<target>' (redirected from '<link>')`. Reading the page sees only where the link ended up, so after a redirect a `ThinPageError`, or the `ValueError` for bytes that cannot be decoded, names that final URL and not the link as added. The retry endpoint re-runs the step, fetching only what is still missing. A `youtube` upload fails the pass with `ValueError: YouTube sources are not supported yet: '<url>'`; the API refuses YouTube links before such a row can exist. Only the link itself is checked against YouTube's hosts, so a link that redirects to YouTube is fetched like any other page. The step label counts each kind of saved work only when it is non-zero: `Ingested N documents`, `Ingested N documents (F fetched)`, `Ingested N documents (M reused)`, or `Ingested N documents (F fetched, M reused)`.
 
 ## Fetching links (`fetch.py`)
 
@@ -272,7 +272,7 @@ React 18 + TypeScript + Vite 5, `react-router-dom` 6, **TanStack Query v5** as t
 | Route | Component | Purpose |
 | --- | --- | --- |
 | `/` | `HomePage` | Gallery of runs (`RunCard`, status filters); **New verification** opens `UploadDialog` — report PDF, source PDFs, and links in one request — then navigates to the run |
-| `/runs/:runId` | `RunView` | Three panels: `SourcesPanel` · `ChatPanel` (the progress feed until the run is DONE) · `AnalysisPanel` rings (accuracy / coverage / credibility / validity — **no composite overall**). On a DONE run, `?focus=` `claims`, `report`, `credibility`, or `validity` replaces them with a full-width focus mode (`FocusClaims`, `FocusReport`, `FocusCredibility`, `FocusValidity`) |
+| `/runs/:runId` | `RunView` | Three panels: `SourcesPanel` · a middle panel that shows the progress feed (`ProgressFeed`, with the chat input disabled) while the run is in progress, a failure card with **Retry run** and the feed when it FAILED, and `ChatPanel` once it is DONE · `AnalysisPanel` rings (accuracy / coverage / credibility / validity — **no composite overall**). On a DONE run, `?focus=` `claims`, `report`, `credibility`, or `validity` replaces them with a full-width focus mode (`FocusClaims`, `FocusReport`, `FocusCredibility`, `FocusValidity`) |
 | `/compare` | `ComparePage` | Two runs' scores + stats with per-metric deltas |
 
 Pre-redesign routes redirect: `/runs/:runId/workspace` → `?focus=claims`, `/runs/:runId/report` → `?focus=report`, `/runs/:runId/sources/:sourceId` → `?focus=credibility&source=…`, and `/runs` and `/dashboard` → `/`.

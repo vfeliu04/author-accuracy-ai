@@ -117,7 +117,7 @@ Also: the server is **single-process by design** — startup recovery re-queues 
 
 Sample PDFs live in `example_sources/`, one folder per test set. From `example source one/`, upload `World_Hunger_Fake.pdf` as the report and the real PDFs (`2025_world_hunger.pdf`, `disruptions_in_the_food_supply_chain.pdf`, …) as sources — via the UI at `:5173`, or `POST /api/runs` directly. `example source two/` holds a second set (six real water/drought sources for `Water_Stress_Fake_Report.pdf`, which sits at the `example_sources/` root next to its answer key). The pipeline runs as one background job; the dashboard polls the progress feed and flips to the full report on DONE. A real run makes paid Anthropic + OpenAI calls proportional to document size.
 
-A source can also be a link to a public web page: paste it into the dialog's **Add a link** field, or send it as a `source_urls` part. The ingest step fetches every link before it processes any document, so a link that can't be read fails the run within seconds, with the link named in the error.
+A source can also be a link to a public web page: paste it into the dialog's **Add a link** field, or send it as a `source_urls` part. The ingest step fetches the links before it processes any document and stops at the first one that can't be read, so a bad link fails the run within seconds; the error names the link, or, for a page that redirected and then could not be read, the address it ended up at.
 
 ## Related docs
 

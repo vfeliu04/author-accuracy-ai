@@ -28,18 +28,18 @@ cp backend/.env.example backend/.env
 | `AUTHORAI_CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins (`allow_credentials` is off — auth is a header, not a cookie) |
 | `AUTHORAI_DOCS_ENABLED` | `true` | Serves `/docs`, `/redoc`, and `/openapi.json`. They expose the full route surface — keep for local dev, **disable for an exposed deployment** |
 | `AUTHORAI_MAX_REQUEST_BYTES` | `220000000` | Whole-request ceiling, checked against `Content-Length` **before** the body is read, so an unauthenticated attacker cannot push gigabytes → 413 |
-| `AUTHORAI_MAX_UPLOAD_BYTES` | `50000000` | Per-file upload cap, checked from the spooled part's size without materializing the bytes → 413. Also caps a PDF fetched from a link |
+| `AUTHORAI_MAX_UPLOAD_BYTES` | `50000000` | Per-file upload cap, checked from the spooled part's size without materializing the bytes → 413. Also caps a fetched link's response served as `application/pdf` or `application/octet-stream` |
 | `AUTHORAI_MAX_SOURCE_FILES` | `20` | Max sources per run, uploaded files and links together → 400 |
 | `AUTHORAI_UPLOADS_DIR` | `data/uploads` | Where uploaded PDFs, web-page snapshots (JSON), and PDFs fetched from links are stored (server-generated names); the file endpoint resolve-checks every served path against this directory |
 
 ## Source links
 
-How the ingest step fetches links added as sources (`backend/authorai/fetch.py`). A web page's body is capped by `AUTHORAI_FETCH_MAX_BYTES`; a PDF served by a link is capped by `AUTHORAI_MAX_UPLOAD_BYTES`.
+How the ingest step fetches links added as sources (`backend/authorai/fetch.py`). The size cap follows the response's declared `Content-Type`: `text/html` and `application/xhtml+xml` are capped by `AUTHORAI_FETCH_MAX_BYTES`, even when the body turns out to be a PDF, and `application/pdf` and `application/octet-stream` by `AUTHORAI_MAX_UPLOAD_BYTES`. DNS lookups count against `AUTHORAI_FETCH_TIMEOUT_SECONDS`, but a slow lookup is not cut short: the budget is checked again once it returns.
 
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_FETCH_TIMEOUT_SECONDS` | `30.0` | Wall-clock budget for one link's whole fetch, every redirect hop included. Checked between hops and after each body chunk, applied as each request's socket timeouts, and enforced by a watchdog that shuts the connection's socket; the OS DNS lookup is the one wait it cannot interrupt |
-| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on a web page's body, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it |
+| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on the body of a response served as `text/html` or `application/xhtml+xml`, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it |
 | `AUTHORAI_FETCH_MAX_REDIRECTS` | `5` | Redirect hops followed; each target is re-checked, re-resolved, and re-gated against private addresses |
 | `AUTHORAI_FETCH_USER_AGENT` | `AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)` | `User-Agent` sent with every fetch |
 

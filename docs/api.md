@@ -31,9 +31,9 @@ curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 | Sources per run, files and links together | 20 (`max_source_files`) | In `POST /api/runs` → 400 |
 | Link length | 2048 characters, as given and once encoded | In `POST /api/runs` → 400 |
 | Run title | 200 characters | In `POST /api/runs` → 400 |
-| Fetched web page | 10,000,000 bytes, counted after decompression (`fetch_max_bytes`) | In the ingest step's fetch → run `FAILED` |
-| PDF fetched from a link | 50,000,000 bytes (`max_upload_bytes`) | In the ingest step's fetch → run `FAILED` |
-| Time to fetch one link, redirects included | 30 seconds (`fetch_timeout_seconds`) | In the ingest step's fetch → run `FAILED` |
+| Fetched response served as `text/html` or `application/xhtml+xml` (a web page, or a PDF served under an HTML type) | 10,000,000 bytes, counted after decompression (`fetch_max_bytes`) | In the ingest step's fetch → run `FAILED` |
+| Fetched response served as `application/pdf` or `application/octet-stream` | 50,000,000 bytes, counted after decompression (`max_upload_bytes`) | In the ingest step's fetch → run `FAILED` |
+| Time to fetch one link, redirects and DNS lookups included | 30 seconds (`fetch_timeout_seconds`); a slow DNS lookup is not cut short, and the budget is checked again once it returns | In the ingest step's fetch → run `FAILED` |
 | Redirects per link | 5 (`fetch_max_redirects`) | In the ingest step's fetch → run `FAILED` |
 
 ## Error shapes
@@ -82,13 +82,13 @@ Multipart form:
 
 At least one source is required — a file or a link — and files and links together count against `max_source_files`.
 
-Each link is checked for syntax only; the request makes no DNS lookup and no connection. Surrounding whitespace is trimmed; the scheme must be `http` or `https`; the host must be a hostname or an IPv6 literal without a zone ID; the port must be valid; the link must not carry a username or password, and must be at most 2048 characters as given and once encoded. A failure is `400 not a usable link: <reason>`, where the reason quotes the link with any credentials removed (for example `Source URL 'ftp://example.org/file' must start with http:// or https://`). The link is then normalized — the `#fragment` dropped, scheme and host lowercased, the host IDNA-encoded, the path percent-encoded — and two links that normalize to the same string are refused (`'<link>' was added twice`), never merged. Links to `youtube.com`, `youtu.be`, or `youtube-nocookie.com`, bare or on `www.`, `m.`, or `music.`, are refused with `'<link>': YouTube links are not supported yet`.
+Each link is checked for syntax only; the request makes no DNS lookup and no connection. Surrounding whitespace is trimmed; the scheme must be `http` or `https`; the host must be a hostname or an IPv6 literal without a zone ID; the port must be valid; the link must not carry a username or password, and must be at most 2048 characters as given and once encoded. A failure is `400 not a usable link: <reason>`, where the reason quotes the link with any credentials removed (for example `Source URL 'ftp://example.org/file' must start with http:// or https://`). The link is then normalized — the `#fragment` dropped, scheme and host lowercased, the host IDNA-encoded, the path percent-encoded — and two links that normalize to the same string are refused (`'<link>' was added twice`), never merged. Links to `youtube.com`, `youtu.be`, or `youtube-nocookie.com`, bare or on `www.`, `m.`, or `music.`, are refused with `'<link>': YouTube links are not supported yet`. Only the link itself is checked against these hosts: a link that redirects to one is fetched like any other page.
 
 Every file (extension, size, magic bytes — without reading it into memory) and every link is validated before any file is written. Files are stored under `uploads_dir` with server-generated names; the client filename is kept only as display metadata and never touches a path. A link is recorded as a `SOURCE` upload with `source_type` `web`, the normalized link as its `url` and `file_name`, and the path its page will be stored at. The run, its upload rows (the report, then the files, then the links, each in request order), and a `full_pipeline` job commit in **one transaction** — a failure anywhere deletes the written files and leaves no rows.
 
 Response: `{"run_id": "<hex>", "job_id": "<hex>"}`. The job starts `QUEUED`; a single worker thread picks it up (poll interval `job_poll_seconds`). Poll `GET /api/runs/{run_id}` for progress.
 
-**Links are read by the pipeline, not by this request.** The ingest step fetches every link before it processes any document ([architecture.md](architecture.md#fetching-links-fetchpy) describes the fetch). A link that serves a PDF becomes a PDF upload; a web page is stored as a JSON snapshot. A link that cannot be read fails the run: its `status` becomes `FAILED` and its `error` names the link, for example:
+**Links are read by the pipeline, not by this request.** The ingest step fetches the links one at a time, in the order they were added, before it processes any document ([architecture.md](architecture.md#fetching-links-fetchpy) describes the fetch). A link that serves a PDF becomes a PDF upload; a web page is stored as a JSON snapshot. The first link that cannot be read fails the run, and links after it are not fetched in that attempt. The run's `status` becomes `FAILED` and its `error` names the link. A fetch error always names the link, as `'<target>' (redirected from '<link>')` when it failed at a redirect target. A page that redirected and then could not be read (too little readable text, or bytes that cannot be decoded) is named only by the URL it ended up at. For example:
 
 ```
 BlockedAddressError: Refusing to fetch 'http://10.0.0.5/admin': '10.0.0.5' resolves to a private or reserved network address
@@ -97,7 +97,7 @@ FetchError: Fetching 'https://example.org/data.zip' failed: unsupported content 
 ThinPageError: https://example.org/app has no readable article text (<n> characters extracted, at least 250 needed) — JavaScript-only pages are not supported
 ```
 
-`POST /api/runs/{run_id}/retry` resumes the run; a link whose page or PDF is already stored is not fetched again.
+`POST /api/runs/{run_id}/retry` resumes the run: a link whose page or PDF is already stored is not fetched again, and the pass picks up at the link that failed.
 
 ### `GET /api/runs`
 
@@ -196,7 +196,7 @@ Each entry in `claims` (ordered by report page, then id):
 | `year_flag` | `1` when the claim's year is absent from the cited chunk, else `null` |
 | `evidence_source` | Where the quoted chunk came from, or `null` when no chunk was cited — see below |
 
-`evidence_source` is `{"doc_id", "title", "page", "source_type", "url", "section", "start_seconds", "chunk_id"}`. `source_type` decides which locator applies: `page` for a PDF, `section` (the heading the quoted text sits under) for a web page, `start_seconds` for a time-coded source. `url` is the source's link (`null` for uploaded files), `chunk_id` is the quoted chunk, and `source_type` is `pdf` for documents with no upload row (CLI runs).
+`evidence_source` is `{"doc_id", "title", "page", "source_type", "url", "section", "start_seconds", "chunk_id"}`. `source_type` decides which locator applies: `page` for a PDF, `section` (the heading the quoted text sits under) for a web page, `start_seconds` for a time-coded source. `url` is the source's link (`null` for uploaded files), `chunk_id` is the quoted chunk, and `source_type` is `pdf` for a document with no upload row.
 
 Each entry in `sources` — every source document of the run, scored sources first by credibility (highest first), then the rest in ingest order:
 
@@ -214,7 +214,7 @@ Each entry in `sources` — every source document of the run, scored sources fir
 
 ### `GET /api/runs/{run_id}/documents/{doc_id}/file`
 
-Streams the stored file for a document (the report or a source) with `Content-Disposition: inline; filename="<file_name>"`. `doc_id` is a document id from the report payload (`report_doc_id`, a source's `doc_id`, or an `evidence_source.doc_id`). The media type follows the upload's `source_type`:
+Streams the stored file for a document (the report or a source) as `Content-Disposition: inline`, named by the upload's `file_name`: `filename="<file_name>"` when the name needs no percent-encoding, otherwise `filename*=utf-8''<percent-encoded file_name>`. A link's `file_name` is its URL, so a link is always served in the encoded form (`inline; filename*=utf-8''https%3A//example.org/page`). `doc_id` is a document id from the report payload (`report_doc_id`, a source's `doc_id`, or an `evidence_source.doc_id`). The media type follows the upload's `source_type`:
 
 | `source_type` | Served file | `Content-Type` |
 |---|---|---|
@@ -223,7 +223,7 @@ Streams the stored file for a document (the report or a source) with `Content-Di
 
 (The endpoint also maps `image` to `image/png` or `image/jpeg` by file extension and `youtube` to `application/json`; no upload creates either type.)
 
-A snapshot is `{"schema": 1, "document": {"title", "sections": [{"title", "page", "text"}]}, "provenance": {...}}`: the page's readable text as sections — plain text, with tables inline as Markdown pipe rows, and `page` always `null` — plus where it came from. `provenance` carries `url` (the link as added), `final_url` (after redirects), `fetched_at`, `content_type`, and the page's declared `title`, `authors`, `publisher`, `publication_date`, `doi`, and `scholarly` (whether the page carries `citation_*` tags). See [architecture.md](architecture.md#links-in-the-ingest-step-jobspy) for how it is produced.
+A snapshot is `{"schema": 1, "document": {"title", "sections": [{"title", "page", "text"}]}, "provenance": {...}}`: the page's readable text as sections — Markdown from trafilatura's writer with emphasis removed (list items as `- ` lines, tables as pipe rows), and `page` always `null` — plus where it came from. `provenance` carries `url` (the link as normalized at upload), `final_url` (after redirects), `fetched_at`, `content_type`, and the page's declared `title`, `authors`, `publisher`, `publication_date`, `doi`, and `scholarly` (whether the page carries `citation_*` tags). See [architecture.md](architecture.md#links-in-the-ingest-step-jobspy) for how it is produced.
 
 Access is scoped by `(run_id, doc_id)`: a document id from another run returns 404 `No such document in this run`. As defense in depth, the stored path (already server-generated) is resolve-checked to lie inside `uploads_dir`; a path escaping it, or a missing file, returns 404 `Document file is unavailable`.
 

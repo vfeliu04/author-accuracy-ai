@@ -44,9 +44,9 @@ A source can be a link to a web page instead of a file. Add it in the upload dia
 - Only public web addresses are fetched: a link, a redirect, or an address lookup that leads to a private or internal network is refused. By default a page is capped at 10,000,000 bytes and each fetch at 30 seconds.
 - The page's article text and tables are kept; navigation, cookie banners, and similar page furniture are left out. Pages that need JavaScript to show their content can't be read.
 - A link that serves a PDF is handled exactly like an uploaded PDF.
-- A link that can't be read stops the run, and the error names the link. Retrying resumes where the run stopped.
+- A link that can't be read stops the run, and the error names the link, or the page it redirected to. Retrying resumes where the run stopped.
 - In the claims view, evidence from a web page opens as the stored text with the quoted passage highlighted, cited by its section heading, with a link to the original page.
-- Credibility uses what the page declares about itself — its title, authors, publisher, date, and DOI — and never the web address.
+- Credibility uses what the page declares about itself: its authors, publisher, date, DOI, and title. When a page declares nothing beyond a title, its text is read for those details instead, the same way a PDF's is. The web address is never used.
 - YouTube links are not supported yet; the upload refuses them.
 
 ## Stack
@@ -93,7 +93,7 @@ uvicorn authorai.main:app    # http://localhost:8000 — /health, /docs
 
 The server is **fail-closed**: it refuses to start without `AUTHORAI_API_KEY` (clients send it as the `X-API-Key` header), and the provider clients refuse to construct without their keys — there is no unauthenticated or silently-degraded mode.
 
-Frontend (Node 20+), in a second terminal:
+Frontend (Node 22+), in a second terminal:
 
 ```bash
 cd frontend
@@ -150,7 +150,7 @@ python -m authorai.cli search <run_id> hunger 735 million                  # hyb
 
 This is v2 — a clean-slate rewrite of the original Flask app, built on the `v2` branch and merging into `main` (the v1 lineage is documented in [docs/history.md](docs/history.md)):
 
-- Runs are never deleted or replaced; every analysis is retained and comparable.
+- A new run never replaces an earlier one; every analysis is retained and comparable until you delete it.
 - Auth is a shared `X-API-Key` header and is always on — the server will not start without a key. Suitable for local, single-user use; not hardened for public deployment.
 - The extraction and verdict quality is measured against hand-audited golden sets (dev + held-out) with recorded baselines; the eval pipeline runs in CI via a manually dispatched workflow ([.github/workflows/eval.yml](.github/workflows/eval.yml)) because each run costs real API money.
 
