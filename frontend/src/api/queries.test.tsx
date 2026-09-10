@@ -1,12 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useRuns } from "./queries";
+import { queryKeys, useDeleteRun, useRuns } from "./queries";
 import * as v2 from "./v2";
 
-function makeWrapper() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function makeWrapper(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
@@ -63,4 +62,23 @@ describe("useRuns", () => {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     expect(spy.mock.calls.length).toBe(callsAfterDone);
   }, 10000);
+});
+
+describe("useDeleteRun", () => {
+  it("forgets every stored file of the deleted run, readable pages included", async () => {
+    vi.spyOn(v2, "deleteRun").mockResolvedValue(undefined);
+    vi.spyOn(v2, "listRuns").mockResolvedValue([]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.pdf("r1", "d1"), new Blob(["%PDF"]));
+    client.setQueryData(queryKeys.snapshot("r1", "d2"), { schema: 1 });
+    client.setQueryData(queryKeys.snapshot("r2", "d3"), { schema: 1 });
+
+    const { result } = renderHook(() => useDeleteRun(), { wrapper: makeWrapper(client) });
+    await act(() => result.current.mutateAsync("r1"));
+
+    expect(client.getQueryData(queryKeys.pdf("r1", "d1"))).toBeUndefined();
+    expect(client.getQueryData(queryKeys.snapshot("r1", "d2"))).toBeUndefined();
+    // Another run's pages stay cached.
+    expect(client.getQueryData(queryKeys.snapshot("r2", "d3"))).toEqual({ schema: 1 });
+  });
 });

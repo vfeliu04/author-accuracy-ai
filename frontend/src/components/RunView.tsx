@@ -44,6 +44,10 @@ export default function RunView() {
   const uploads = runQuery.data?.uploads ?? [];
   const report = reportQuery.data;
   const status = run?.status;
+  // Link sources wait on the first step (that is when their pages are read);
+  // a failed run's error names the link that couldn't be.
+  const ingestStatus = job?.progress.find((entry) => entry.step === "ingest")?.status;
+  const runError = status === "FAILED" ? run?.error ?? null : null;
 
   const handleSend = (text: string) => {
     setChatError(null);
@@ -145,6 +149,7 @@ export default function RunView() {
           <SourcesPanel
             uploads={uploads}
             report={report}
+            ingestStatus={ingestStatus}
             onOpenSource={(docId) => openFocus("credibility", { source: docId })}
           />
           <ChatPanel
@@ -166,7 +171,12 @@ export default function RunView() {
         </div>
       ) : status === "FAILED" ? (
         <div className="panels">
-          <SourcesPanel uploads={uploads} report={report} />
+          <SourcesPanel
+            uploads={uploads}
+            report={report}
+            ingestStatus={ingestStatus}
+            runError={runError}
+          />
           <main className="panel panel--main">
             <div className="panel__body">
               <div className="failure-card">
@@ -205,7 +215,7 @@ export default function RunView() {
         </div>
       ) : (
         <div className="panels">
-          <SourcesPanel uploads={uploads} report={report} />
+          <SourcesPanel uploads={uploads} report={report} ingestStatus={ingestStatus} />
           <main className="panel panel--main">
             <div className="panel__head">
               <h2>Progress</h2>

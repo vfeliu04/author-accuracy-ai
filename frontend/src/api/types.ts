@@ -3,6 +3,11 @@
 
 export type RunStatus = "CREATED" | "RUNNING" | "DONE" | "FAILED";
 
+// What a source is: an uploaded PDF, a web page added by link, an image, or a
+// video. The type — never which locator happens to be set — decides how
+// evidence is cited and which pane shows it.
+export type SourceType = "pdf" | "web" | "image" | "youtube";
+
 export type RunListItem = {
   id: string;
   created_at: string;
@@ -35,7 +40,9 @@ export type Job = {
 export type RunUpload = {
   id: string;
   kind: "REPORT" | "SOURCE";
-  file_name: string;
+  file_name: string; // for a link source, the link itself
+  source_type: SourceType;
+  url: string | null; // the origin link; null for uploaded files
 };
 
 // GET /api/runs/{id}
@@ -50,7 +57,12 @@ export type Verdict = "SUPPORTED" | "CONTRADICTED" | "UNVERIFIABLE";
 export type EvidenceSource = {
   doc_id: string;
   title: string | null;
-  page: number | null;
+  page: number | null; // PDFs
+  source_type: SourceType;
+  url: string | null;
+  section: string | null; // the heading the quoted text sits under (web pages)
+  start_seconds: number | null; // transcript time (videos)
+  chunk_id: number | null;
 };
 
 // "disavowed" = the report itself marks the claim false; accuracy scores
@@ -71,7 +83,7 @@ export type Claim = {
   quote_verified: number | null;
   rationale: string;
   year_flag: string | null;
-  evidence_source: EvidenceSource | null;
+  evidence_source: EvidenceSource | null; // null when no source text was quoted
 };
 
 export type SourceBiblio = {
@@ -83,16 +95,22 @@ export type SourceBiblio = {
   isbn?: string | null;
 };
 
-export type SourceCredibility = {
+// Every source document of a run, scored or not. An image is listed but never
+// scorable; a scorable source whose total is null has no score in this run.
+export type ReportSource = {
   doc_id: string;
   title: string | null;
-  total: number; // 0–100
-  tier: string;
-  components: Record<string, number>;
-  metadata: SourceBiblio;
+  source_type: SourceType;
+  url: string | null;
+  scorable: boolean;
+  total: number | null; // 0–100
+  tier: string | null;
+  components: Record<string, number> | null;
+  metadata: SourceBiblio | null;
 };
 
-// All 0–1 fractions, or null before the run is scored.
+// All 0–1 fractions, or null before the run is scored. Credibility stays null
+// on a scored run when no source could be scored.
 export type Scores = {
   accuracy: number | null;
   coverage: number | null;
@@ -131,9 +149,18 @@ export type ValidityDetail = {
   weights_used: Record<string, number> | null;
 };
 
+// A source kept out of the credibility average, with how often verdicts cite it.
+export type CredibilityExclusion = {
+  doc_id: string;
+  reason: "image";
+  usage: number;
+};
+
 export type CredibilityDetail = {
+  // "no_scorable_sources" and "no_sources" come with a null credibility score.
   method: string | null;
   sources: { doc_id: string; total: number; tier: string; usage: number }[] | null;
+  excluded: CredibilityExclusion[];
 };
 
 // GET /api/runs/{id}/report
@@ -148,7 +175,36 @@ export type Report = {
   credibility_detail: CredibilityDetail | null;
   stats: ReportStats;
   claims: Claim[];
-  sources: SourceCredibility[];
+  sources: ReportSource[];
+};
+
+// GET /api/runs/{id}/documents/{doc_id}/file for a web page or transcript: the
+// readable text as it was stored, plus where it came from.
+export type PageSection = {
+  title: string;
+  page: number | null;
+  text: string; // plain text; tables appear inline as markdown pipe rows
+  start_seconds?: number;
+  end_seconds?: number;
+};
+
+export type PageProvenance = {
+  url: string;
+  final_url: string;
+  fetched_at: string;
+  content_type: string;
+  title: string | null;
+  authors: string[];
+  publisher: string | null;
+  publication_date: string | null;
+  doi: string | null;
+  scholarly: boolean;
+};
+
+export type PageSnapshot = {
+  schema: 1;
+  document: { title: string | null; sections: PageSection[] };
+  provenance: PageProvenance;
 };
 
 export type ChatMode = "evidence" | "guidance" | "creative";

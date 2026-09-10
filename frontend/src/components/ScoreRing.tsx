@@ -1,7 +1,8 @@
 import { BAND_COLORS, scoreBand } from "../lib/score";
 
 // The animated SVG score donut (extracted from the old RatingPanel so every
-// surface renders scores identically). `value` is a 0–1 fraction or null.
+// surface renders scores identically). `value` is a 0–1 fraction or null;
+// `note` is a short visible reason for a null that isn't just "not yet".
 function ringColor(pct: number | null): string {
   if (pct === null) return "var(--color-border)";
   return BAND_COLORS[scoreBand(pct)];
@@ -11,12 +12,14 @@ export default function ScoreRing({
   value,
   label,
   size = 76,
-  hint
+  hint,
+  note
 }: {
   value: number | null;
   label: string;
   size?: number;
   hint?: string;
+  note?: string;
 }) {
   const pct = value === null ? null : Math.round(value * 100);
   const r = (size - 10) / 2;
@@ -67,6 +70,7 @@ export default function ScoreRing({
         </span>
       </div>
       <span className="ring__label">{label}</span>
+      {note ? <span className="ring__note">{note}</span> : null}
     </div>
   );
 }

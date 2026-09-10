@@ -5,6 +5,9 @@ import type {
   ChatResponse,
   ChatTurn,
   CreateRunResponse,
+  PageProvenance,
+  PageSection,
+  PageSnapshot,
   Report,
   RunDetail,
   RunListItem
@@ -21,9 +24,25 @@ function authHeaders(extra?: HeadersInit): Headers {
   return headers;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// The server phrases refusals as {"detail": "<sentence>"}; the sentence is what
+// a reader needs, not the envelope. Anything else (a validation list, plain
+// text) is passed through as sent.
 async function raise(response: Response): Promise<never> {
   const text = await response.text().catch(() => "");
-  throw new Error(text || `Request failed (${response.status})`);
+  let message = text;
+  try {
+    const body: unknown = JSON.parse(text);
+    if (isRecord(body) && typeof body.detail === "string" && body.detail) {
+      message = body.detail;
+    }
+  } catch {
+    // Not JSON — the text is the message.
+  }
+  throw new Error(message || `Request failed (${response.status})`);
 }
 
 async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -40,11 +59,14 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 export async function createRun(
   report: File,
   sources: File[],
+  links: string[],
   title?: string
 ): Promise<CreateRunResponse> {
   const form = new FormData();
   form.append("report", report, report.name);
   sources.forEach((file) => form.append("sources", file, file.name));
+  // One text part per link source.
+  links.forEach((link) => form.append("source_urls", link));
   if (title && title.trim()) {
     form.append("title", title.trim());
   }
@@ -104,4 +126,79 @@ export async function fetchPdfBlob(runId: string, docId: string): Promise<Blob> 
     await raise(response);
   }
   return response.blob();
+}
+
+// A web page (or transcript) is stored as JSON. Returned unparsed: callers run
+// it through parsePageSnapshot before rendering anything from it.
+export async function fetchDocumentJson(runId: string, docId: string): Promise<unknown> {
+  const response = await fetch(documentFileUrl(runId, docId), { headers: authHeaders() });
+  if (!response.ok) {
+    await raise(response);
+  }
+  return response.json() as Promise<unknown>;
+}
+
+// A stored page this version can't show. The message is written for the
+// reader, and asking again can't change the answer.
+export class UnreadablePageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnreadablePageError";
+  }
+}
+
+const PAGE_FORMAT = 1;
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+// Checks a stored page before any of it is rendered: a file in another format
+// is refused loudly rather than misread, and display fields of the wrong kind
+// are dropped so they can never reach the screen.
+export function parsePageSnapshot(payload: unknown): PageSnapshot {
+  if (!isRecord(payload) || payload.schema !== PAGE_FORMAT) {
+    throw new UnreadablePageError(
+      "This page was saved in a format this version of the app can't display."
+    );
+  }
+  const incomplete = () =>
+    new UnreadablePageError("This page's saved text is incomplete, so it can't be displayed.");
+  const content = payload.document;
+  const origin = payload.provenance;
+  if (!isRecord(content) || !Array.isArray(content.sections) || !isRecord(origin)) {
+    throw incomplete();
+  }
+  const sections = content.sections.map((raw): PageSection => {
+    if (!isRecord(raw) || typeof raw.text !== "string") {
+      throw incomplete();
+    }
+    const section: PageSection = {
+      title: textOrNull(raw.title) ?? "",
+      page: typeof raw.page === "number" ? raw.page : null,
+      text: raw.text
+    };
+    if (typeof raw.start_seconds === "number") section.start_seconds = raw.start_seconds;
+    if (typeof raw.end_seconds === "number") section.end_seconds = raw.end_seconds;
+    return section;
+  });
+  const provenance: PageProvenance = {
+    url: textOrNull(origin.url) ?? "",
+    final_url: textOrNull(origin.final_url) ?? "",
+    fetched_at: textOrNull(origin.fetched_at) ?? "",
+    content_type: textOrNull(origin.content_type) ?? "",
+    title: textOrNull(origin.title),
+    authors: Array.isArray(origin.authors)
+      ? origin.authors.filter((author): author is string => typeof author === "string")
+      : [],
+    publisher: textOrNull(origin.publisher),
+    publication_date: textOrNull(origin.publication_date),
+    doi: textOrNull(origin.doi),
+    scholarly: origin.scholarly === true
+  };
+  return {
+    schema: PAGE_FORMAT,
+    document: { title: textOrNull(content.title), sections },
+    provenance
+  };
 }

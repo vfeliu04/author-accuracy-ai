@@ -3,9 +3,11 @@ import type { DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCreateRun } from "../api/queries";
 import { formatBytes } from "../lib/format";
+import { checkLink, linkHost } from "../lib/links";
 
 // Client-side mirrors of the server caps — fail fast in the dialog instead
-// of after a full upload (the server remains the authority).
+// of after a full upload (the server remains the authority). Files and links
+// share the source cap.
 const MAX_SOURCES = 20;
 const MAX_FILE_BYTES = 50_000_000;
 const MAX_TOTAL_BYTES = 200_000_000;
@@ -19,11 +21,18 @@ function isPdf(file: File): boolean {
   return file.name.toLowerCase().endsWith(".pdf");
 }
 
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const create = useCreateRun();
   const [report, setReport] = useState<File | null>(null);
   const [sources, setSources] = useState<File[]>([]);
+  const [links, setLinks] = useState<string[]>([]);
+  const [linkText, setLinkText] = useState("");
+  const [linkError, setLinkError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +69,19 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // A rejected link stays in the box so it can be corrected in place.
+  const addLink = () => {
+    if (linkText.trim() === "") return;
+    const result = checkLink(linkText, links);
+    if ("error" in result) {
+      setLinkError(result.error);
+      return;
+    }
+    setLinks([...links, result.link]);
+    setLinkText("");
+    setLinkError(null);
+  };
+
   const removeReport = () => {
     setReport(null);
     if (!nameTouched) setName("");
@@ -67,6 +89,10 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
 
   const removeSource = (index: number) => {
     setSources(sources.filter((_, i) => i !== index));
+  };
+
+  const removeLink = (link: string) => {
+    setLinks(links.filter((added) => added !== link));
   };
 
   const handleDrop = (event: DragEvent) => {
@@ -77,15 +103,22 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
 
   const totalBytes = (report?.size ?? 0) + sources.reduce((sum, file) => sum + file.size, 0);
   const fileCount = (report ? 1 : 0) + sources.length;
-  const tooManySources = sources.length > MAX_SOURCES;
+  const sourceCount = sources.length + links.length;
+  const tooManySources = sourceCount > MAX_SOURCES;
   const tooBig = totalBytes > MAX_TOTAL_BYTES;
   const canSubmit =
-    report !== null && sources.length > 0 && !tooManySources && !tooBig && !create.isPending;
+    report !== null && sourceCount > 0 && !tooManySources && !tooBig && !create.isPending;
+
+  const countParts = [
+    fileCount > 0 ? plural(fileCount, "file") : null,
+    links.length > 0 ? plural(links.length, "link") : null,
+    fileCount > 0 ? formatBytes(totalBytes) : null
+  ].filter((part): part is string => part !== null);
 
   const submit = () => {
     if (!report) return;
     create.mutate(
-      { report, sources, title: name },
+      { report, sources, links, title: name },
       {
         onSuccess: (data) => {
           onClose();
@@ -156,8 +189,8 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             </button>
           )}
 
-          <span className="field-label">Sources ({sources.length})</span>
-          {sources.length === 0 ? (
+          <span className="field-label">Sources ({sourceCount})</span>
+          {sourceCount === 0 ? (
             <button
               type="button"
               className="file-slot"
@@ -166,7 +199,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               <span className="file-row__icon" aria-hidden>
                 📘
               </span>
-              The source PDFs the report will be checked against
+              The source PDFs the report will be checked against — or add links below
             </button>
           ) : null}
           {sources.map((file, index) => (
@@ -181,6 +214,24 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
                 className="file-row__remove"
                 onClick={() => removeSource(index)}
                 aria-label={`Remove ${file.name}`}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          {links.map((link) => (
+            <div className="file-row" key={link}>
+              <span className="file-row__icon" aria-hidden>
+                🔗
+              </span>
+              <span className="file-row__name file-row__host" title={link}>
+                {linkHost(link)}
+              </span>
+              <button
+                type="button"
+                className="file-row__remove"
+                onClick={() => removeLink(link)}
+                aria-label={`Remove ${link}`}
               >
                 ✕
               </button>
@@ -220,6 +271,47 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             }}
           />
 
+          <label className="field-label" htmlFor="source-link">
+            Add a link
+          </label>
+          <div className="link-add">
+            <input
+              id="source-link"
+              className="name-input link-add__input"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="https://"
+              value={linkText}
+              aria-invalid={linkError ? true : undefined}
+              aria-describedby={linkError ? "source-link-error" : undefined}
+              onChange={(event) => {
+                setLinkText(event.target.value);
+                setLinkError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  addLink();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={linkText.trim() === ""}
+              onClick={addLink}
+            >
+              Add
+            </button>
+          </div>
+          {linkError ? (
+            <p id="source-link-error" className="modal__error">
+              {linkError}
+            </p>
+          ) : null}
+
           {error ? <p className="modal__error">{error}</p> : null}
           {tooManySources ? (
             <p className="modal__error">At most {MAX_SOURCES} sources per verification.</p>
@@ -232,9 +324,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className="modal__foot">
           <span className="modal__count">
-            {fileCount === 0
-              ? "No files yet"
-              : `${fileCount} file${fileCount === 1 ? "" : "s"} · ${formatBytes(totalBytes)}`}
+            {countParts.length === 0 ? "Nothing added yet" : countParts.join(" · ")}
           </span>
           <div className="modal__actions">
             <button type="button" className="btn btn--ghost" onClick={onClose}>

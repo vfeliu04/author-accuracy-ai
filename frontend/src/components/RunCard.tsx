@@ -4,18 +4,29 @@ import { useRetryRun } from "../api/queries";
 import type { RunListItem } from "../api/types";
 import { emojiFor } from "../lib/emoji";
 import { formatDate } from "../lib/format";
+import { credibilityGapHint } from "../lib/score";
 import StatusChip from "./StatusChip";
 
+// A null score is hidden unless the pill knows why it is missing — then it
+// shows a dash with that reason on hover, never a zero.
 function ScorePill({
   kind,
   label,
-  value
+  value,
+  missing
 }: {
   kind: "a" | "c" | "v";
   label: string;
   value: number | null;
+  missing?: string;
 }) {
-  if (value === null) return null;
+  if (value === null) {
+    return missing ? (
+      <span className={`score-pill score-pill--${kind}`} title={missing}>
+        {label} —
+      </span>
+    ) : null;
+  }
   return (
     <span className={`score-pill score-pill--${kind}`}>
       {label} {Math.round(value * 100)}
@@ -115,7 +126,13 @@ export default function RunCard({
         {run.status === "DONE" && run.scores ? (
           <>
             <ScorePill kind="a" label="A" value={run.scores.accuracy} />
-            <ScorePill kind="c" label="C" value={run.scores.credibility} />
+            {/* A scored run's credibility is null only when no source could be scored. */}
+            <ScorePill
+              kind="c"
+              label="C"
+              value={run.scores.credibility}
+              missing={credibilityGapHint("no_scorable_sources")}
+            />
             <ScorePill kind="v" label="V" value={run.scores.validity} />
           </>
         ) : run.status === "FAILED" ? (

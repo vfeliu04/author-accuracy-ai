@@ -62,6 +62,7 @@ describe("ComparePage", () => {
     expect(screen.getByText("+20%").className).toContain("compare__delta--up");
     expect(screen.getByText("+3").className).toContain("compare__delta--flat");
     expect(screen.getByText("-1").className).toContain("compare__delta--flat");
+    expect(screen.queryByText(/sources could be scored/)).not.toBeInTheDocument();
   });
 
   it("keeps the delta consistent with the two displayed cells", async () => {
@@ -86,6 +87,29 @@ describe("ComparePage", () => {
     );
     renderCompare("a", "b");
     await waitFor(() => expect(screen.getByText(/not scored yet/)).toBeInTheDocument());
+  });
+
+  it("explains a credibility dash on a scored run whose sources couldn't be scored", async () => {
+    vi.spyOn(v2, "getReport").mockImplementation((id: string) =>
+      Promise.resolve(
+        id === "a"
+          ? reportFor("a", {})
+          : reportFor("b", {
+              scores: { accuracy: 0.8, coverage: 0.5, credibility: null, validity: 0.6 },
+              credibility_detail: {
+                method: "no_scorable_sources",
+                sources: [],
+                excluded: [{ doc_id: "img", reason: "image", usage: 1 }]
+              }
+            })
+      )
+    );
+    renderCompare("a", "b");
+    await waitFor(() =>
+      expect(screen.getByText(/none of that run's sources could be scored/)).toBeInTheDocument()
+    );
+    expect(screen.queryByText(/not scored yet/)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
   });
 
   it("prompts to pick two runs when params are missing", () => {

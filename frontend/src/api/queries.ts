@@ -2,15 +2,18 @@
 // so a finished run isn't refetched forever; mutations invalidate the run list.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { ChatMode, ChatTurn, Report, RunDetail, RunListItem } from "./types";
+import type { ChatMode, ChatTurn, PageSnapshot, Report, RunDetail, RunListItem } from "./types";
 import { isTerminal } from "./types";
 import {
+  UnreadablePageError,
   createRun,
   deleteRun,
+  fetchDocumentJson,
   fetchPdfBlob,
   getReport,
   getRun,
   listRuns,
+  parsePageSnapshot,
   postChat,
   retryRun
 } from "./v2";
@@ -21,7 +24,8 @@ export const queryKeys = {
   runs: ["runs"] as const,
   run: (runId: string) => ["run", runId] as const,
   report: (runId: string) => ["report", runId] as const,
-  pdf: (runId?: string, docId?: string | null) => ["pdf", runId, docId] as const
+  pdf: (runId?: string, docId?: string | null) => ["pdf", runId, docId] as const,
+  snapshot: (runId?: string, docId?: string | null) => ["snapshot", runId, docId] as const
 };
 
 // The gallery polls only while some run is still moving — otherwise a card
@@ -65,8 +69,17 @@ export function useReport(runId: string | undefined) {
 export function useCreateRun() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ report, sources, title }: { report: File; sources: File[]; title?: string }) =>
-      createRun(report, sources, title),
+    mutationFn: ({
+      report,
+      sources,
+      links,
+      title
+    }: {
+      report: File;
+      sources: File[];
+      links: string[];
+      title?: string;
+    }) => createRun(report, sources, links, title),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.runs })
   });
 }
@@ -79,7 +92,7 @@ export function useChat(runId: string) {
 }
 
 // Deleting drops the run everywhere: refresh the gallery and forget any
-// cached data for it.
+// cached data for it, stored files and pages included.
 export function useDeleteRun() {
   const client = useQueryClient();
   return useMutation({
@@ -88,6 +101,7 @@ export function useDeleteRun() {
       client.removeQueries({ queryKey: queryKeys.run(runId) });
       client.removeQueries({ queryKey: queryKeys.report(runId) });
       client.removeQueries({ queryKey: ["pdf", runId] });
+      client.removeQueries({ queryKey: ["snapshot", runId] });
       client.invalidateQueries({ queryKey: queryKeys.runs });
     }
   });
@@ -130,4 +144,18 @@ export function usePdfBlob(runId?: string, docId?: string | null) {
   }, [query.data]);
 
   return { url, isLoading: query.isLoading, error: query.error as Error | null };
+}
+
+// A web page's stored text, fetched with the API key like the PDF blobs and
+// checked before use. A page this version can't read is refused with a
+// message worth showing — and retrying could never change that answer.
+export function useSnapshot(runId?: string, docId?: string | null) {
+  return useQuery<PageSnapshot, Error>({
+    queryKey: queryKeys.snapshot(runId, docId),
+    queryFn: async () =>
+      parsePageSnapshot(await fetchDocumentJson(runId as string, docId as string)),
+    enabled: Boolean(runId && docId),
+    staleTime: Infinity, // a run's stored page never changes
+    retry: (failures, error) => !(error instanceof UnreadablePageError) && failures < 3
+  });
 }

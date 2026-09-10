@@ -1,4 +1,5 @@
 import type { Report } from "../api/types";
+import { credibilityGapHint } from "../lib/score";
 import ScoreRing from "./ScoreRing";
 
 const RING_METRICS = [
@@ -43,6 +44,12 @@ export default function AnalysisPanel({
   const scores = report?.scores ?? null;
   const stats = report?.stats;
   const ready = report?.status === "DONE";
+  // A scored run can still have no credibility (every source was an image);
+  // the ring's dash then says why.
+  const credibilityNote =
+    ready && scores !== null && scores.credibility === null
+      ? credibilityGapHint(report?.credibility_detail?.method)
+      : undefined;
 
   return (
     <aside className="panel panel--analysis">
@@ -52,7 +59,13 @@ export default function AnalysisPanel({
       <div className="panel__body">
         <div className="rings">
           {RING_METRICS.map(({ key, label, hint }) => (
-            <ScoreRing key={key} label={label} hint={hint} value={scores ? scores[key] : null} />
+            <ScoreRing
+              key={key}
+              label={label}
+              hint={hint}
+              value={scores ? scores[key] : null}
+              note={key === "credibility" ? credibilityNote : undefined}
+            />
           ))}
         </div>
         {ready ? (

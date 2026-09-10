@@ -28,6 +28,28 @@ describe("AnalysisPanel", () => {
     expect(screen.getByText("—")).toBeInTheDocument(); // validity null
     // No composite score — the three metrics stay independent by design.
     expect(screen.queryByText(/overall/i)).not.toBeInTheDocument();
+    // A scored credibility needs no explanation.
+    expect(screen.queryByText("No scorable sources")).not.toBeInTheDocument();
+  });
+
+  it("explains a credibility no source could be scored for, instead of showing a number", () => {
+    render(
+      <AnalysisPanel
+        report={{
+          ...baseReport,
+          scores: { accuracy: 1, coverage: 0.5, credibility: null, validity: 0.4 },
+          credibility_detail: {
+            method: "no_scorable_sources",
+            sources: [],
+            excluded: [{ doc_id: "img", reason: "image", usage: 1 }]
+          }
+        }}
+        onOpenClaims={vi.fn()}
+      />
+    );
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.getByText("No scorable sources")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
   });
 
   it("shows ghost state before the run is scored", () => {
@@ -35,5 +57,6 @@ describe("AnalysisPanel", () => {
     expect(
       screen.getByText("Scores, claims and chat appear here when verification completes.")
     ).toBeInTheDocument();
+    expect(screen.queryByText("No scorable sources")).not.toBeInTheDocument();
   });
 });

@@ -36,6 +36,17 @@ const RUNS: RunListItem[] = [
   }
 ];
 
+// Scored, but every source was an image: credibility has no number.
+const IMAGE_ONLY_RUN: RunListItem = {
+  id: "imgs3456aabbccdd",
+  status: "DONE",
+  created_at: "2026-08-23T10:00:00Z",
+  error: null,
+  title: "Chart Review",
+  source_count: 2,
+  scores: { accuracy: 0.8, coverage: 0.5, credibility: null, validity: 0.4 }
+};
+
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -60,6 +71,15 @@ describe("HomePage", () => {
     expect(screen.getByText(/6 sources/)).toBeInTheDocument();
     // The title-less failed run falls back to a short id.
     expect(screen.getByText("Run fail9012")).toBeInTheDocument();
+  });
+
+  it("shows a dash, with the reason on hover, for a credibility no source could be scored for", async () => {
+    vi.spyOn(v2, "listRuns").mockResolvedValue([...RUNS, IMAGE_ONLY_RUN]);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Chart Review")).toBeInTheDocument());
+    expect(screen.getByText("A 80")).toBeInTheDocument();
+    expect(screen.getByText("C —")).toHaveAttribute("title", "No scorable sources");
+    expect(document.body.textContent).not.toMatch(/NaN|C 0/);
   });
 
   it("filters by status chips", async () => {

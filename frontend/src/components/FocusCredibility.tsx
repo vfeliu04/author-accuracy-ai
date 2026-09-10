@@ -1,9 +1,10 @@
 import { useSearchParams } from "react-router-dom";
-import type { Report, SourceBiblio } from "../api/types";
-import { BAND_COLORS, scoreBand } from "../lib/score";
+import type { Report, ReportSource, SourceBiblio } from "../api/types";
+import { sourceName } from "../lib/links";
+import { BAND_COLORS, credibilityGapHint, scoreBand } from "../lib/score";
 import FocusToolbar from "./FocusToolbar";
 import ScoreRing from "./ScoreRing";
-import { TIER_LABELS } from "./SourcesPanel";
+import { SOURCE_KINDS, tierLabel } from "./SourcesPanel";
 
 const COMPONENT_META: Array<{ key: string; label: string; max: number }> = [
   { key: "metadata_completeness", label: "Metadata completeness", max: 30 },
@@ -87,17 +88,46 @@ function explainComponent(
   return null;
 }
 
+function isScored(source: ReportSource): source is ReportSource & { total: number } {
+  return source.scorable && source.total !== null;
+}
+
+// Why a listed source carries no score, or null when it has one.
+function missingScore(source: ReportSource): { name: string; text: string } | null {
+  if (!source.scorable) {
+    return {
+      name: "Not scorable",
+      text:
+        source.source_type === "image"
+          ? "Images carry no title, author, publisher, or date to check, so they're listed but not counted in credibility."
+          : "This source has nothing to check for credibility, so it's listed but not counted."
+    };
+  }
+  if (source.total === null) {
+    return {
+      name: "Not scored",
+      text: "No credibility score was recorded for this source in this run, so it isn't counted."
+    };
+  }
+  return null;
+}
+
 // Full-width per-source credibility breakdown. The selected source can be
-// deep-linked via ?source=<doc_id> (the sources panel links here).
+// deep-linked via ?source=<doc_id> (the sources panel links here). Every
+// source is listed; one without a score says why instead of showing a number.
 export default function FocusCredibility({ report }: { report: Report }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const sources = report.sources;
   const selectedParam = searchParams.get("source");
   const selected = sources.find((source) => source.doc_id === selectedParam) ?? sources[0] ?? null;
 
+  const detail = report.credibility_detail;
   const usage =
-    report.credibility_detail?.sources?.find((entry) => entry.doc_id === selected?.doc_id)
-      ?.usage ?? null;
+    [...(detail?.sources ?? []), ...(detail?.excluded ?? [])].find(
+      (entry) => entry.doc_id === selected?.doc_id
+    )?.usage ?? null;
+  const aggregate = report.scores?.credibility ?? null;
+  const missing = selected ? missingScore(selected) : null;
 
   const selectSource = (docId: string) => {
     const next = new URLSearchParams(searchParams);
@@ -105,10 +135,27 @@ export default function FocusCredibility({ report }: { report: Report }) {
     setSearchParams(next, { replace: true });
   };
 
+  const summary = selected
+    ? [
+        isScored(selected)
+          ? tierLabel(selected.tier)
+          : (SOURCE_KINDS[selected.source_type] ?? SOURCE_KINDS.pdf).label,
+        usage !== null ? `cited by ${usage} verified verdict${usage === 1 ? "" : "s"}` : null
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ")
+    : "";
+
   return (
     <main className="panel panel--main">
       <FocusToolbar>
         <span className="muted">Credibility · score per source</span>
+        <span className="focus-aggregate">
+          All sources <strong>{aggregate === null ? "—" : Math.round(aggregate * 100)}</strong>
+          {aggregate === null ? (
+            <span className="focus-aggregate__hint">{credibilityGapHint(detail?.method)}</span>
+          ) : null}
+        </span>
       </FocusToolbar>
       <div className="claims-split">
         <div className="detail-list">
@@ -119,64 +166,90 @@ export default function FocusCredibility({ report }: { report: Report }) {
               className={`claim-item${selected?.doc_id === source.doc_id ? " selected" : ""}`}
               onClick={() => selectSource(source.doc_id)}
             >
-              <span
-                className={`cred-badge cred-badge--${scoreBand(source.total)}`}
-                title="Credibility score"
-              >
-                {Math.round(source.total)}
-              </span>
+              {isScored(source) ? (
+                <span
+                  className={`cred-badge cred-badge--${scoreBand(source.total)}`}
+                  title="Credibility score"
+                >
+                  {Math.round(source.total)}
+                </span>
+              ) : (
+                <span
+                  className="cred-badge cred-badge--none"
+                  title={source.scorable ? "Not scored" : "Not scorable"}
+                >
+                  —
+                </span>
+              )}
               <div>
-                <div className="claim-item__text">{source.title ?? source.doc_id.slice(0, 8)}</div>
+                <div className="claim-item__text">
+                  {sourceName(source, source.doc_id.slice(0, 8))}
+                </div>
               </div>
             </button>
           ))}
-          {sources.length === 0 ? <p className="muted">No sources were scored.</p> : null}
+          {sources.length === 0 ? <p className="muted">This run has no sources.</p> : null}
         </div>
         <div className="detail-body">
           {selected ? (
             <div className="detail-inner">
               <div className="focus-summary">
-                <ScoreRing value={selected.total / 100} label="Score" size={88} />
+                <ScoreRing
+                  value={isScored(selected) ? selected.total / 100 : null}
+                  label="Score"
+                  size={88}
+                />
                 <div className="focus-summary__text">
-                  <h3>{selected.title ?? selected.doc_id.slice(0, 8)}</h3>
-                  <p>
-                    {TIER_LABELS[selected.tier] ?? selected.tier}
-                    {usage !== null
-                      ? ` · cited by ${usage} verified verdict${usage === 1 ? "" : "s"}`
-                      : ""}
-                  </p>
+                  <h3>{sourceName(selected, selected.doc_id.slice(0, 8))}</h3>
+                  {summary ? <p>{summary}</p> : null}
                 </div>
               </div>
-              <div className="rubric-grid">
-                {COMPONENT_META.map(({ key, label, max }) => {
-                  const value = selected.components[key];
-                  const known = value !== undefined;
-                  const pct = known ? (value / max) * 100 : 0;
-                  const why = explainComponent(key, value, selected.metadata ?? {}, selected.tier);
-                  return (
-                    <div key={key} className="component-card">
-                      <div className="component-card__row">
-                        <span className="component-card__name">{label}</span>
-                        <span className="component-card__score">
-                          {known ? `${Math.round(value * 10) / 10}/${max}` : "—"}
-                        </span>
-                      </div>
-                      <div className="component-bar">
-                        <span
-                          style={{
-                            width: `${Math.min(pct, 100)}%`,
-                            background: known ? BAND_COLORS[scoreBand(pct)] : "transparent"
-                          }}
-                        />
-                      </div>
-                      {why ? <p className="component-card__text">{why}</p> : null}
+              {missing ? (
+                <div className="rubric-grid">
+                  <div className="component-card">
+                    <div className="component-card__row">
+                      <span className="component-card__name">{missing.name}</span>
                     </div>
-                  );
-                })}
-              </div>
+                    <p className="component-card__text">{missing.text}</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="rubric-grid">
+                  {COMPONENT_META.map(({ key, label, max }) => {
+                    const value = selected.components?.[key];
+                    const known = value !== undefined;
+                    const pct = known ? (value / max) * 100 : 0;
+                    const why = explainComponent(
+                      key,
+                      value,
+                      selected.metadata ?? {},
+                      selected.tier ?? ""
+                    );
+                    return (
+                      <div key={key} className="component-card">
+                        <div className="component-card__row">
+                          <span className="component-card__name">{label}</span>
+                          <span className="component-card__score">
+                            {known ? `${Math.round(value * 10) / 10}/${max}` : "—"}
+                          </span>
+                        </div>
+                        <div className="component-bar">
+                          <span
+                            style={{
+                              width: `${Math.min(pct, 100)}%`,
+                              background: known ? BAND_COLORS[scoreBand(pct)] : "transparent"
+                            }}
+                          />
+                        </div>
+                        {why ? <p className="component-card__text">{why}</p> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           ) : (
-            <p className="muted">No sources were scored for this run.</p>
+            <p className="muted">This run has no sources.</p>
           )}
         </div>
       </div>

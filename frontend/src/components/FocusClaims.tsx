@@ -1,9 +1,12 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import type { Report, Verdict } from "../api/types";
+import type { EvidenceSource, Report, Verdict } from "../api/types";
+import { citeLabel } from "../lib/format";
+import { sourceName } from "../lib/links";
 import ClaimBadges from "./ClaimBadges";
 import FocusToolbar from "./FocusToolbar";
 import PdfPane from "./PdfPane";
+import SourcePane from "./SourcePane";
 
 const FILTERS: Array<Verdict | "ALL"> = ["ALL", "SUPPORTED", "CONTRADICTED", "UNVERIFIABLE"];
 
@@ -14,8 +17,15 @@ const FILTER_LABELS: Record<Verdict | "ALL", string> = {
   UNVERIFIABLE: "Unverifiable"
 };
 
+// "IPCC Chapter 3 · p.4", "Water in Crisis · § Findings", "example.org/talk · 12:34".
+function citation(source: EvidenceSource, fallback: string): string {
+  const name = sourceName(source, fallback);
+  const label = citeLabel(source);
+  return label ? `${name} · ${label}` : name;
+}
+
 // Full-width claims focus: list on the left, the selected claim's report
-// page and source page SIDE BY SIDE on the right. Selection and filter live
+// page and its evidence SIDE BY SIDE on the right. Selection and filter live
 // in the URL (replace, not push) so a claim can be deep-linked; Close drops
 // the params, and the browser Back button does the same.
 export default function FocusClaims({ report, runId }: { report: Report; runId: string }) {
@@ -95,11 +105,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                 <div className="claim-item__text">{claim.text}</div>
                 <div className="claim-item__cite">
                   {claim.evidence_source
-                    ? `${claim.evidence_source.title ?? "Source"}${
-                        claim.evidence_source.page !== null
-                          ? ` · p.${claim.evidence_source.page}`
-                          : ""
-                      }`
+                    ? citation(claim.evidence_source, "Source")
                     : "No source coverage"}
                 </div>
               </div>
@@ -143,23 +149,16 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                     <span className="pdf-pane__doc">
                       <strong>Source</strong>
                       {selected.evidence_source
-                        ? ` · ${selected.evidence_source.title ?? "untitled"}${
-                            selected.evidence_source.page !== null
-                              ? ` · p.${selected.evidence_source.page}`
-                              : ""
-                          }`
+                        ? ` · ${citation(selected.evidence_source, "untitled")}`
                         : ""}
                     </span>
                   </div>
                   {selected.evidence_source ? (
-                    <div className="pdf-pane__frame">
-                      <PdfPane
-                        runId={runId}
-                        docId={selected.evidence_source.doc_id}
-                        page={selected.evidence_source.page}
-                        title="source"
-                      />
-                    </div>
+                    <SourcePane
+                      runId={runId}
+                      source={selected.evidence_source}
+                      quote={selected.quote}
+                    />
                   ) : (
                     <div className="pdf-pane__empty">
                       This claim has no quoted source evidence.

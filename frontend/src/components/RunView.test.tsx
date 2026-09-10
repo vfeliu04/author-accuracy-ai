@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Report, RunDetail } from "../api/types";
+import type { Job, Report, RunDetail } from "../api/types";
 import * as v2 from "../api/v2";
 import RunView from "./RunView";
 
@@ -26,7 +26,7 @@ const runningDetail: RunDetail = {
     created_at: "t",
     error: null,
     title: "Coastal Brief",
-    source_count: 1,
+    source_count: 2,
     scores: null
   },
   job: {
@@ -34,9 +34,9 @@ const runningDetail: RunDetail = {
     run_id: "r",
     kind: "full_pipeline",
     status: "RUNNING",
-    payload: { report_upload_id: "u1", source_upload_ids: ["u2"] },
+    payload: { report_upload_id: "u1", source_upload_ids: ["u2", "u3"] },
     progress: [
-      { step: "ingest", label: "Ingested 2 documents", status: "done", ts: "t" },
+      { step: "ingest", label: "Ingested 3 documents", status: "done", ts: "t" },
       { step: "extract", label: "Extracting claims", status: "running", ts: "t" }
     ],
     error: null,
@@ -44,10 +44,21 @@ const runningDetail: RunDetail = {
     updated_at: "t"
   },
   uploads: [
-    { id: "u1", kind: "REPORT", file_name: "coastal_brief.pdf" },
-    { id: "u2", kind: "SOURCE", file_name: "ipcc_ch3.pdf" }
+    { id: "u1", kind: "REPORT", file_name: "coastal_brief.pdf", source_type: "pdf", url: null },
+    { id: "u2", kind: "SOURCE", file_name: "ipcc_ch3.pdf", source_type: "pdf", url: null },
+    {
+      id: "u3",
+      kind: "SOURCE",
+      file_name: "https://example.org/water/report",
+      source_type: "web",
+      url: "https://example.org/water/report"
+    }
   ]
 };
+
+function withJob(detail: RunDetail, job: Partial<Job>): RunDetail {
+  return { ...detail, job: { ...(detail.job as Job), ...job } };
+}
 
 const doneReport: Report = {
   run_id: "r",
@@ -74,10 +85,40 @@ const doneReport: Report = {
       quote_verified: 1,
       rationale: "stated verbatim",
       year_flag: null,
-      evidence_source: { doc_id: "s", title: "Src", page: 3 }
+      evidence_source: {
+        doc_id: "s",
+        title: "Src",
+        page: 3,
+        source_type: "pdf",
+        url: null,
+        section: null,
+        start_seconds: null,
+        chunk_id: 1
+      }
     }
   ],
-  sources: [{ doc_id: "s", title: "Src", total: 80, tier: "VERIFIED_DOI", components: {}, metadata: {} }]
+  sources: [
+    {
+      doc_id: "s",
+      title: "Src",
+      source_type: "pdf",
+      url: null,
+      scorable: true,
+      total: 80,
+      tier: "VERIFIED_DOI",
+      components: {},
+      metadata: {}
+    }
+  ]
+};
+
+const runningReport: Report = {
+  ...doneReport,
+  status: "RUNNING",
+  scores: null,
+  stats: { claims_total: 0, claims_supported: 0, claims_contradicted: 0, claims_unverifiable: 0 },
+  claims: [],
+  sources: []
 };
 
 afterEach(() => vi.restoreAllMocks());
@@ -85,29 +126,37 @@ afterEach(() => vi.restoreAllMocks());
 describe("RunView", () => {
   it("shows progress, upload filenames, and a locked chat while running", async () => {
     vi.spyOn(v2, "getRun").mockResolvedValue(runningDetail);
-    vi.spyOn(v2, "getReport").mockResolvedValue({
-      ...doneReport,
-      status: "RUNNING",
-      scores: null,
-      stats: { claims_total: 0, claims_supported: 0, claims_contradicted: 0, claims_unverifiable: 0 },
-      claims: [],
-      sources: []
-    });
+    vi.spyOn(v2, "getReport").mockResolvedValue(runningReport);
     renderAt("r");
     await waitFor(() =>
       expect(screen.getByText("Verifying this report against its sources")).toBeInTheDocument()
     );
     // Client vocabulary for unfinished steps; server result string once done.
     expect(screen.getByText("Extract claims")).toBeInTheDocument();
-    expect(screen.getByText("Ingested 2 documents")).toBeInTheDocument();
-    // Sources panel shows the uploaded filenames before scoring exists.
+    expect(screen.getByText("Ingested 3 documents")).toBeInTheDocument();
+    // Sources panel shows the uploaded filenames before scoring exists; the
+    // link's page has been read, so it reads like the uploaded file.
     expect(screen.getByText("ipcc_ch3.pdf")).toBeInTheDocument();
     expect(screen.getByText("coastal_brief.pdf")).toBeInTheDocument();
+    expect(screen.getByText("example.org/water/report")).toBeInTheDocument();
+    expect(screen.queryByText("Queued")).not.toBeInTheDocument();
     expect(
       screen.getByPlaceholderText("Chat unlocks when verification completes…")
     ).toBeDisabled();
     // Analysis rings sit in ghost mode.
     expect(screen.getByText("Scores, claims and chat appear here when verification completes.")).toBeInTheDocument();
+  });
+
+  it("shows an added link as Queued until its page has been read", async () => {
+    vi.spyOn(v2, "getRun").mockResolvedValue(
+      withJob(runningDetail, {
+        progress: [{ step: "ingest", label: "Ingesting documents", status: "running", ts: "t" }]
+      })
+    );
+    vi.spyOn(v2, "getReport").mockResolvedValue(runningReport);
+    renderAt("r");
+    await waitFor(() => expect(screen.getByText("Queued")).toBeInTheDocument());
+    expect(screen.getByRole("img", { name: "Web page" })).toBeInTheDocument();
   });
 
   it("offers a retry on a failed run and calls the endpoint", async () => {
@@ -127,6 +176,35 @@ describe("RunView", () => {
     expect(screen.getByText(/laptop sleep or dropped Wi-Fi/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry run" }));
     await waitFor(() => expect(retry).toHaveBeenCalledWith("r"));
+  });
+
+  it("explains a link that couldn't be read, and flags it among the sources", async () => {
+    vi.spyOn(v2, "getRun").mockResolvedValue(
+      withJob(
+        {
+          ...runningDetail,
+          run: {
+            ...runningDetail.run,
+            status: "FAILED",
+            error: "Could not read https://example.org/water/report: HTTP 403"
+          }
+        },
+        {
+          status: "FAILED",
+          progress: [{ step: "ingest", label: "Ingesting documents", status: "failed", ts: "t" }]
+        }
+      )
+    );
+    vi.spyOn(v2, "getReport").mockResolvedValue({ ...runningReport, status: "FAILED" });
+    renderAt("r");
+    await waitFor(() =>
+      expect(screen.getByText("This verification failed")).toBeInTheDocument()
+    );
+    expect(
+      screen.getByText("https://example.org/water/report — The site returned an error (403).")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Couldn't open")).toBeInTheDocument();
+    expect(screen.queryByText("Queued")).not.toBeInTheDocument();
   });
 
   it("shows a report-load error with a retry affordance instead of a stuck progress feed", async () => {

@@ -77,6 +77,10 @@ const ComparePage = () => {
   const failed = reportA.error || reportB.error;
   const ra = reportA.data;
   const rb = reportB.data;
+  // A scored run with no credibility: none of its sources could be scored.
+  const credibilityGap = [ra, rb].some(
+    (report) => report?.scores != null && report.scores.credibility === null
+  );
 
   return (
     <AppShell
@@ -146,6 +150,12 @@ const ComparePage = () => {
               {ra.scores === null || rb.scores === null ? (
                 <p className="muted" style={{ marginBottom: 0 }}>
                   One of these runs is not scored yet — its score cells show “—”.
+                </p>
+              ) : null}
+              {credibilityGap ? (
+                <p className="muted" style={{ marginBottom: 0 }}>
+                  A credibility of “—” on a scored run means none of that run&apos;s sources
+                  could be scored.
                 </p>
               ) : null}
               <p className="panel-note">
