@@ -194,6 +194,11 @@ describe("sourceName", () => {
     );
     expect(sourceName({ title: "", url: null }, "Source")).toBe("Source");
   });
+
+  it("names a link page stored under its own link by host and path", () => {
+    const link = "https://example.org/water/report%202024?id=7";
+    expect(sourceName({ title: link, url: link }, "x")).toBe("example.org/water/report 2024");
+  });
 });
 
 describe("safeHttpUrl", () => {

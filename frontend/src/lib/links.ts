@@ -167,12 +167,14 @@ export function linkHostPath(raw: string): string {
 }
 
 // A source's display name: its title, else its link as host and path, else
-// the caller's fallback.
+// the caller's fallback. A link page with no title of its own is stored under
+// the link itself, which reads as no title.
 export function sourceName(
   source: { title: string | null; url: string | null },
   fallback: string
 ): string {
-  return source.title || (source.url ? linkHostPath(source.url) : fallback);
+  const title = source.title && source.title !== source.url ? source.title : null;
+  return title || (source.url ? linkHostPath(source.url) : fallback);
 }
 
 // The link as an href only when it is http(s) — anything else (javascript:,

@@ -140,7 +140,8 @@ export default function SourcesPanel({
                   <div className="src-row__name">
                     {sourceName(source, source.doc_id.slice(0, 8))}
                   </div>
-                  {source.title && source.url ? (
+                  {/* The address line, only when the name isn't already the address. */}
+                  {source.url && sourceName(source, "") !== linkHostPath(source.url) ? (
                     <div className="src-row__sub src-row__sub--link" title={source.url}>
                       {linkHostPath(source.url)}
                     </div>

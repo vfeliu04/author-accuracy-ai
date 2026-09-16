@@ -248,6 +248,32 @@ describe("SourcesPanel", () => {
     expect(document.body.textContent).not.toMatch(/NaN|undefined|null/);
   });
 
+  it("names an untitled link page by host and path, once", () => {
+    // A page with no title of its own is stored under its link.
+    const link = "https://example.org/water/report%202024?id=7";
+    const untitled: ReportSource = {
+      doc_id: "b",
+      title: link,
+      source_type: "web",
+      url: link,
+      scorable: true,
+      total: 40,
+      tier: "METADATA_ONLY",
+      components: {},
+      metadata: {}
+    };
+    render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("u2", link)]}
+        report={{ ...doneReport, sources: [untitled] }}
+        ingestStatus="done"
+      />
+    );
+    expect(screen.getAllByText("example.org/water/report 2024")).toHaveLength(1);
+    expect(screen.queryByText(link)).not.toBeInTheDocument();
+    expect(screen.getByText("metadata only")).toBeInTheDocument();
+  });
+
   it("opens any source, including one that can't be scored", () => {
     const onOpenSource = vi.fn();
     render(<SourcesPanel uploads={uploads} report={doneReport} onOpenSource={onOpenSource} />);
