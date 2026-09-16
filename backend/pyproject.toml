@@ -61,5 +61,5 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: needs real Docling models and example PDFs; excluded in CI",
+    "integration: needs live resources (Docling layout models + example PDFs, or network access for the live fetch test); excluded in CI",
 ]

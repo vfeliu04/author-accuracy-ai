@@ -24,7 +24,7 @@ jobs:
       - name: Lint
         run: ruff check .
       # Integration tests need Docling's layout models (large download) and
-      # real example PDFs — they run locally only.
+      # real example PDFs, or live network access — they run locally only.
       - name: Run test suite
         run: python -m pytest -q -m "not integration"
 
