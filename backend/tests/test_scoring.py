@@ -471,12 +471,13 @@ WHO_PROVENANCE = {
 
 
 class _RecordingCrossref(_NoNetworkCrossref):
-    def __init__(self):
+    def __init__(self, records: dict[str, list[dict]] | None = None):
         self.titles: list[str] = []
+        self.records = records or {}
 
     def by_title(self, title, rows=5):
         self.titles.append(title)
-        return []
+        return self.records.get(title, [])
 
 
 def _metadata_calls(llm):
@@ -503,7 +504,8 @@ def test_web_source_is_scored_from_page_provenance_without_a_metadata_call(conn,
             ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
         }
     )
-    crossref = _RecordingCrossref()
+    source_a = {"title": ["Source A"], "published": {"date-parts": [[2025]]}}
+    crossref = _RecordingCrossref(records={"Source A": [source_a]})
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     score_run(conn, llm, run_id, settings, crossref=crossref)
 
@@ -516,6 +518,10 @@ def test_web_source_is_scored_from_page_provenance_without_a_metadata_call(conn,
     assert web["tier"] == "METADATA_ONLY"
     # A non-scholarly page never enters Crossref title search (headline false positives).
     assert "Drinking-water" not in crossref.titles
+    # The PDF source (no upload row, so a PDF) still gets the title search, and a
+    # corroborated match still verifies it.
+    assert "Source A" in crossref.titles
+    assert rows[scored_run["source"]]["tier"] == "VERIFIED_TITLE"
 
 
 def test_scholarly_web_page_keeps_crossref_title_search(conn, scored_run):
