@@ -19,6 +19,7 @@ from authorai.jobs import (
     run_job,
     step_ingest,
 )
+from authorai.web import ExtractionTimeoutError, ThinPageError, extract_web
 from tests.conftest import DIM, poison_providers
 
 SETTINGS = Settings(anthropic_api_key="x", openai_api_key="x")
@@ -791,7 +792,12 @@ def _link_upload(conn, tmp_path, url, *, source_type="web"):
 
 
 def _fetched(
-    url, *, body=b"<html><body>page</body></html>", content_type="text/html", final_url=None
+    url,
+    *,
+    body=b"<html><body>page</body></html>",
+    content_type="text/html",
+    final_url=None,
+    charset="utf-8",
 ):
     from authorai.fetch import FetchedResponse
 
@@ -799,7 +805,7 @@ def _fetched(
         url=url,
         final_url=final_url or url,
         content_type=content_type,
-        charset="utf-8",
+        charset=charset,
         body=body,
         is_pdf=body.startswith(b"%PDF-"),
     )
@@ -1019,6 +1025,108 @@ def test_a_link_too_slow_to_read_fails_the_ingest_step_naming_it(conn, tmp_path,
         "(the page is too large or complex)"
     )
     assert list(planned.parent.iterdir()) == []  # no snapshot, no .part left behind
+
+
+_JS_SHELL = b"<html><body><div id='app'></div><noscript>Enable JavaScript.</noscript></body></html>"
+_UNKNOWN_CHARSET = (
+    '<html><head><meta charset="x-bogus-8"></head><body><p>Organización</p></body></html>'
+).encode("latin-1")
+
+
+@pytest.mark.parametrize(
+    "body, budget, error_type",
+    [
+        (_JS_SHELL, 60.0, ThinPageError),
+        (_UNKNOWN_CHARSET, 60.0, ValueError),
+        (_JS_SHELL, 0.001, ExtractionTimeoutError),
+    ],
+    ids=["thin", "undecodable", "too-slow"],
+)
+def test_a_page_unreadable_after_a_redirect_names_the_link_as_added(
+    conn, tmp_path, monkeypatch, body, budget, error_type
+):
+    """The REAL reader only ever sees where a link ended up (a DOI resolving to its
+    publisher). The error must still name the link as added, the way fetch.py
+    names a redirect — the UI flags a source row only when the error names that
+    row's link — and keep its type and original wording for the failure hints."""
+    from authorai import jobs as jobsmod
+    from authorai.fetch import _shown
+
+    added = "https://doi.org/10.1234/abcd.5678"
+    final = "https://journals.publisher.example/article/S0001"
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, added)
+    poison_providers(monkeypatch)
+    monkeypatch.setattr(
+        jobsmod,
+        "fetch_url",
+        lambda u, s, **k: _fetched(u, body=body, final_url=final, charset=None),
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", extract_timeout_seconds=budget)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    with pytest.raises(error_type) as raised:
+        step_ingest(PipelineContext(conn, settings), run_id, payload)
+
+    if error_type is ExtractionTimeoutError:
+        original = (
+            f"{final} took longer than 0.001 seconds to read (the page is too large or complex)"
+        )
+    else:
+        with pytest.raises(error_type) as direct:
+            extract_web(body, url=final)  # what the reader says, read in this process
+        original = str(direct.value)
+    assert type(raised.value) is error_type
+    assert str(raised.value) == f"{_shown(final)} (redirected from {_shown(added)}): {original}"
+    assert list(planned.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("redirected", [False, True], ids=["direct", "redirected"])
+@pytest.mark.parametrize(
+    "error_type, template",
+    [
+        (ThinPageError, "{url} has no readable article text"),
+        (ValueError, "{url} declares an unknown charset 'x-bogus-8'"),
+        (ExtractionTimeoutError, "{url} took longer than 60 seconds to read"),
+        (RuntimeError, "{url} could not be read: the reader process exited without a result"),
+    ],
+    ids=["thin", "undecodable", "too-slow", "reader-died"],
+)
+def test_reading_errors_keep_their_type_and_name_the_added_link_once(
+    conn, tmp_path, monkeypatch, error_type, template, redirected
+):
+    """Without a redirect the reader's message already names the link as added and
+    stays byte-identical; after one, the same type carries both addresses and the
+    original message, chained to the original exception."""
+    from authorai import jobs as jobsmod
+    from authorai.fetch import _shown
+
+    added = "https://example.org/app"
+    final = "https://www.example.org/app/" if redirected else added
+    original = error_type(template.format(url=final))
+
+    def failing_reader(html, *, url, timeout):
+        raise original
+
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, s, **k: _fetched(u, final_url=final))
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", failing_reader)
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, _ = _link_upload(conn, tmp_path, added)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    with pytest.raises(error_type) as raised:
+        step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+    assert type(raised.value) is error_type
+    if redirected:
+        expected = f"{_shown(final)} (redirected from {_shown(added)}): {original}"
+        assert str(raised.value) == expected
+        assert raised.value.__cause__ is original
+    else:
+        assert raised.value is original
+        assert str(raised.value).count(added) == 1
 
 
 def test_step_ingest_label_counts_opened_pages_in_plain_words(conn, tmp_path, monkeypatch):

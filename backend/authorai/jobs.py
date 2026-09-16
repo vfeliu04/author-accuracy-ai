@@ -34,13 +34,13 @@ from authorai import db as dbmod
 from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.fetch import FetchedResponse, fetch_url
+from authorai.fetch import FetchedResponse, _shown, fetch_url
 from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf, ingest_snapshot, write_snapshot
 from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
-from authorai.web import extract_web_bounded
+from authorai.web import ExtractionTimeoutError, ThinPageError, extract_web_bounded
 
 logger = setup_logger(__name__)
 
@@ -287,8 +287,9 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
     a PDF upload with its content hash, so it is ingested, and dedups, exactly
     like an uploaded PDF. The page is read out of process under a wall-clock
     budget (a page can hold trafilatura for hours). FetchError, ThinPageError
-    and ExtractionTimeoutError propagate: the step fails with the link named,
-    and the retry fetches again.
+    and ExtractionTimeoutError propagate: the step fails with the link named —
+    after a redirect, as '<final>' (redirected from '<link>') like fetch.py's
+    own errors — and the retry fetches again.
     """
     fetched = fetch_url(upload["url"], context.settings)
     planned = Path(upload["path"])
@@ -310,9 +311,15 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
             content_hash=hashlib.sha256(fetched.body).hexdigest(),
         )
         return
-    parsed, page = extract_web_bounded(
-        _page_text(fetched), url=fetched.final_url, timeout=context.settings.extract_timeout_seconds
-    )
+    text = _page_text(fetched)
+    try:
+        parsed, page = extract_web_bounded(
+            text, url=fetched.final_url, timeout=context.settings.extract_timeout_seconds
+        )
+    except (ValueError, RuntimeError) as exc:
+        if fetched.final_url == upload["url"]:
+            raise  # the reader's message already names the link as added
+        raise _redirected(exc, fetched.final_url, upload["url"]) from exc
     provenance = {
         "url": upload["url"],
         "final_url": fetched.final_url,
@@ -321,6 +328,20 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
         **asdict(page),
     }
     write_snapshot(planned, parsed, provenance)
+
+
+# What reading a page raises, most specific first.
+_READING_ERRORS = (ThinPageError, ExtractionTimeoutError, ValueError, RuntimeError)
+
+
+def _redirected(exc: Exception, final_url: str, added_url: str) -> Exception:
+    """A reading error that names the link as added, not only where it ended up:
+    the UI flags a source row only when the run's error names that row's link.
+    Same kind and original message, so the error's type name and the failure
+    hints still match — built from the known class, never type(exc)(...), since a
+    ValueError subclass such as UnicodeDecodeError takes other arguments."""
+    kind = next(cls for cls in _READING_ERRORS if isinstance(exc, cls))
+    return kind(f"{_shown(final_url)} (redirected from {_shown(added_url)}): {exc}")
 
 
 def _page_text(fetched: FetchedResponse) -> bytes | str:
