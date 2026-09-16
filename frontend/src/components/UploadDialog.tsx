@@ -3,7 +3,7 @@ import type { DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCreateRun } from "../api/queries";
 import { formatBytes } from "../lib/format";
-import { checkLink, linkHost } from "../lib/links";
+import { checkLink, linkHostPath } from "../lib/links";
 
 // Client-side mirrors of the server caps — fail fast in the dialog instead
 // of after a full upload (the server remains the authority). Files and links
@@ -119,10 +119,16 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const totalBytes = (report?.size ?? 0) + sources.reduce((sum, file) => sum + file.size, 0);
   const fileCount = (report ? 1 : 0) + sources.length;
   const sourceCount = sources.length + links.length;
+  // A link still in the box counts: submit() adds it first, or holds and says why.
+  const hasTypedLink = linkText.trim() !== "";
   const tooManySources = sourceCount > MAX_SOURCES;
   const tooBig = totalBytes > MAX_TOTAL_BYTES;
   const canSubmit =
-    report !== null && sourceCount > 0 && !tooManySources && !tooBig && !create.isPending;
+    report !== null &&
+    (sourceCount > 0 || hasTypedLink) &&
+    !tooManySources &&
+    !tooBig &&
+    !create.isPending;
 
   const countParts = [
     fileCount > 0 ? plural(fileCount, "file") : null,
@@ -248,7 +254,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
                 🔗
               </span>
               <span className="file-row__name file-row__host" title={link}>
-                {linkHost(link)}
+                {linkHostPath(link)}
               </span>
               <button
                 type="button"

@@ -99,22 +99,22 @@ describe("UploadDialog", () => {
     await waitFor(() => expect(screen.getByText("dropped.pdf")).toBeInTheDocument());
   });
 
-  it("adds a link, shows its host with the full link on hover, and removes it", () => {
+  it("adds a link, shows its host and path with the full link on hover, and removes it", () => {
     renderDialog();
     expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
     typeLink("https://www.example.org/reports/water?id=7");
     clickAdd();
 
-    const host = screen.getByText("www.example.org");
-    expect(host).toHaveAttribute("title", "https://www.example.org/reports/water?id=7");
-    expect(host).toHaveClass("file-row__host");
+    const row = screen.getByText("www.example.org/reports/water");
+    expect(row).toHaveAttribute("title", "https://www.example.org/reports/water?id=7");
+    expect(row).toHaveClass("file-row__host");
     expect(linkInput()).toHaveValue("");
     expect(screen.getByText("Sources (1)")).toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Remove https://www.example.org/reports/water?id=7" })
     );
-    expect(screen.queryByText("www.example.org")).not.toBeInTheDocument();
+    expect(screen.queryByText("www.example.org/reports/water")).not.toBeInTheDocument();
     expect(screen.getByText("Sources (0)")).toBeInTheDocument();
   });
 
@@ -122,8 +122,24 @@ describe("UploadDialog", () => {
     renderDialog();
     typeLink("https://example.org/page");
     fireEvent.keyDown(linkInput(), { key: "Enter" });
-    expect(screen.getByText("example.org")).toHaveAttribute("title", "https://example.org/page");
+    expect(screen.getByText("example.org/page")).toHaveAttribute(
+      "title",
+      "https://example.org/page"
+    );
     expect(linkInput()).toHaveValue("");
+  });
+
+  it("tells apart two links from the same site", () => {
+    renderDialog();
+    typeLink("https://www.who.int/news-room/fact-sheets/detail/drinking-water");
+    clickAdd();
+    typeLink("https://www.who.int/news-room/fact-sheets/detail/sanitation");
+    clickAdd();
+    const rows = Array.from(document.querySelectorAll(".file-row__host"), (row) => row.textContent);
+    expect(rows).toEqual([
+      "www.who.int/news-room/fact-sheets/detail/drinking-water",
+      "www.who.int/news-room/fact-sheets/detail/sanitation"
+    ]);
   });
 
   it("rejects a duplicate link, including one that differs only by its #fragment", () => {
@@ -142,7 +158,7 @@ describe("UploadDialog", () => {
     expect(screen.queryByText("That link is already added.")).not.toBeInTheDocument();
     fireEvent.keyDown(linkInput(), { key: "Enter" });
     expect(screen.getByText("That link is already added.")).toBeInTheDocument();
-    expect(screen.getAllByText("example.org")).toHaveLength(1);
+    expect(screen.getAllByText("example.org/page")).toHaveLength(1);
   });
 
   it("rejects YouTube links", () => {
@@ -151,7 +167,7 @@ describe("UploadDialog", () => {
     clickAdd();
     expect(screen.getByText("YouTube links aren't supported yet.")).toBeInTheDocument();
     expect(linkInput()).toHaveAttribute("aria-invalid", "true");
-    expect(screen.queryByText("youtu.be")).not.toBeInTheDocument();
+    expect(document.querySelector(".file-row__host")).toBeNull();
     expect(screen.getByText("Sources (0)")).toBeInTheDocument();
   });
 
@@ -217,6 +233,38 @@ describe("UploadDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     const form = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
     expect(form.getAll("source_urls")).toEqual(["https://example.org/the-key-source"]);
+  });
+
+  it("enables Verify for a report plus a link typed into the box but not yet added, and sends it", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    const onClose = renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf")] } });
+    await waitFor(() => expect(screen.getByText("report.pdf")).toBeInTheDocument());
+    expect(verify()).toBeDisabled();
+
+    typeLink("   ");
+    expect(verify()).toBeDisabled(); // whitespace is not a source
+
+    typeLink("https://example.org/the-only-source");
+    expect(verify()).toBeEnabled();
+    fireEvent.click(verify());
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const [, sourcesArg, linksArg] = create.mock.calls[0];
+    expect(sourcesArg).toEqual([]);
+    expect(linksArg).toEqual(["https://example.org/the-only-source"]);
+  });
+
+  it("holds Verify on the only source being a typed link that can't be added, and says why", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf")] } });
+    await waitFor(() => expect(screen.getByText("report.pdf")).toBeInTheDocument());
+
+    typeLink("example.org/no-scheme");
+    fireEvent.click(verify());
+    expect(screen.getByText(/isn't a valid link/)).toBeInTheDocument();
+    expect(linkInput()).toHaveValue("example.org/no-scheme");
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("holds Verify on a link in the box that can't be added, and says why", async () => {
