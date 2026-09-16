@@ -13,7 +13,7 @@ export const STEP_TITLES: Record<string, string> = {
 
 // Sub-copy for steps that haven't finished yet.
 export const STEP_PENDING_DETAIL: Record<string, string> = {
-  ingest: "Text, tables and figures from every PDF",
+  ingest: "Text, tables and figures from every PDF and web page",
   extract: "Checkable claims from the report",
   verify: "Checking each claim — typically minutes, longer at busy times",
   score: "Accuracy · credibility · validity"

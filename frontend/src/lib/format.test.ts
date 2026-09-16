@@ -24,6 +24,12 @@ describe("citeLabel", () => {
     expect(citeLabel({ ...none, source_type: "pdf" })).toBeNull();
   });
 
+  it("never labels a page-less PDF item by its section", () => {
+    // Docling leaves page unset for items without provenance; the PDF's
+    // heading must not make it read like a web section.
+    expect(citeLabel({ ...none, source_type: "pdf", section: "Methods" })).toBeNull();
+  });
+
   it("cites a web page by section, never by page", () => {
     expect(citeLabel({ ...none, source_type: "web", section: "Key findings" })).toBe(
       "§ Key findings"
