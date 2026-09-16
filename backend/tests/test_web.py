@@ -202,6 +202,7 @@ def test_large_jsonld_graph_is_ordered_in_linear_time():
             for i in range(30_000)
         ]
     }
+    graph["@graph"][0]["url"] = "https://example.org/catalog"  # the one node naming the page
     markup = _markup(_ld(graph))
     started = time.perf_counter()
     metadata = _page_metadata(markup, url="https://example.org/catalog")
@@ -708,30 +709,46 @@ def test_jsonld_id_references_resolve_within_the_graph():
 def test_every_jsonld_field_comes_from_one_work_node():
     # A news story that embeds the study it reports on: the study's authors
     # and DOI must never be attributed to the news page (credibility would
-    # verify the page against someone else's record).
-    markup = _markup(
-        _ld(
-            {
-                "@type": "NewsArticle",
-                "headline": "Study finds aquifers shrinking",
-                "datePublished": "2025-02-01",
-            }
-        ),
-        _ld(
-            {
-                "@type": "ScholarlyArticle",
-                "headline": "Global groundwater decline",
-                "author": [{"@type": "Person", "name": "A. Researcher"}],
-                "publisher": {"@type": "Organization", "name": "Nature Portfolio"},
-                "datePublished": "2019-05-01",
-                "identifier": "https://doi.org/10.1038/s41586-019-0000-0",
-            }
-        ),
+    # verify the page against someone else's record — Crossref resolves the
+    # study's DOI and the page inherits its tier) — whichever node the page
+    # lists first, and however the pasted link differs from the canonical URL.
+    canonical = "https://news.example/aquifers"
+    own = {
+        "@type": "NewsArticle",
+        "headline": "Study finds aquifers shrinking",
+        "datePublished": "2025-02-01",
+        "mainEntityOfPage": canonical,
+    }
+    study = {
+        "@type": "ScholarlyArticle",
+        "headline": "Global groundwater decline",
+        "author": [{"@type": "Person", "name": "A. Researcher"}],
+        "publisher": {"@type": "Organization", "name": "Nature Portfolio"},
+        "datePublished": "2019-05-01",
+        "identifier": "https://doi.org/10.1038/s41586-019-0000-0",
+    }
+    expected = PageMetadata(title="Study finds aquifers shrinking", publication_date="2025-02-01")
+    for blocks in ((own, study), (study, own)):
+        for url in (
+            canonical,
+            canonical + "?utm_source=twitter&utm_medium=social",
+            "http://www.news.example/aquifers/",
+        ):
+            assert _page_metadata(_markup(*map(_ld, blocks)), url=url) == expected, (blocks, url)
+
+    # When no article node names the page, or a cited node's "@id" is a
+    # fragment of the page's URL so two do, document order decides nothing:
+    # the JSON-LD contributes no field and the <meta> tags stand alone.
+    tags = (
+        '<meta property="og:title" content="Study finds aquifers shrinking">',
+        '<meta property="article:published_time" content="2025-02-01T09:00:00Z">',
     )
-    assert _page_metadata(markup, url="https://news.example/aquifers") == PageMetadata(
-        title="Study finds aquifers shrinking",
-        publication_date="2025-02-01",
-    )
+    unnamed = {key: value for key, value in own.items() if key != "mainEntityOfPage"}
+    fragment = {**study, "@id": canonical + "#cited-study"}
+    for blocks in ((study, unnamed), (unnamed, study), (fragment, own), (own, fragment)):
+        markup = _markup(*tags, *map(_ld, blocks))
+        assert _page_metadata(markup, url=canonical) == expected, blocks
+    assert _page_metadata(_markup(*map(_ld, (study, unnamed))), url=canonical) == PageMetadata()
 
 
 def test_the_work_node_that_names_this_url_is_the_page():
@@ -745,6 +762,20 @@ def test_the_work_node_that_names_this_url_is_the_page():
     }
     metadata = _page_metadata(_markup(_ld({"@graph": [cited, own]})), url=url + "#top")
     assert (metadata.title, metadata.authors) == ("Study finds aquifers shrinking", ["Kim Osei"])
+
+    # What a pasted link adds to the canonical address does not hide the match:
+    # scheme, a leading www., host case, a trailing slash, tracking parameters.
+    for pasted in (
+        "http://www.news.example/2025/aquifers/",
+        "https://News.Example/2025/aquifers?utm_source=x&fbclid=1&mc_cid=2&gclid=3",
+    ):
+        metadata = _page_metadata(_markup(_ld({"@graph": [cited, own]})), url=pasted)
+        assert metadata.authors == ["Kim Osei"], pasted
+    # Any other query is part of the address: ?id=2 is not the page ?id=1 describes.
+    listed = {**own, "mainEntityOfPage": url + "?id=1"}
+    markup = _markup(_ld({"@graph": [cited, listed]}))
+    assert _page_metadata(markup, url=url + "?id=2").authors == []
+    assert _page_metadata(markup, url=url + "?utm_term=y&id=1").authors == ["Kim Osei"]
 
 
 def test_organization_authors_are_not_personal_authors_but_can_name_the_publisher():

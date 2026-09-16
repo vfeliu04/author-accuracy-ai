@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from html import unescape
 from html.parser import HTMLParser
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import trafilatura
 from lxml import etree
@@ -671,14 +672,22 @@ def _jsonld_nodes(blocks: list[str], url: str) -> list[dict]:
 
 def _primary_work(nodes: list[dict], url: str) -> dict | None:
     """The node describing this page: among article-type nodes, the one whose
-    url, @id or mainEntityOfPage names this URL, else the first of them. Only
-    without any article node, the same choice among page-type nodes — a
-    WebPage node describes the container ("Title - Site Name"), not the work."""
+    url, @id or mainEntityOfPage names this URL, or the only one there is.
+    Several article nodes with none — or more than one — naming the page
+    decide nothing: document order is no evidence of which is the page's own
+    (a news story's JSON-LD may list the study it reports on first, and its
+    DOI would then be verified as the page's). Only without any article node,
+    the same choice among page-type nodes — a WebPage node describes the
+    container ("Title - Site Name"), not the work."""
     page = _comparable_url(url)
     for kinds in (_ARTICLE_TYPES, _PAGE_TYPES):
         candidates = [node for node in nodes if _types(node) & kinds]
-        if candidates:
-            return next((node for node in candidates if page in _named_urls(node)), candidates[0])
+        if not candidates:
+            continue
+        named = [node for node in candidates if page in _named_urls(node)]
+        if len(named) == 1:
+            return named[0]
+        return candidates[0] if len(candidates) == 1 else None
     return None
 
 
@@ -690,8 +699,28 @@ def _named_urls(node: dict) -> set[str]:
     return {_comparable_url(value) for value in values if isinstance(value, str)}
 
 
+# Query parameters that record how a reader arrived, not which page; any other
+# query is part of the address (?id=2 is not the page ?id=1 describes).
+_TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid")
+
+
 def _comparable_url(value: str) -> str:
-    return value.strip().split("#", 1)[0].rstrip("/")
+    """The address without what a pasted link adds to the canonical one: the
+    scheme, a leading www., host case, a fragment, a trailing slash and
+    tracking parameters."""
+    try:
+        parts = urlsplit(value.strip())
+        host = (parts.hostname or "").removeprefix("www.")
+    except ValueError:  # a JSON-LD value that is not a URL at all
+        return value.strip()
+    query = urlencode(
+        [
+            (key, item)
+            for key, item in parse_qsl(parts.query, keep_blank_values=True)
+            if not key.lower().startswith(_TRACKING_PARAMS)
+        ]
+    )
+    return host + parts.path.rstrip("/") + (f"?{query}" if query else "")
 
 
 def _types(node: dict) -> set[str]:
