@@ -272,9 +272,14 @@ def delete_run(run_id: str, request: Request, conn: Conn) -> None:
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     # Files AFTER the commit: a crash here leaves harmless orphan files,
-    # never database rows pointing at missing ones.
+    # never database rows pointing at missing ones. Only files the app wrote,
+    # checked like get_document_file: a CLI ingest records the user's ORIGINAL
+    # file (ingest_parsed with no upload id), which deletion must never touch.
+    uploads_root = settings.uploads_dir.resolve()
     for path in upload_paths:
-        Path(path).unlink(missing_ok=True)
+        resolved = Path(path).resolve()
+        if resolved.is_relative_to(uploads_root):
+            resolved.unlink(missing_ok=True)
     shutil.rmtree(settings.run_figures_dir(run_id), ignore_errors=True)
 
 

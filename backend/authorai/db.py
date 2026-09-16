@@ -665,9 +665,10 @@ class RunBusyError(RuntimeError):
 
 def delete_run_data(conn: sqlite3.Connection, run_id: str) -> list[str]:
     """Delete EVERY database trace of a run in one transaction; return the
-    upload file paths that backed it for the caller to unlink AFTER commit
-    (a crash between commit and unlink leaves harmless orphan files — the
-    reverse order would leave DB rows pointing at missing files).
+    upload file paths that backed it, and that no other upload still names, for
+    the caller to unlink AFTER commit (a crash between commit and unlink leaves
+    harmless orphan files — the reverse order would leave DB rows pointing at
+    missing files).
 
     BEGIN IMMEDIATE takes the write lock up front so the busy-job guard and
     the deletion are one atomic unit against the worker claiming the job.
@@ -737,8 +738,14 @@ def delete_run_data(conn: sqlite3.Connection, run_id: str) -> list[str]:
         if upload_ids:
             conn.execute(f"DELETE FROM uploads WHERE id IN ({placeholders})", list(upload_ids))
         conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        # A file another upload still names is not this run's to hand back: the
+        # CLI can ingest a stored PDF by its absolute path while the uploading
+        # run's row names it relative to the working directory.
+        still_named = {
+            Path(row["path"]).resolve() for row in conn.execute("SELECT path FROM uploads")
+        }
         conn.commit()
-        return paths
+        return [path for path in paths if Path(path).resolve() not in still_named]
     except BaseException:
         conn.rollback()
         raise

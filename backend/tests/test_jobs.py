@@ -401,7 +401,12 @@ def test_worker_thread_completes_jobs_and_survives_step_failures(tmp_path):
 
 
 def _dedup_settings(tmp_path):
-    return Settings(anthropic_api_key="x", openai_api_key="x", figures_dir=tmp_path / "figures")
+    return Settings(
+        anthropic_api_key="x",
+        openai_api_key="x",
+        figures_dir=tmp_path / "figures",
+        uploads_dir=tmp_path,  # the donor PDFs live here, so deleting a run removes them
+    )
 
 
 def _ingested_upload(
@@ -650,12 +655,14 @@ def test_step_ingest_label_counts_reuse(conn, tmp_path, monkeypatch):
 
 
 def _api_style_delete(conn, settings, run_id):
-    """Exactly what DELETE /runs/{id} does: rows in one txn, then the files."""
-    import shutil
+    """Exactly what DELETE /runs/{id} does — the route itself, called directly:
+    rows in one txn, then the files it owns."""
+    from types import SimpleNamespace
 
-    for path in dbmod.delete_run_data(conn, run_id):
-        Path(path).unlink(missing_ok=True)
-    shutil.rmtree(settings.run_figures_dir(run_id), ignore_errors=True)
+    from authorai.api import delete_run
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
+    delete_run(run_id, request, conn)
 
 
 def test_deleting_the_donor_run_leaves_the_copy_whole(conn, tmp_path, monkeypatch):

@@ -413,6 +413,64 @@ def test_delete_refuses_active_jobs_and_unknown_runs(tmp_path):
         assert client.delete(f"/api/runs/{poisoned}", headers=AUTH).status_code == 204
 
 
+@pytest.mark.parametrize("recorded", ["absolute", "dot-dot"])
+def test_delete_run_never_removes_a_file_outside_the_uploads_folder(tmp_path, recorded):
+    """A CLI ingest records the user's ORIGINAL file (ingest_parsed with no upload
+    id stores its absolute path): deleting that run from the gallery removes its
+    rows, never the user's own PDF — nor one reached by climbing out of uploads."""
+    settings = _settings(tmp_path)
+    library = tmp_path / "library" / "my_only_copy.pdf"
+    library.parent.mkdir()
+    library.write_bytes(PDF_BYTES)
+    settings.uploads_dir.mkdir()  # so the dot-dot path really reaches the library
+    path = {
+        "absolute": str(library.resolve()),
+        "dot-dot": str(settings.uploads_dir / ".." / "library" / library.name),
+    }[recorded]
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    run_id = dbmod.create_run(conn)
+    upload = dbmod.add_upload(conn, "REPORT", library.name, path)
+    dbmod.add_document(conn, run_id, "REPORT", upload_id=upload)
+    conn.close()
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        assert client.delete(f"/api/runs/{run_id}", headers=AUTH).status_code == 204
+        assert client.get(f"/api/runs/{run_id}", headers=AUTH).status_code == 404
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    assert conn.execute("SELECT count(*) FROM uploads WHERE id = ?", (upload,)).fetchone()[0] == 0
+    conn.close()
+    assert library.read_bytes() == PDF_BYTES
+
+
+def test_delete_run_keeps_a_stored_file_another_run_still_names(tmp_path, monkeypatch):
+    """The CLI can ingest a PDF straight out of the uploads folder, recording it by
+    its absolute path while the uploading run's row names it relative to the
+    server's working directory (the real default, data/uploads). Deleting the CLI
+    run leaves the file to that run; deleting the last run naming it removes it."""
+    monkeypatch.chdir(tmp_path)
+    settings = _settings(tmp_path, uploads_dir=Path("uploads"))
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        api_run = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        [stored] = [
+            Path(row["path"])
+            for row in conn.execute("SELECT path FROM uploads WHERE kind = 'REPORT'")
+        ]
+        assert not stored.is_absolute()
+        cli_run = dbmod.create_run(conn)
+        cli_upload = dbmod.add_upload(conn, "REPORT", "report.pdf", str(stored.resolve()))
+        dbmod.add_document(conn, cli_run, "REPORT", upload_id=cli_upload)
+
+        assert client.delete(f"/api/runs/{cli_run}", headers=AUTH).status_code == 204
+        assert stored.read_bytes() == PDF_BYTES
+
+        job = dbmod.get_run_job(conn, api_run)
+        dbmod.finish_job_and_run(conn, job["id"], api_run, "FAILED", error="boom")
+        assert client.delete(f"/api/runs/{api_run}", headers=AUTH).status_code == 204
+        assert not stored.exists()
+        conn.close()
+
+
 def test_report_sources_include_extracted_metadata(tmp_path):
     settings = _settings(tmp_path)
     run_id = _seed_scored_run(settings)
