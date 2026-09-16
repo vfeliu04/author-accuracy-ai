@@ -219,7 +219,9 @@ class _Watchdog:
     hold the fetch indefinitely. httpcore's `trace` extension hands over the
     network stream the moment TCP (and TLS) connect; a timer shuts that socket
     down at the deadline, turning the stuck read into an error this module
-    reports as a timeout.
+    reports as a timeout. One read takes the shutdown as a normal end instead:
+    a body framed by connection close, which is why `fired` is checked again
+    once a body has been read.
     """
 
     _STREAM_EVENTS = ("connection.connect_tcp.complete", "connection.start_tls.complete")
@@ -277,6 +279,9 @@ def fetch_url(
     addresses). A supplied `client` must be built with trust_env=False and no
     proxy — a proxy resolves the hostname itself, voiding both the gate and the
     pin — and is left open for its owner; a client created here is closed.
+    A supplied client must not hold pooled keep-alive connections to the
+    destination: a reused connection emits no connect event, so the time
+    budget's watchdog would have no socket to shut.
     """
     if client is not None and client.trust_env:
         raise ValueError(
@@ -331,14 +336,17 @@ def _fetch(
                 if response.status_code in REDIRECT_STATUSES:
                     current = _redirect_target(response, current, where)
                     continue
-                return _read(response, settings, deadline, where, requested, current)
+                fetched = _read(response, settings, deadline, where, requested, current)
+                if watchdog.fired:
+                    # A body framed by connection close ends when the socket does,
+                    # so the watchdog's shutdown read as a normal end: a cut page.
+                    raise _timed_out(where, budget)
+                return fetched
         except httpx.TimeoutException as exc:
             raise FetchError(f"Fetching {where} timed out ({budget:g}-second time budget)") from exc
         except httpx.HTTPError as exc:
             if watchdog.fired:  # the watchdog shut the socket: a timeout, not a network fault
-                raise FetchError(
-                    f"Fetching {where} timed out after its {budget:g}-second time budget"
-                ) from exc
+                raise _timed_out(where, budget) from exc
             raise FetchError(f"Fetching {where} failed: {type(exc).__name__}: {exc}") from exc
         except httpx.InvalidURL as exc:
             # Even with follow_redirects=False, httpx parses a redirect's
@@ -363,9 +371,13 @@ def _where(requested: str, current: str) -> str:
 def _remaining(deadline: float, budget: float, where: str) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        # "timed out" is the phrase the UI turns into a plain sentence.
-        raise FetchError(f"Fetching {where} timed out after its {budget:g}-second time budget")
+        raise _timed_out(where, budget)
     return remaining
+
+
+def _timed_out(where: str, budget: float) -> FetchError:
+    # "timed out" is the phrase the UI turns into a plain sentence.
+    return FetchError(f"Fetching {where} timed out after its {budget:g}-second time budget")
 
 
 def _pin(url: httpx.URL, where: str, resolve: Resolve) -> tuple[httpx.URL, str, dict[str, str]]:

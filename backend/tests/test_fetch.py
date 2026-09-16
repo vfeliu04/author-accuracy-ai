@@ -7,15 +7,23 @@ raises. The one integration test really fetches https://example.com/ to prove
 that pinning to an IP while sending SNI still passes certificate verification.
 """
 
+import datetime
 import gzip
 import ipaddress
 import socket
 import ssl
+import threading
+import time
 import types
+from collections.abc import Callable
 
 import httpx
 import pytest
 import respx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from authorai import fetch as fetchmod
 from authorai.config import Settings
@@ -1091,60 +1099,188 @@ def test_real_fetch_pins_the_ip_and_verifies_the_certificate_against_the_hostnam
     assert any(name in ("example.com", "*.example.com") for name in seen["dns_names"])
 
 
-def test_a_server_trickling_headers_cannot_hold_a_fetch_past_its_budget(monkeypatch):
-    """Socket timeouts bound each READ, not the total: a server that sends one
-    header byte faster than the read timeout would otherwise keep the single
-    jobs worker busy indefinitely. A REAL socket, because the defense acts on it."""
-    import socket as socketmod
-    import threading
-    import time as realtime
+# --- real loopback sockets: the time budget's watchdog acts on a socket -------
 
-    from authorai import fetch as fetchmod
-    from authorai.config import Settings
-    from authorai.fetch import FetchError, fetch_url
+_SERVER_GIVE_UP_SECONDS = 8.0  # a trickle outlives the 1-second budgets below, never a test
+_CLOSE_DELIMITED_HEAD = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+_PAGE_BODY = b"<html><body>" + b"<p>The page keeps going.</p>" * 40 + b"</body></html>"
 
-    listener = socketmod.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    port = listener.getsockname()[1]
-    stop = threading.Event()
 
-    def trickle_headers_forever():
+@pytest.fixture(scope="session")
+def loopback_tls(tmp_path_factory) -> ssl.SSLContext:
+    """A server TLS context with a throwaway self-signed certificate made for
+    this test session, so no key material is ever committed. The client does
+    not verify it: these tests are about time and framing, and the
+    integration test covers certificate verification."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "trickle.example")])
+    now = datetime.datetime.now(datetime.UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("trickle.example")]), critical=False
+        )
+        .sign(key, hashes.SHA256())
+    )
+    directory = tmp_path_factory.mktemp("loopback_tls")
+    cert_path, key_path = directory / "cert.pem", directory / "key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    return context
+
+
+class LoopbackServer:
+    """Serves ONE connection on a daemon thread: once the request arrives,
+    `handle(conn, stop)` writes the response, and the connection is closed
+    when it returns. With a `tls` context the connection is wrapped first."""
+
+    def __init__(
+        self,
+        handle: Callable[[socket.socket, threading.Event], None],
+        *,
+        tls: ssl.SSLContext | None,
+    ):
+        self._handle = handle
+        self._tls = tls
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self.stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self) -> "LoopbackServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop.set()
+        self._listener.close()
+        self._thread.join(timeout=10)
+
+    def _serve(self) -> None:
         try:
-            conn, _ = listener.accept()
+            conn, _ = self._listener.accept()
         except OSError:
             return
         try:
-            conn.settimeout(0.5)
+            # Also bounds the TLS handshake: generous, so a starved CI runner
+            # cannot fail the handshake and pass a timeout test for the wrong reason.
+            conn.settimeout(2.0)
+            if self._tls is not None:
+                conn = self._tls.wrap_socket(conn, server_side=True)
             try:
-                conn.recv(65536)
+                conn.recv(65536)  # the request
             except OSError:
                 pass
-            conn.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
-            give_up = realtime.monotonic() + 8
-            while not stop.is_set() and realtime.monotonic() < give_up:
-                conn.sendall(b"a")
-                realtime.sleep(0.05)
+            self._handle(conn, self.stop)
+            if self._tls is not None:
+                conn = conn.unwrap()  # close_notify: the page ended, the connection did not break
         except OSError:
             pass  # the fetcher shut the connection: the behavior under test
         finally:
             conn.close()
 
-    server = threading.Thread(target=trickle_headers_forever, daemon=True)
-    server.start()
-    # The address gate rightly refuses loopback; this test is about time, not the gate.
+
+def _trickle(conn: socket.socket, stop: threading.Event, piece: bytes) -> None:
+    give_up = time.monotonic() + _SERVER_GIVE_UP_SECONDS
+    while not stop.is_set() and time.monotonic() < give_up:
+        conn.sendall(piece)
+        time.sleep(0.05)
+
+
+def _trickle_headers(conn: socket.socket, stop: threading.Event) -> None:
+    conn.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+    _trickle(conn, stop, b"a")
+
+
+def _trickle_close_delimited_body(conn: socket.socket, stop: threading.Event) -> None:
+    """Complete headers, no Content-Length or chunking, half the page at once,
+    then more body forever: the page ends only when the connection does."""
+    conn.sendall(_CLOSE_DELIMITED_HEAD + _PAGE_BODY[: len(_PAGE_BODY) // 2])
+    _trickle(conn, stop, b"<p>more</p>")
+
+
+def _send_close_delimited_page(conn: socket.socket, stop: threading.Event) -> None:
+    conn.sendall(_CLOSE_DELIMITED_HEAD + _PAGE_BODY)
+
+
+def _resolve_to_loopback(host: str, port: int) -> list[str]:
+    return ["127.0.0.1"]
+
+
+def _fetch_loopback(scheme: str, port: int) -> FetchedResponse:
+    url = f"{scheme}://trickle.example:{port}/"
+    settings = _settings(fetch_timeout_seconds=1.0)
+    if scheme == "http":  # the production path: the fetcher's own client
+        return fetch_url(url, settings, resolve=_resolve_to_loopback)
+    with httpx.Client(trust_env=False, verify=False) as client:
+        return fetch_url(url, settings, client=client, resolve=_resolve_to_loopback)
+
+
+@pytest.fixture()
+def loopback_allowed(monkeypatch):
+    # The address gate rightly refuses loopback; these tests are about time, not the gate.
     monkeypatch.setattr(fetchmod, "is_public_address", lambda ip: True)
-    settings = Settings(anthropic_api_key="x", openai_api_key="x", fetch_timeout_seconds=1.0)
-    started = realtime.monotonic()
-    try:
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_server_trickling_headers_cannot_hold_a_fetch_past_its_budget(
+    loopback_allowed, loopback_tls, scheme
+):
+    """Socket timeouts bound each READ, not the total: a server that sends one
+    header byte faster than the read timeout would otherwise keep the single
+    jobs worker busy indefinitely. Over TLS the watchdog must hold the TLS
+    socket — wrapping detaches the TCP one it saw first — so both schemes run."""
+    tls = loopback_tls if scheme == "https" else None
+    with LoopbackServer(_trickle_headers, tls=tls) as server:
+        started = time.monotonic()
         with pytest.raises(FetchError, match="timed out"):
-            fetch_url(
-                f"http://trickle.example:{port}/",
-                settings,
-                resolve=lambda host, p: ["127.0.0.1"],
-            )
-        assert realtime.monotonic() - started < 4.0
-    finally:
-        stop.set()
-        listener.close()
-        server.join(timeout=10)
+            _fetch_loopback(scheme, server.port)
+        assert time.monotonic() - started < 4.0
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_body_cut_by_the_watchdog_is_a_timeout_not_a_truncated_page(
+    loopback_allowed, loopback_tls, scheme
+):
+    """A body framed by connection close ends when the socket does, so the
+    watchdog's shutdown reads as a normal end of message rather than an error:
+    the cut page must still surface as a timeout, never as a fetched source."""
+    tls = loopback_tls if scheme == "https" else None
+    with LoopbackServer(_trickle_close_delimited_body, tls=tls) as server:
+        started = time.monotonic()
+        with pytest.raises(FetchError) as info:
+            _fetch_loopback(scheme, server.port)
+        assert time.monotonic() - started < 4.0
+    assert str(info.value) == (
+        f"Fetching '{scheme}://trickle.example:{server.port}/' "
+        "timed out after its 1-second time budget"
+    )
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_close_delimited_page_is_read_whole_inside_the_budget(
+    loopback_allowed, loopback_tls, scheme
+):
+    """The guard against the cut must not turn a legitimate close-delimited
+    page (HTTP/1.0-style framing is still served) into a false timeout."""
+    tls = loopback_tls if scheme == "https" else None
+    with LoopbackServer(_send_close_delimited_page, tls=tls) as server:
+        result = _fetch_loopback(scheme, server.port)
+    assert result.body == _PAGE_BODY
+    assert result.content_type == "text/html" and not result.is_pdf

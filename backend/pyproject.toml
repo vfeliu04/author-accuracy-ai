@@ -40,6 +40,9 @@ dev = [
     "ruff==0.16.1",
     # Records/replays httpx traffic so Crossref tests run offline.
     "respx==0.22.0",
+    # Test-only: a throwaway loopback TLS certificate made at test time, so the
+    # fetch watchdog's HTTPS path is tested without committing a private key.
+    "cryptography==46.0.3",
 ]
 
 [tool.setuptools]
