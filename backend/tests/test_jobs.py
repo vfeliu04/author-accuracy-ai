@@ -1015,6 +1015,97 @@ def test_an_unloadable_page_behind_a_completed_document_is_never_refetched(
     assert planned.read_bytes() == b""
 
 
+def _stored_page(conn, tmp_path):
+    """A web upload whose page the fetch pre-pass already stored (and that loads)."""
+    from authorai.ingest import ParsedDocument, ParsedSection, write_snapshot
+
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    section = ParsedSection(
+        title="Key facts",
+        page=None,
+        text="Two point two billion people lacked safely managed drinking water.",
+    )
+    write_snapshot(
+        planned,
+        ParsedDocument(title="Facts", sections=[section], tables=[], figures=[]),
+        {"url": url},
+    )
+    return upload_id, planned
+
+
+def _link_documents(conn, run_id, upload_id):
+    return [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT d.id, (SELECT count(*) FROM chunks c WHERE c.doc_id = d.id) FROM documents d "
+            "WHERE d.run_id = ? AND d.upload_id = ?",
+            (run_id, upload_id),
+        )
+    ]
+
+
+@pytest.mark.parametrize("embedder_ready", [False, True], ids=["no-embedder", "embedder-built"])
+def test_retry_over_a_completed_link_document_recomputes_nothing(
+    conn, tmp_path, monkeypatch, embedder_ready
+):
+    """An ingest retry (the retry endpoint, startup requeue) over a web page whose
+    document already finished: no fetch, no re-ingest, no duplicate document. The
+    conftest poisons are the guard — with no embedder built yet, constructing one
+    fails first; with one already built, re-ingesting the stored page does; and
+    fetching a stored page again trips the fetch poison either way."""
+    from authorai import ingest as ingest_mod
+
+    settings = _dedup_settings(tmp_path)
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _stored_page(conn, tmp_path)
+    doc_id = ingest_mod.ingest_snapshot(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        planned,
+        kind="SOURCE",
+        figures_dir=settings.figures_dir,
+        upload_id=upload_id,
+    )
+    poison_providers(monkeypatch)  # no overrides: the poisons ARE the guard here
+    context = PipelineContext(conn, settings)
+    if embedder_ready:
+        context._embedder = FakeEmbedder(dim=DIM)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(context, run_id, payload) == "Read 2 documents"
+    assert _link_documents(conn, run_id, upload_id) == [(doc_id, 1)]
+
+
+def test_torn_link_document_is_reingested_from_its_stored_page_without_refetching(
+    conn, tmp_path, monkeypatch
+):
+    """A document row with no chunks is a torn ingest for a link too: it is deleted
+    and ingested again from the page as stored — never skipped, never fetched."""
+    from authorai import jobs as jobsmod
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _stored_page(conn, tmp_path)
+    stored = planned.read_bytes()
+    torn = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)  # no chunks
+    monkeypatch.setattr(
+        jobsmod, "fetch_url", lambda *a, **k: pytest.fail("re-fetched a stored page")
+    )
+    context = PipelineContext(conn, _dedup_settings(tmp_path))
+    context._embedder = FakeEmbedder(dim=DIM)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(context, run_id, payload) == "Read 2 documents"
+
+    rows = _link_documents(conn, run_id, upload_id)
+    assert len(rows) == 1
+    assert rows[0][0] != torn and rows[0][1] > 0
+    assert planned.read_bytes() == stored
+
+
 def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     conn, tmp_path, monkeypatch
 ):
