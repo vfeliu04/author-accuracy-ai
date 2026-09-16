@@ -15,8 +15,11 @@ the rest of its private network. The defenses, in the order a fetch meets them:
    certificate verification still runs against the hostname, and the HTTP
    client never performs a second, rebindable DNS lookup of its own.
 4. Manual redirects: each hop repeats 1-3 against the LOGICAL (hostname) URL.
-5. Content-type and declared-size gates BEFORE the body is read, then a cap
-   on decoded bytes while it streams (a gzip bomb is measured after inflation).
+5. Content-type, Content-Encoding and declared-size gates BEFORE the body is
+   read, then a cap on decoded bytes while it streams (a gzip bomb is measured
+   after inflation). Only ONE coding layer is accepted: httpx inflates every
+   layer of a socket read before the cap sees it, and each layer multiplies
+   the inflation by up to ~1000x — one layer keeps a read under ~66 MB.
 
 Time: `fetch_timeout_seconds` is one budget for the whole fetch. It is checked
 between hops and after every body chunk, each request's socket timeouts are
@@ -55,6 +58,7 @@ ACCEPT_ENCODING = "gzip, deflate"
 # packages, and httpx passes a coding it cannot decode through UNTOUCHED —
 # still-compressed bytes would reach extraction as if they were the page.
 DECODABLE_ENCODINGS = frozenset({"identity", "gzip", "deflate"})
+_SHOWN_CODINGS = 4  # stacked coding layers quoted in the refusal before "..."
 
 _YOUTUBE_HOSTS = frozenset(
     f"{prefix}{domain}"
@@ -443,11 +447,24 @@ def _read(
             "(a source must be an HTML page or a PDF)"
         )
     codings = [c.strip().lower() for c in response.headers.get("Content-Encoding", "").split(",")]
-    undecodable = [c for c in codings if c and c not in DECODABLE_ENCODINGS]
+    applied = [c for c in codings if c and c != "identity"]
+    undecodable = [c for c in applied if c not in DECODABLE_ENCODINGS]
     if undecodable:
         raise FetchError(
             f"Fetching {where} failed: unsupported Content-Encoding {', '.join(undecodable)!r}"
         )
+    if len(applied) > 1:
+        # httpx inflates EVERY layer of one socket read before iter_bytes yields
+        # it, so the cap below would only see the fully inflated result: under
+        # "gzip, gzip", 269 wire bytes reached it as one 64 MiB chunk (measured),
+        # and one 64 KiB read would reach ~66 GB. A repeated header lands here
+        # too — httpx joins the values with ", ". The server picks how many
+        # tokens the header carries and the error is stored with the run, so
+        # only the first few are quoted.
+        shown = ", ".join(applied[:_SHOWN_CODINGS]) + (
+            ", ..." if len(applied) > _SHOWN_CODINGS else ""
+        )
+        raise FetchError(f"Fetching {where} failed: unsupported stacked Content-Encoding {shown!r}")
     declared = response.headers.get("Content-Length")
     if declared is not None:
         if not declared.strip().isdigit():
@@ -455,7 +472,9 @@ def _read(
         if int(declared) > limit:
             raise _too_large(where, limit)
     body = bytearray()
-    # iter_bytes yields DECODED bytes, so the cap holds against compression bombs.
+    # iter_bytes yields DECODED bytes, so the cap holds against compression
+    # bombs: with a single coding layer (enforced above) one 64 KiB socket read
+    # inflates to at most ~66 MB before this check sees it.
     for chunk in response.iter_bytes():
         if len(body) + len(chunk) > limit:
             raise _too_large(where, limit)

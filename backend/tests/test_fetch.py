@@ -853,6 +853,86 @@ def test_undecodable_content_encoding_is_refused_before_reading():
     assert pulled == []
 
 
+def _stacked_bomb() -> bytes:
+    """Two gzip layers over 5 MB of zeros: a few hundred wire bytes."""
+    bomb = gzip.compress(gzip.compress(b"\0" * 5_000_000))
+    assert len(bomb) < 1_000
+    return bomb
+
+
+@pytest.mark.parametrize(
+    ("encoding", "shown"),
+    [
+        ("gzip, gzip", "gzip, gzip"),
+        ("gzip,deflate", "gzip, deflate"),
+        ("GZIP, identity, gzip", "gzip, gzip"),
+        ("gzip, deflate, gzip, deflate", "gzip, deflate, gzip, deflate"),
+        ("gzip, " * 5_000 + "deflate", "gzip, gzip, gzip, gzip, ..."),
+    ],
+    ids=["gzip-gzip", "gzip-deflate", "identity-between", "four-layers", "many-layers"],
+)
+def test_stacked_content_encodings_are_refused_before_reading(encoding, shown):
+    """httpx inflates EVERY layer of one socket read before iter_bytes yields
+    it, so a second layer multiplies a read's inflation by another ~1000x:
+    measured, 269 wire bytes under 'gzip, gzip' reached the cap check as one
+    64 MiB chunk (a full 64 KiB read would reach ~66 GB). Refused up front.
+    The message quotes at most four layers: the server decides how long the
+    header is, and the error is stored with the run."""
+    pulled = []
+    with respx.mock:
+        respx.get(f"https://{PUBLIC_V4}/stacked").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"Content-Type": "text/html", "Content-Encoding": encoding},
+                content=_tracked([_stacked_bomb()], pulled),
+            )
+        )
+        with pytest.raises(FetchError) as info:
+            fetch_url("https://example.org/stacked", _settings(), resolve=_example())
+    assert pulled == []
+    assert str(info.value) == (
+        "Fetching 'https://example.org/stacked' failed: "
+        f"unsupported stacked Content-Encoding {shown!r}"
+    )
+
+
+@respx.mock
+def test_two_content_encoding_headers_count_as_stacked():
+    """A repeated header is the other spelling of a stacked coding: httpx
+    joins the values with ", " and builds the same layered decoder."""
+    pulled = []
+    respx.get(f"https://{PUBLIC_V4}/twice").mock(
+        return_value=httpx.Response(
+            200,
+            headers=[
+                ("Content-Type", "text/html"),
+                ("Content-Encoding", "gzip"),
+                ("Content-Encoding", "gzip"),
+            ],
+            content=_tracked([_stacked_bomb()], pulled),
+        )
+    )
+    with pytest.raises(FetchError, match="stacked Content-Encoding 'gzip, gzip'"):
+        fetch_url("https://example.org/twice", _settings(), resolve=_example())
+    assert pulled == []
+
+
+@pytest.mark.parametrize("encoding", ["identity, gzip", "gzip, identity", "gzip,, identity"])
+def test_identity_beside_one_real_coding_is_a_single_layer(encoding):
+    """identity (and an empty token) is no layer: one real coding stays accepted."""
+    page = b"<html><body>" + b"x" * 500 + b"</body></html>"
+    with respx.mock:
+        respx.get(f"https://{PUBLIC_V4}/id").mock(
+            return_value=httpx.Response(
+                200,
+                headers={"Content-Type": "text/html", "Content-Encoding": encoding},
+                content=_tracked([gzip.compress(page)], []),
+            )
+        )
+        result = fetch_url("https://example.org/id", _settings(), resolve=_example())
+    assert result.body == page
+
+
 @respx.mock
 def test_malformed_content_length_is_an_error():
     respx.get(f"https://{PUBLIC_V4}/cl").mock(
