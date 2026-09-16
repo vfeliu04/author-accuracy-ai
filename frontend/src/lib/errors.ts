@@ -50,6 +50,72 @@ const ERROR_HINTS: ErrorHint[] = [
       "That page has no readable text. Pages that need JavaScript to show their content can't be read."
   },
   {
+    match: /too large or complex/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "That page is too large or complex to read in time."
+  },
+  // The ways a link fails before its page arrives, each keyed to the server's
+  // own wording. They come before the generic status and timeout phrasing: a
+  // redirect with no address also names its HTTP status.
+  {
+    match: /could not be resolved|resolved to no addresses|returned an unparseable address/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () =>
+      "That site couldn't be found. Check the link for typos, or the internet connection."
+  },
+  // A certificate failure is also a ConnectError, so it is recognized first.
+  {
+    match: /CERTIFICATE_VERIFY_FAILED|certificate verify failed|\[SSL[:\]]|_ssl\.c/i,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "A secure connection to the site couldn't be established."
+  },
+  {
+    match: /failed: \w*(?:Connect|Read|Write|Protocol|Network|Close)Error\b/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "The site couldn't be reached, or it dropped the connection."
+  },
+  {
+    match: /exceeds the [\d,]+-byte limit/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "That page is too large to read."
+  },
+  {
+    match: /more than \d+ redirects/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "That link redirects too many times to follow."
+  },
+  {
+    match:
+      /refused redirect|invalid redirect Location|redirected to an invalid URL|redirect without a Location/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "That link redirects to an address that can't be opened."
+  },
+  {
+    match: /body is not a PDF/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "The site says that link is a PDF, but the file it sent isn't one."
+  },
+  {
+    match: /unsupported (?:stacked )?Content-Encoding|\bDecodingError\b|malformed Content-Length/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "The site sent that page in a form that can't be read."
+  },
+  {
+    match: /is not valid UTF-8|declares an unknown charset/,
+    aboutLink: true,
+    needsLink: true,
+    hint: () => "That page's text is in an encoding that can't be read."
+  },
+  {
     match: /\bHTTP (\d{3})\b/,
     aboutLink: true,
     needsLink: true,
@@ -112,10 +178,25 @@ export function namedLink(error: string): string | null {
   return namedLinks(error)[0]?.link ?? null;
 }
 
+// A link's host as the message spells it: between the scheme and the path,
+// without a port or an IPv6 literal's brackets.
+function hostOf(link: string): string {
+  const authority = link.replace(/^https?:\/\//i, "").split(/[/?#]/, 1)[0];
+  if (authority.startsWith("[")) return authority.slice(1, authority.indexOf("]"));
+  return authority.split(":", 1)[0];
+}
+
 // The message with every link blanked out, so words in an address
 // (".../billing", ".../batch-jobs", ".../deadlines") never pick a translation.
+// The server also repeats a link's host on its own, in quotes
+// ("'billing.example.org' could not be resolved"), so that copy goes too.
 function withoutLinks(error: string): string {
-  return error.replace(LINK, (raw) => ` ${raw.slice(trimLink(raw).link.length)}`);
+  let words = error.replace(LINK, (raw) => ` ${raw.slice(trimLink(raw).link.length)}`);
+  for (const { link } of namedLinks(error)) {
+    const host = hostOf(link);
+    if (host !== "") words = words.split(`'${host}'`).join(" ");
+  }
+  return words;
 }
 
 function appearsWhole(error: string, link: string, links: readonly string[]): boolean {

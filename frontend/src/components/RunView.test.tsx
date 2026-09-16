@@ -188,7 +188,8 @@ describe("RunView", () => {
           run: {
             ...runningDetail.run,
             status: "FAILED",
-            error: "Could not read https://example.org/water/report: HTTP 403"
+            error:
+              "FetchError: Fetching 'https://example.org/water/report' failed: the server answered HTTP 403"
           }
         },
         {

@@ -124,7 +124,7 @@ describe("SourcesPanel", () => {
         uploads={uploads}
         report={undefined}
         ingestStatus="failed"
-        runError="Could not read https://news.example.com/story?id=9: HTTP 404"
+        runError="FetchError: Fetching 'https://news.example.com/story?id=9' failed: the server answered HTTP 404"
       />
     );
     const flag = screen.getByText("Couldn't open");
@@ -140,12 +140,28 @@ describe("SourcesPanel", () => {
         uploads={[uploads[0], linkUpload("w", wiki)]}
         report={undefined}
         ingestStatus="failed"
-        runError={`FetchError: Could not read ${wiki}: HTTP 404`}
+        runError={`FetchError: Fetching '${wiki}' failed: the server answered HTTP 404`}
       />
     );
     expect(screen.getByText("Couldn't open")).toHaveAttribute(
       "title",
       `${wiki} — The site returned an error (404).`
+    );
+  });
+
+  it("gives a link whose site can't be found its reason on hover", () => {
+    const link = "https://billing.example.org/report";
+    render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("d", link)]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={`FetchError: Fetching '${link}' failed: 'billing.example.org' could not be resolved ([Errno 8] nodename nor servname provided, or not known)`}
+      />
+    );
+    expect(screen.getByText("Couldn't open")).toHaveAttribute(
+      "title",
+      `${link} — That site couldn't be found. Check the link for typos, or the internet connection.`
     );
   });
 
