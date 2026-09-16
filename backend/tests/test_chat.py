@@ -223,9 +223,13 @@ def test_context_phrases_each_evidence_locator_by_source_type(conn):
     cited("youtube", "Water talk", {"text": "two billion", "start_seconds": 754.0})
     cited("youtube", "Long lecture", {"text": "an hour in", "start_seconds": 3723.0})
     cited("image", "Chart", {"text": "a bar chart", "kind": "figure"})
+    # Docling leaves page unset for a PDF item without provenance; its heading
+    # stays the section, and that must not make it read like a web page.
+    cited("pdf", "No provenance", {"text": "unlocated finding", "section": "Methods"})
     context = chatmod.build_context(conn, run_id)
     assert "(source 'World Hunger 2025' p.3)" in context  # PDF phrasing unchanged
     assert "(source 'Drinking-water' § Access to services)" in context
     assert "(source 'Water talk' at 12:34)" in context
     assert "(source 'Long lecture' at 1:02:03)" in context
     assert "(source 'Chart', image)" in context
+    assert "(source 'No provenance')" in context

@@ -1144,6 +1144,65 @@ def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     assert not planned.exists()
 
 
+def test_a_fetched_pdf_that_fails_to_write_leaves_the_link_to_fetch_again(
+    conn, tmp_path, monkeypatch
+):
+    """Files first, then the row: a disk that fills while a fetched PDF is written
+    leaves the upload a link still to fetch, so the retry fetches again and ingests
+    a PDF that is really there. Row first would leave a PDF upload naming a missing
+    file that is never fetched again — a run no retry can mend."""
+    import errno
+
+    from authorai import jobs as jobsmod
+
+    body = b"%PDF-fetched"
+    url = "https://example.org/report.pdf"
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    fetches: list[str] = []
+    ingested: list[bytes] = []
+
+    def fake_fetch(u, settings, **kwargs):
+        fetches.append(u)
+        return _fetched(u, body=body, content_type="application/pdf")
+
+    def fake_ingest_pdf(conn_, embedder, run_id_, path, **kwargs):
+        ingested.append(Path(path).read_bytes())  # raises when the row names nothing
+        return "doc"
+
+    real_write_bytes = Path.write_bytes
+    filled: list[str] = []
+
+    def disk_fills_once(self, data):
+        if self.name.endswith(".part") and not filled:
+            filled.append(self.name)
+            raise OSError(errno.ENOSPC, "No space left on device", str(self))
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(jobsmod, "fetch_url", fake_fetch)
+    monkeypatch.setattr(jobsmod, "ingest_pdf", fake_ingest_pdf)
+    monkeypatch.setattr(jobsmod, "OpenAIEmbedder", lambda *a, **k: object())
+    monkeypatch.setattr(jobsmod, "AnthropicClient", lambda *a, **k: object())
+    monkeypatch.setattr(Path, "write_bytes", disk_fills_once)
+    context = PipelineContext(conn, SETTINGS)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    def upload_row():
+        row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+        return (row["source_type"], row["path"], row["content_hash"])
+
+    with pytest.raises(OSError, match="No space left"):
+        step_ingest(context, run_id, payload)
+    assert filled == [planned.stem + ".pdf.part"]
+    assert upload_row() == ("web", str(planned), None)
+
+    step_ingest(context, run_id, payload)
+    assert fetches == [url, url]
+    assert ingested == [body]
+    assert upload_row()[:2] == ("pdf", str(planned.with_suffix(".pdf")))
+
+
 @pytest.mark.parametrize(
     ("left_behind", "body", "kept"),
     [

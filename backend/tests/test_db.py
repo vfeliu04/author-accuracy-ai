@@ -666,17 +666,48 @@ def test_create_run_with_upload_specs_records_source_fields(conn):
 
 
 def test_record_fetch_moves_a_link_upload_to_its_stored_pdf_in_one_update(conn):
+    """One UPDATE, and a refused type writes nothing: a path moved while the type
+    still says web (or the reverse) is a state no retry can recover from — the
+    stored PDF would be read as a page, or a missing file never fetched again."""
     url = "https://example.org/report.pdf"
     upload = dbmod.add_upload(conn, "SOURCE", url, "/tmp/u.json", source_type="web", url=url)
-    dbmod.record_fetch(conn, upload, path="/tmp/u.pdf", source_type="pdf", content_hash="abc")
-    row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload,)).fetchone()
-    assert (row["path"], row["source_type"], row["content_hash"], row["url"]) == (
-        "/tmp/u.pdf",
-        "pdf",
-        "abc",
-        url,
-    )
+
+    def stored():
+        row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload,)).fetchone()
+        return (row["path"], row["source_type"], row["content_hash"], row["url"])
+
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        dbmod.record_fetch(conn, upload, path="/tmp/u.pdf", source_type="pdf", content_hash="abc")
+    finally:
+        conn.set_trace_callback(None)
+    assert sum(s.lstrip().upper().startswith("UPDATE") for s in statements) == 1
+    assert stored() == ("/tmp/u.pdf", "pdf", "abc", url)
     with pytest.raises(ValueError, match="source type"):
         dbmod.record_fetch(conn, upload, path="/tmp/x", source_type="ftp", content_hash=None)
+    assert stored() == ("/tmp/u.pdf", "pdf", "abc", url)
     with pytest.raises(ValueError, match="Unknown upload"):
         dbmod.record_fetch(conn, "nope", path="/tmp/x", source_type="pdf", content_hash=None)
+
+
+def test_list_run_sources_orders_scored_by_total_then_unscored_in_ingest_order(conn):
+    """The report's source list and the chat context show sources in exactly this
+    order (the frontend never re-sorts, and the credibility view opens on the
+    first): scored sources by total, highest first, then the rest as ingested."""
+    run_id = dbmod.create_run(conn)
+    dbmod.add_document(conn, run_id, "REPORT", title="The Report")  # never listed
+    unscored_first = dbmod.add_document(conn, run_id, "SOURCE", title="unscored first")
+    scored_low = dbmod.add_document(conn, run_id, "SOURCE", title="scored low")
+    unscored_second = dbmod.add_document(conn, run_id, "SOURCE", title="unscored second")
+    scored_high = dbmod.add_document(conn, run_id, "SOURCE", title="scored high")
+    dbmod.save_source_credibility(
+        conn,
+        run_id,
+        [
+            {"doc_id": doc, "metadata": {}, "components": {}, "total": total, "tier": "NONE"}
+            for doc, total in ((scored_low, 40.0), (scored_high, 80.0))
+        ],
+    )
+    order = [row["doc_id"] for row in dbmod.list_run_sources(conn, run_id)]
+    assert order == [scored_high, scored_low, unscored_first, unscored_second]

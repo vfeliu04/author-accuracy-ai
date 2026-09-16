@@ -1122,6 +1122,42 @@ def test_report_evidence_carries_the_locator_for_each_source_type(tmp_path):
     )
 
 
+def test_report_types_a_source_document_without_an_upload_row_as_pdf(tmp_path):
+    """CLI and hand-seeded runs can hold SOURCE documents with no upload row.
+    SourceType is never null in the frontend contract, so both the cited evidence
+    and the sources list say "pdf" for such a document — a null evidence type
+    would send the viewer to 'no preview'."""
+    from authorai.embeddings import FakeEmbedder
+
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    legacy = dbmod.add_document(conn, run_id, "SOURCE", title="Legacy CLI Source")
+    [chunk_id] = dbmod.add_chunks(
+        conn,
+        run_id,
+        legacy,
+        [{"text": "wheat yields rose", "page": 7}],
+        FakeEmbedder(dim=DIM).embed(["wheat yields rose"]),
+    )
+    _cite_chunk(conn, run_id, chunk_id, "wheat yields rose")
+    conn.close()
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        report = client.get(f"/api/runs/{run_id}/report", headers=AUTH).json()
+
+    [claim] = [c for c in report["claims"] if c["text"] == "wheat yields rose"]
+    evidence = claim["evidence_source"]
+    assert (evidence["doc_id"], evidence["source_type"], evidence["page"], evidence["url"]) == (
+        legacy,
+        "pdf",
+        7,
+        None,
+    )
+    [source] = [s for s in report["sources"] if s["doc_id"] == legacy]
+    assert (source["source_type"], source["url"], source["scorable"]) == ("pdf", None, True)
+
+
 def test_document_file_serves_each_source_type_with_its_media_type(tmp_path):
     settings = _settings(tmp_path)
     run_id = _seed_scored_run(settings)
