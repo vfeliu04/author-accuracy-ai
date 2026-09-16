@@ -549,7 +549,8 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     winning DOI that fails validation is None, never a fall-through:
 
     title       citation_title > JSON-LD headline/name > og:title > <title>
-    authors     citation_author (all) > JSON-LD personal author names > meta author (one)
+    authors     citation_author (all) > JSON-LD personal author names > meta author
+                (one, unless it names an organization the page declares)
     publisher   citation_publisher > JSON-LD publisher name > og:site_name
                 > JSON-LD Organization author name
     date        citation_publication_date > citation_date > JSON-LD datePublished
@@ -586,10 +587,22 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
         or first("og:title")
         or _clean(parser.title)
     )
+    # The untyped <meta name=author> carries no Person/Organization type: a name
+    # the page declares as an organization anywhere else is not a personal author.
+    organizations = {
+        name.casefold()
+        for name in (
+            *_names(work.get("author"), by_id, kind="organization"),
+            *_names(work.get("publisher"), by_id),
+            *meta.get("citation_publisher", []),
+            *meta.get("og:site_name", []),
+        )
+    }
+    meta_authors = [n for n in meta.get("author", [])[:1] if n.casefold() not in organizations]
     authors = (
         meta.get("citation_author")
         or _names(work.get("author"), by_id, kind="person")
-        or meta.get("author", [])[:1]
+        or meta_authors
     )
     publisher = (
         first("citation_publisher")
@@ -733,7 +746,7 @@ def _doi_candidates(node: dict) -> list[str]:
             if not isinstance(item, str) or not item.strip():
                 continue
             if declared_doi or _DOI_LIKE.match(item):
-                candidates.append(unescape(item.strip()))
+                candidates.append(_jsonld_text(item.strip()))
     return candidates
 
 
@@ -760,10 +773,21 @@ def _clean(value: object) -> str | None:
     return " ".join(value.split()) or None
 
 
+# JSON can spell half a surrogate pair ("\ud83d": JavaScript that cuts a string
+# mid-emoji emits one) and json decodes it to a lone surrogate, which no UTF-8
+# writer (the stored page) can encode. json has already joined every real pair.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _jsonld_text(value: str) -> str:
+    """A JSON-LD string entity-decoded — <script> content is not decoded by
+    HTML parsers, and CMSes entity-encode it ("Tom&aacute;s") — with any lone
+    surrogate replaced."""
+    return _LONE_SURROGATE.sub("�", unescape(value))
+
+
 def _clean_jsonld(value: object) -> str | None:
-    """A JSON-LD string, entity-decoded first: <script> content is not
-    decoded by HTML parsers, and CMSes entity-encode it ("Tom&aacute;s")."""
-    return _clean(unescape(value)) if isinstance(value, str) else None
+    return _clean(_jsonld_text(value)) if isinstance(value, str) else None
 
 
 def _first_str(value: object) -> str | None:

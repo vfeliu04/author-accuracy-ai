@@ -780,6 +780,39 @@ def test_organization_authors_are_not_personal_authors_but_can_name_the_publishe
     assert (metadata.authors, metadata.publisher) == (["Ana Pérez"], "Daily Water")
 
 
+def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_personal_author():
+    # The untyped <meta name=author> fallback carries no Person/Organization
+    # type. A name the page itself declares as an organization elsewhere — the
+    # JSON-LD author or publisher, citation_publisher, og:site_name — cannot be
+    # a personal author (it would earn author points no PDF could).
+    typed = _markup(
+        '<meta name="author" content="World Health Organization">',
+        _ld(
+            {
+                "@type": "MedicalWebPage",
+                "name": "Drought and health",
+                "author": {"@type": "Organization", "name": "World Health Organization"},
+            }
+        ),
+    )
+    metadata = _page_metadata(typed, url="https://example.org/o")
+    assert (metadata.authors, metadata.publisher) == ([], "World Health Organization")
+
+    site = _markup(
+        '<meta name="author" content="world health organization">',  # compared casefolded
+        '<meta property="og:site_name" content="World Health Organization">',
+    )
+    metadata = _page_metadata(site, url="https://example.org/s")
+    assert (metadata.authors, metadata.publisher) == ([], "World Health Organization")
+
+    person = _markup(
+        '<meta name="author" content="Sam Patel">',
+        '<meta property="og:site_name" content="Daily Water">',
+    )
+    metadata = _page_metadata(person, url="https://example.org/p")
+    assert (metadata.authors, metadata.publisher) == (["Sam Patel"], "Daily Water")
+
+
 def test_first_doi_source_wins_and_an_invalid_one_becomes_none():
     malformed = '<meta name="citation_doi" content="doi: not-a-doi">'
     jsonld = _ld(
@@ -880,6 +913,34 @@ def test_attribute_and_title_entities_are_decoded_exactly_once():
     assert (
         _page_metadata(title_only, url="https://example.org/t").title == "Escaping &lt;p&gt; tags"
     )
+
+
+def test_lone_surrogates_in_jsonld_become_replacement_characters():
+    # JSON.stringify of a string cut mid-emoji emits "\ud83d"; json decodes it
+    # to a lone surrogate, which the stored page's UTF-8 write cannot encode —
+    # a readable article failed the whole run over half an emoji, with an error
+    # naming no link. Every JSON-LD field read is a route, the DOI included.
+    markup = _markup(
+        _ld(
+            {
+                "@type": "ScholarlyArticle",
+                "headline": "Drought update \ud83d",
+                "author": [{"@type": "Person", "name": "Ana \udc00"}],
+                "publisher": {"@type": "Organization", "name": "Water \ud83d News"},
+                "datePublished": "2026-01-01\ud83d",
+                "identifier": "10.5555/x.9\ud83d",
+            }
+        )
+    )
+    metadata = _page_metadata(markup, url="https://example.org/s")
+    assert metadata.title == "Drought update �"
+    assert metadata.authors == ["Ana �"]
+    assert metadata.publisher == "Water � News"
+    assert metadata.publication_date == "2026-01-01�"
+    assert metadata.doi == "10.5555/x.9�"
+    # A proper pair is one character and stays untouched.
+    paired = _markup(_ld({"@type": "Article", "headline": "Up \U0001f600"}))
+    assert _page_metadata(paired, url="https://example.org/p").title == "Up \U0001f600"
 
 
 def test_meta_tags_in_the_body_are_not_page_metadata():
