@@ -250,6 +250,11 @@ BLOCKED_ADDRESSES = [
     "2606:4700:4700::1111%en0",  # a zone makes even global bits interface-local
     "198.18.0.1",  # benchmarking
     "192.0.2.1",  # documentation
+    "fec0::1",  # deprecated site-local (RFC 3879), stdlib is_global=True
+    "feff:ffff::1",  # top of the site-local /10
+    "::ffff:0:7f00:1",  # SIIT IPv4-translated form of loopback, stdlib is_global=True
+    "::ffff:0:a9fe:a9fe",  # SIIT IPv4-translated form of the cloud metadata address
+    "5f00::1",  # SRv6 segment identifiers (RFC 9602), stdlib is_global=True
 ]
 PUBLIC_ADDRESSES = [
     "93.184.216.34",
@@ -279,6 +284,9 @@ BLOCKED_REGARDLESS_OF_STDLIB = [
     "100.127.255.254",
     "64:ff9b:1::808:808",  # 64:ff9b:1::/48 (local-use NAT64), even with a public inner
     "::127.0.0.1",  # ::/96 (deprecated IPv4-compatible)
+    "fec0::1",  # fec0::/10 (deprecated site-local)
+    "::ffff:0:7f00:1",  # ::ffff:0:0:0/96 (SIIT IPv4-translated)
+    "5f00::1",  # 5f00::/16 (SRv6 segment identifiers)
     "224.0.0.1",  # multicast
     "ff02::1",
 ]

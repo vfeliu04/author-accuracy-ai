@@ -83,6 +83,12 @@ _NEVER_PUBLIC = (
     # Deprecated IPv4-compatible addresses (::a.b.c.d): stdlib calls
     # ::127.0.0.1 global, and no legitimate DNS answer lives here.
     ipaddress.ip_network("::/96"),
+    # Same class, also called global by stdlib: deprecated site-local
+    # (RFC 3879), SIIT IPv4-translated ::ffff:0:a.b.c.d (RFC 2765; blocked
+    # outright rather than unwrapped), and SRv6 segment identifiers (RFC 9602).
+    ipaddress.ip_network("fec0::/10"),
+    ipaddress.ip_network("::ffff:0:0:0/96"),
+    ipaddress.ip_network("5f00::/16"),
 )
 
 
