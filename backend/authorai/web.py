@@ -212,14 +212,28 @@ def _decode(raw: bytes, url: str) -> str:
             "HTTP Content-Type charset and pass text instead"
         )
     try:
-        codec = codecs.lookup(label).name
+        info = codecs.lookup(label)
     except LookupError as exc:
-        raise ValueError(f"{url} declares an unknown charset {label!r}") from exc
+        raise _unknown_charset(url, label) from exc
+    # codecs.lookup also resolves Python's byte-to-byte codecs (bz2, base64,
+    # hex ...), which bytes.decode refuses with a LookupError, and a few text
+    # codecs refuse any byte at all ("undefined", "idna"): either is a charset
+    # no browser knows, and neither failure names the page on its own.
+    if not info._is_text_encoding:
+        raise _unknown_charset(url, label)
+    codec = info.name
     if codec in ("iso8859-1", "ascii"):
         codec = "cp1252"  # WHATWG: browsers decode these labels as windows-1252
     elif codec.startswith("utf-16"):
         codec = "utf-8"  # WHATWG: a declaration readable as ASCII cannot mean UTF-16
-    return _decode_as(raw, codec, f"declared charset {label!r}", url)
+    try:
+        return _decode_as(raw, codec, f"declared charset {label!r}", url)
+    except UnicodeError as exc:
+        raise _unknown_charset(url, label) from exc
+
+
+def _unknown_charset(url: str, label: str) -> ValueError:
+    return ValueError(f"{url} declares an unknown charset {label!r}")
 
 
 def _decode_as(raw: bytes, codec: str, source: str, url: str) -> str:

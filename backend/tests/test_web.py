@@ -1265,6 +1265,23 @@ def test_unknown_declared_charset_fails_loudly_naming_the_url():
     assert DIARIO_URL in str(excinfo.value)
 
 
+@pytest.mark.parametrize("label", ["bz2_codec", "base64", "quoted-printable", "undefined", "idna"])
+def test_a_charset_label_that_is_not_a_text_encoding_fails_like_an_unknown_one(label):
+    # codecs.lookup also resolves Python's byte-to-byte codecs (bz2, base64,
+    # quoted-printable ...), which bytes.decode refuses with a LookupError, and
+    # a few text codecs refuse any byte at all ("undefined", "idna"). Neither
+    # failure was the documented ValueError naming the link, so the run showed
+    # Python internals and no source row was marked.
+    page = _page("diario_agua_es.html").replace(
+        '<meta charset="utf-8">', f'<meta charset="{label}">'
+    )
+    with pytest.raises(ValueError, match="declares an unknown charset") as excinfo:
+        extract_web(page.encode("cp1252"), url=DIARIO_URL)
+    assert DIARIO_URL in str(excinfo.value)
+    assert label in str(excinfo.value)
+    assert not isinstance(excinfo.value, ThinPageError)
+
+
 def test_declared_utf8_with_a_stray_invalid_byte_decodes_with_a_warning(web_log):
     raw = (FIXTURES / "diario_agua_es.html").read_bytes()
     damaged = raw.replace("São Paulo".encode(), b"S\xe3o Paulo")
