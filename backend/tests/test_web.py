@@ -409,6 +409,53 @@ def test_cjk_text_keeps_its_characters_when_emphasis_is_removed():
     )
 
 
+def test_a_page_of_many_small_inline_elements_is_read_in_linear_time():
+    # Three ways this went quadratic in the number of inline elements under one
+    # parent, all reachable from a page inside the 10 MB fetch cap: libxml2
+    # merges an XPath union ("//b | //i") by scanning one branch for every node
+    # of the other; lxml.html's drop_tag/drop_tree re-copy the parent's growing
+    # text for every child they remove; and libxml2's XPath is quadratic again
+    # over the adjacent text nodes a C-level strip leaves behind (trafilatura
+    # runs such XPaths). This page (0.6 MB, 64,000 inline elements) took about
+    # 12 s; the cap allows 16x more elements, on the only worker thread, with
+    # no cancel and no time limit.
+    page = (
+        "<!DOCTYPE html><html><head><title>Heavy</title></head><body><main><article>"
+        f"<h1>Formatting</h1><p>{_prose(400)}</p><p>"
+        + "<b>x</b><i>y</i>" * 16_000
+        + "<sup>1</sup><sub>2</sub>" * 16_000
+        + "</p></article></main></body></html>"
+    )
+    started = time.perf_counter()
+    document, _ = extract_web(page, url="https://example.org/heavy")
+    assert time.perf_counter() - started < 2.0
+    assert "xy" * 16_000 + "^12" * 16_000 in _body(document)
+
+
+def test_nested_scripts_emphasis_and_tables_read_the_same_after_the_linear_rewrite():
+    # Pins the reading the element-by-element edits produced — a script is
+    # classified after the scripts inside it were rewritten (its footnote link
+    # gone, its digits already plain), emphasis nests, a Yoast FAQ question
+    # stays a <strong>, sibling tables nested in one cell flatten in order —
+    # so the rename-then-strip implementation cannot drift from it.
+    page = (
+        "<!DOCTYPE html><html><head><title>Nested</title></head><body><main><article>"
+        f"<h1>Nested</h1><p>{_prose(300)}</p>"
+        "<p>A<sup>1<sub>2</sub></sup> B<sup>3<sup><a href='#f'>4</a></sup></sup> "
+        "C<sub>x<sup>5</sup></sub> D<b>bold <i>italic <em>deep</em></i></b> "
+        "E<b>x<strong class='schema-faq-question'>Q?</strong></b>x F<u>u</u><sup>n</sup>tail</p>"
+        "<table><tr><td>Cell"
+        "<table><tr><td>a</td><td>b</td></tr></table>"
+        "<table><tr><td>c</td></tr></table>"
+        "</td><td>Other</td></tr></table>"
+        "</article></main></body></html>"
+    )
+    document, _ = extract_web(page, url="https://example.org/nested")
+    body = _body(document)
+    assert "A^12 B^3 Cx^5 Dbold italic deep Ex\n## Q?\n\nx Funtail" in body
+    assert "| Cell a, b c | Other |" in body
+
+
 def test_literal_asterisk_runs_survive_verbatim_and_fast():
     # The markdown post-pass this replaced went quadratic on unmatched openers
     # (90 KB of "*a " took minutes) and deleted literal asterisks.

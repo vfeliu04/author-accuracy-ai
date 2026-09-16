@@ -32,6 +32,9 @@ dependencies = [
     # paragraph breaks, so site chrome would pollute chunks and the credibility
     # imprint scan.
     "trafilatura==2.2.0",
+    # web.py imports lxml.etree directly (one C-level pass applies its tree
+    # edits); trafilatura brings lxml in, but a direct import is declared.
+    "lxml==6.1.1",
 ]
 
 [project.optional-dependencies]

@@ -37,6 +37,7 @@ from html import unescape
 from html.parser import HTMLParser
 
 import trafilatura
+from lxml import etree
 
 # trafilatura's markdown writer — the function its extract() uses — applied
 # per section. Internal module; trafilatura is pinned exactly in pyproject.
@@ -206,8 +207,11 @@ _PRUNE_XPATH = """
          or contains(translate(., 'ABON', 'abon'), 'abonn'))
 ]
 """
-# Yoast FAQ questions are <strong> elements trafilatura turns into headings.
-_EMPHASIS_XPATH = "//b | //strong[not(contains(@class, 'schema-faq-question'))] | //i | //em | //u"
+# The tags _prepare_tree renames an element to, so that one C-level pass can
+# unwrap or remove them all at the end. Custom names no real page uses; a page
+# that did would only get that element unwrapped or removed.
+_UNWRAP = "authorai-unwrap"
+_DROP = "authorai-drop"
 _SCRIPT_CHARACTERS = frozenset("0123456789+-−=()")
 _ASCII_MINUS = str.maketrans({"−": "-"})
 _HEADING_PREFIX = re.compile(r"^#{1,6} ?")
@@ -265,26 +269,63 @@ def _prepare_tree(tree) -> None:
       <sup>/<sub> is unwrapped to plain text;
     - a table nested in a table becomes its text inside the outer cell —
       cells joined by ", ", rows by "; " — innermost first.
+
+    Each edit only renames the element to a sentinel tag (a rewritten script
+    or table keeps its new text inside it, so an enclosing script still reads
+    it); lxml's C-level strip_elements/strip_tags then apply them all in one
+    pass, and the parents they spliced text into get their adjacent text nodes
+    joined. Editing element by element was quadratic in the inline elements
+    under one parent, and a 10 MB page of them held the worker for hours:
+    libxml2 merges an XPath union ("//b | //i") by scanning one branch for
+    every node of the other, and lxml.html's drop_tag/drop_tree re-copy a
+    parent's growing text for every child they remove.
     """
-    for element in tree.xpath(_EMPHASIS_XPATH):
-        element.drop_tag()
-    for element in reversed(tree.xpath("//sup | //sub")):
+    root = tree.getroottree()
+    for element in list(root.iter("b", "strong", "i", "em", "u")):
+        # Yoast FAQ questions are <strong> elements trafilatura turns into headings.
+        if element.tag != "strong" or "schema-faq-question" not in (element.get("class") or ""):
+            element.tag = _UNWRAP
+    for element in reversed(list(root.iter("sup", "sub"))):
         content = element.text_content().strip()
         if element.tag == "sup" and element.find(".//a") is not None:
-            element.drop_tree()
+            element.clear(keep_tail=True)
+            element.tag = _DROP
         elif content and set(content) <= _SCRIPT_CHARACTERS:
             plain = content.translate(_ASCII_MINUS)
             _replace_with_text(element, f"^{plain}" if element.tag == "sup" else plain)
         else:
-            element.drop_tag()
+            element.tag = _UNWRAP
     # Reverse document order visits a nested table before the table holding it.
     for table in reversed(tree.xpath("//table[ancestor::table]")):
         _replace_with_text(table, f" {_table_text(table)} ")
+    spliced = {element.getparent() for element in root.iter(_UNWRAP, _DROP)}
+    etree.strip_elements(root, _DROP, with_tail=False)
+    etree.strip_tags(root, _UNWRAP)
+    for parent in spliced:
+        if parent.tag not in (_UNWRAP, _DROP):  # a parent that was itself unwrapped is gone
+            _merge_text_nodes(parent)
 
 
 def _replace_with_text(element, text: str) -> None:
-    element.tail = text + (element.tail or "")
-    element.drop_tree()  # lxml joins the tail to the preceding text
+    """Rewrite an element as plain text; _prepare_tree's final strip applies it."""
+    element.clear(keep_tail=True)
+    element.text = text
+    element.tag = _UNWRAP
+
+
+def _merge_text_nodes(element) -> None:
+    """Join each run of adjacent text nodes directly under an element into one
+    node: strip_tags/strip_elements splice nodes without joining text, and
+    libxml2's XPath, which trafilatura runs over the tree, is quadratic over
+    such a run. Re-setting .text or .tail replaces the run it reads with one
+    node; lxml reads a run by concatenation (quadratic too), so an element left
+    with text only is read through libxml2's linear string value instead."""
+    if len(element) == 0:
+        element.text = element.text_content() or None
+        return
+    element.text = element.text
+    for child in element:
+        child.tail = child.tail
 
 
 def _table_text(table) -> str:
