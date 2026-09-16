@@ -1187,7 +1187,7 @@ class LoopbackServer:
             return
         try:
             # Also bounds the TLS handshake: generous, so a starved CI runner
-            # cannot fail the handshake and pass a timeout test for the wrong reason.
+            # cannot turn a slow handshake into a connection error (a flake).
             conn.settimeout(2.0)
             if self._tls is not None:
                 conn = self._tls.wrap_socket(conn, server_side=True)
