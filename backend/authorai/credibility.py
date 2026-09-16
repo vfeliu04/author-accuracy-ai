@@ -530,11 +530,13 @@ _TIER_POINTS = {
 }
 
 
-def _phrase_tokens(text: str) -> list[str]:
-    """Word tokens with runs of single letters fused, so 'U.N.' ≡ 'UN'."""
+def _phrase_tokens(text: str, *, fold: bool = True) -> list[str]:
+    """Word tokens with runs of single letters fused, so 'U.N.' ≡ 'UN'.
+    fold=False keeps the original case, for matching acronyms in capitals."""
     fused: list[str] = []
     run = ""
-    for token in re.findall(r"[a-z0-9]+", text.lower()):
+    tokens = re.findall(r"[a-z0-9]+", text.lower()) if fold else re.findall(r"[A-Za-z0-9]+", text)
+    for token in tokens:
         if len(token) == 1:
             run += token
             continue
@@ -556,15 +558,26 @@ def _publisher_authority(publisher: str | None, tier1: list[str], tier2: list[st
     words anywhere. Caveat that stays with the CONFIG: a single generic word
     as a needle ('Science', 'Nature') matches every publisher containing that
     word; keep configured needles as specific as the real names allow.
+
+    A needle written in capitals is an acronym and matches only in capitals:
+    'WHO' and 'UN' are also the word 'who' and the article 'un', and a web
+    page's publisher is the site's own name ('Who What Wear'). Spelled-out
+    needles ignore case. To accept another spelling of an acronym, configure
+    it as its own mixed-case needle ('Unicef'). Known residual: a publisher
+    styled entirely in capitals ('WHO WHAT WEAR') still matches.
     """
     if not publisher:
         return 0.0
-    haystack = " " + " ".join(_phrase_tokens(publisher)) + " "
+    folded = " " + " ".join(_phrase_tokens(publisher)) + " "
+    exact = " " + " ".join(_phrase_tokens(publisher, fold=False)) + " "
+
+    def matches(needle: str) -> bool:
+        acronym = needle.isupper()
+        phrase = f" {' '.join(_phrase_tokens(needle, fold=not acronym))} "
+        return phrase in (exact if acronym else folded)
 
     def hits(needles: list[str]) -> bool:
-        return any(
-            f" {' '.join(_phrase_tokens(needle))} " in haystack for needle in needles if needle
-        )
+        return any(matches(needle) for needle in needles if needle)
 
     if hits(tier1):
         return 30.0

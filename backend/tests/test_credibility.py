@@ -634,6 +634,43 @@ def test_default_authority_tiers_cover_live_run_publishers():
     assert _publisher_authority("Unseen University Press", tier1, tier2) == 15.0
 
 
+def test_acronym_needles_that_are_ordinary_words_match_only_in_capitals():
+    """'WHO' and 'UN' are tier-1 acronyms but also the word 'who' and the
+    Spanish/French/Italian article 'un'. A web page's publisher is the site's
+    own declared name, so a case-folded match gave 'Who What Wear' tier-1
+    authority. An all-caps needle is an acronym and matches only in capitals;
+    spelled-out needles stay case-insensitive."""
+    from authorai.config import Settings
+
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
+    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+
+    for publisher in (
+        "Who What Wear",
+        "Marquis Who's Who",
+        "Doctor Who News",
+        "Diario de un Hidrólogo",
+        "Un Mundo Sostenible",
+        "Pourquoi un tel choix ?",
+    ):
+        assert _publisher_authority(publisher, tier1, tier2) == 15.0, publisher
+
+    for publisher in (
+        "WHO",
+        "UN News",
+        "U.N. Development Programme",
+        "World Health Organization: WHO",
+        "WHO/UNICEF Joint Monitoring Programme",
+        "world health organization",  # a spelled-out needle ignores case
+    ):
+        assert _publisher_authority(publisher, tier1, tier2) == 30.0, publisher
+
+    # Another spelling of an acronym is accepted only as its own configured needle.
+    assert _publisher_authority("Unicef", ["UNICEF"], []) == 15.0
+    assert _publisher_authority("Unicef", ["UNICEF", "Unicef"], []) == 30.0
+
+
 def test_metadata_extraction_prompt_carries_opening_text():
     from authorai.credibility import extract_metadata
     from tests.conftest import FakeLLM
