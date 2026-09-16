@@ -5,8 +5,12 @@
 export const MAX_LINK_LENGTH = 2048;
 
 // youtube.com, youtu.be and youtube-nocookie.com — bare or on the www., m. and
-// music. subdomains; a trailing root dot names the same host.
-const YOUTUBE_HOST = /^(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)\.?$/;
+// music. subdomains; any trailing root dots name the same host.
+const YOUTUBE_HOST = /^(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)\.*$/;
+
+// The characters the server allows in a site name. A parsed link spells an
+// international name in its encoded ASCII form, so this holds for those too.
+const HOST_CHARS = /^[a-z0-9._-]+$/i;
 
 export type LinkCheck = { link: string } | { error: string };
 
@@ -34,6 +38,16 @@ export function checkLink(input: string, existing: readonly string[]): LinkCheck
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return { error: "Only http:// and https:// links can be added." };
+  }
+  if (url.username || url.password) {
+    return { error: "Links with a username or password can't be added." };
+  }
+  if (url.port === "0") {
+    return { error: "That link has an invalid port." };
+  }
+  // An IPv6 address is bracketed, and the parser has already checked it.
+  if (!url.hostname.startsWith("[") && !HOST_CHARS.test(url.hostname)) {
+    return { error: "That link's site name isn't valid." };
   }
   if (YOUTUBE_HOST.test(url.hostname)) {
     return { error: "YouTube links aren't supported yet." };
@@ -110,18 +124,21 @@ function decodePunycode(encoded: string): string | null {
   return String.fromCodePoint(...output);
 }
 
-// Latin letters mixed with another script's ("аpple" with a Cyrillic "а") can
-// pass for a familiar name, so such a label stays in its encoded form.
-function mixesLatin(label: string): boolean {
-  const letters = Array.from(label).filter((char) => /\p{L}/u.test(char));
-  const latin = letters.filter((char) => /\p{Script=Latin}/u.test(char)).length;
-  return latin > 0 && latin < letters.length;
-}
+// A decoded name is shown only when it can't pass for a familiar one. Letters
+// from scripts with Latin look-alikes — Cyrillic, Greek and others — can spell
+// a whole name ("аррӏе" is all Cyrillic) or slip into a Latin one ("аpple"), and
+// symbols can stand in for letters, so any of those keeps the encoded form.
+// Allowed: Latin alone, or scripts with no Latin look-alikes without Latin.
+const LATIN_LABEL = /^[\p{Script=Latin}\p{M}0-9-]+$/u;
+const DISTINCT_SCRIPT_LABEL =
+  /^[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Bopomofo}\p{scx=Arabic}\p{scx=Hebrew}\p{scx=Thai}\p{M}0-9-]+$/u;
 
 function readableLabel(label: string): string {
   if (!label.startsWith("xn--")) return label;
   const decoded = decodePunycode(label.slice(4));
-  return decoded !== null && !mixesLatin(decoded) ? decoded : label;
+  const safe =
+    decoded !== null && (LATIN_LABEL.test(decoded) || DISTINCT_SCRIPT_LABEL.test(decoded));
+  return safe ? decoded : label;
 }
 
 // The host as people write it, port included.

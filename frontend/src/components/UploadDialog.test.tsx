@@ -281,4 +281,38 @@ describe("UploadDialog", () => {
       await screen.findByText("'https://example.org/a' was added twice")
     ).toBeInTheDocument();
   });
+
+  it("turns the server's refusal of an unusable link into one sentence", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: "not a usable link: Source URL 'https://example.org/a' has an invalid host"
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        )
+      )
+    );
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf")] } });
+    await waitFor(() => expect(screen.getByText("report.pdf")).toBeInTheDocument());
+    typeLink("https://example.org/a");
+    clickAdd();
+    fireEvent.click(verify());
+    expect(
+      await screen.findByText("One of the links isn't a valid web address. Check it and try again.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/not a usable link/)).not.toBeInTheDocument();
+  });
+
+  it("refuses a link the server would refuse before anything is sent", () => {
+    renderDialog();
+    typeLink("https://user:pw@example.org/report");
+    clickAdd();
+    expect(
+      screen.getByText("Links with a username or password can't be added.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Sources (0)")).toBeInTheDocument();
+  });
 });

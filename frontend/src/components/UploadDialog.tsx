@@ -25,6 +25,15 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+// The server remains the authority: a link the dialog's checks let through can
+// still be refused, in wording written for the log, so it becomes one sentence.
+function uploadError(err: unknown): string {
+  if (!(err instanceof Error)) return "The upload failed.";
+  return err.message.startsWith("not a usable link:")
+    ? "One of the links isn't a valid web address. Check it and try again."
+    : err.message;
+}
+
 export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const create = useCreateRun();
@@ -138,7 +147,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           onClose();
           navigate(`/runs/${data.run_id}`);
         },
-        onError: (err) => setError(err instanceof Error ? err.message : "The upload failed.")
+        onError: (err) => setError(uploadError(err))
       }
     );
   };

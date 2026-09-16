@@ -73,9 +73,46 @@ describe("checkLink", () => {
       "https://youtu.be/abc123def45",
       "https://www.youtu.be/abc123def45",
       "https://www.youtube-nocookie.com/embed/abc123def45",
-      "https://youtube.com./watch?v=abc"
+      "https://youtube.com./watch?v=abc",
+      "https://youtube.com../watch?v=abc",
+      "https://www.youtube.com.../watch?v=abc",
+      "https://youtu.be../abc"
     ]) {
       expect(checkLink(input, [])).toEqual({ error: "YouTube links aren't supported yet." });
+    }
+  });
+
+  it("refuses a link with a username or password in it", () => {
+    for (const input of ["https://user@example.org/a", "https://user:pw@example.org/report"]) {
+      expect(checkLink(input, [])).toEqual({
+        error: "Links with a username or password can't be added."
+      });
+    }
+  });
+
+  it("refuses port 0 and a site name with characters no site name can have", () => {
+    expect(checkLink("https://example.org:0/report", [])).toEqual({
+      error: "That link has an invalid port."
+    });
+    for (const input of [
+      "https://ex!ample.org/a",
+      "https://exa$mple.org/a",
+      "https://ex*ample.org/a"
+    ]) {
+      expect(checkLink(input, [])).toEqual({ error: "That link's site name isn't valid." });
+    }
+  });
+
+  it("still accepts the site names and ports the server accepts", () => {
+    for (const input of [
+      "https://my_host.example.org/a",
+      "https://example.org:8443/a",
+      "http://[2001:db8::1]/a",
+      "http://192.0.2.10/a",
+      "https://bücher.de/a",
+      "https://example.org../a"
+    ]) {
+      expect(checkLink(input, [])).toHaveProperty("link");
     }
   });
 
@@ -116,6 +153,29 @@ describe("link display helpers", () => {
     // "аpple.com" with a Cyrillic "а" must not pass for apple.com.
     expect(linkHost("https://аpple.com/")).toBe("xn--pple-43d.com");
     expect(linkHostPath("https://xn--pple-43d.com/login")).toBe("xn--pple-43d.com/login");
+  });
+
+  it("keeps a host spelled wholly in look-alike letters in its encoded form", () => {
+    // "аррӏе.com" and "еріс.com" are all Cyrillic, and read as apple.com and epic.com.
+    expect(linkHost("https://xn--80ak6aa92e.com/")).toBe("xn--80ak6aa92e.com");
+    expect(linkHostPath("https://www.xn--80ak6aa92e.com/login")).toBe(
+      "www.xn--80ak6aa92e.com/login"
+    );
+    expect(linkHost("https://аррӏе.com/")).toBe("xn--80ak6aa92e.com");
+    expect(linkHost("https://xn--e1awd7f.com/")).toBe("xn--e1awd7f.com");
+    expect(linkHostPath("https://xn--e1awd7f.com/x")).toBe("xn--e1awd7f.com/x");
+    // Greek, and a symbol that is no letter at all.
+    expect(linkHost("https://xn--hxakic4aa.gr/")).toBe("xn--hxakic4aa.gr");
+    expect(linkHost("https://xn--i-7iq.ws/")).toBe("xn--i-7iq.ws");
+  });
+
+  it("still shows hosts in scripts with no Latin look-alikes as they are written", () => {
+    expect(linkHost("https://xn--bcher-2024-9db.de/")).toBe("bücher-2024.de");
+    expect(linkHost("https://xn--3e0b707e.kr/")).toBe("한국.kr");
+    expect(linkHost("https://xn--tck2c4fb.jp/")).toBe("コーヒー.jp");
+    expect(linkHost("https://xn--mgbh0fb.eg/")).toBe("مثال.eg");
+    expect(linkHost("https://xn--9dbne9b.co.il/")).toBe("שלום.co.il");
+    expect(linkHost("https://xn--o3cw4h.th/")).toBe("ไทย.th");
   });
 
   it("falls back to the raw text when it isn't a link", () => {
