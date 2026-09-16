@@ -7,7 +7,7 @@ This repository contains five generations of the same idea — automatically che
 | Branch | What it is | State |
 |---|---|---|
 | `main` | The current app (see below for its unusual past) | **Active — start here** |
-| `v2` | The clean-slate rebuild — FastAPI backend rewrite + adapted frontend, merging into `main` (see [The v2 rebuild](#the-v2-rebuild-2026-08)) | Development branch of the current app |
+| `v2` | The clean-slate rebuild — FastAPI backend rewrite + adapted frontend, merged into `main` on 2026-08-14 (see [The v2 rebuild](#the-v2-rebuild-2026-08)) | Development branch of the current app |
 | `ultra-base` | A pinned snapshot of `v2` history kept only as the diff base for a deep multi-agent code review | Review artifact, not a line of development |
 | `author_verify` | Generation 1: the "hallucination-checker" prototype (Flask + Jinja + Bootstrap) | Superseded, kept for reference |
 | `author_verify_broken_code` | `author_verify` plus one experimental commit (literally titled "broken code") adding a multi-extractor `pdf_pipeline/` that never worked correctly | Quarantined experiment |

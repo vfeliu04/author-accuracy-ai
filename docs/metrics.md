@@ -47,14 +47,14 @@ For each SOURCE document, an LLM (`claude-haiku-4-5`) extracts bibliographic met
 | `METADATA_ONLY` | Metadata extracted but not externally verified | 5 |
 | `NONE` | Nothing extractable | 0 |
 
-**Web pages** use what their markup declares. When a page is fetched, its `citation_*` tags, JSON-LD, and `og:site_name` are read into its provenance (precedence in [architecture.md](architecture.md#web-pages-webpy)); when that provenance has any of authors, a publisher, a publication date, or a DOI, it becomes the source's metadata and no model call is made. A page that declares nothing beyond a title falls back to the same Haiku extraction over its opening chunks as a PDF. The tiers then apply with one difference: a web page gets the Crossref title search only when it carries `citation_*` tags (a scholarly landing page), because a news headline that merely shares a year with some registered work could pass as `VERIFIED_TITLE`. A DOI the page declares still resolves to `VERIFIED_DOI`. The publisher is never read from the web address — publisher authority matches whole words, so `who-cares.com` would otherwise match `WHO`.
+**Web pages** use what their markup declares. When a page is fetched, its `citation_*` tags, JSON-LD, and `og:site_name` are read into its provenance (precedence in [architecture.md](architecture.md#web-pages-webpy)); when that provenance has any of authors, a publisher, a publication date, or a DOI, it becomes the source's metadata and no model call is made. A page that declares nothing beyond a title falls back to the same Haiku extraction over its opening chunks as a PDF. The tiers then apply with one difference: a web page gets the Crossref title search only when it carries `citation_*` tags (a scholarly landing page), because a news headline that merely shares a year with some registered work could pass as `VERIFIED_TITLE`. A DOI the page declares still resolves to `VERIFIED_DOI`. The publisher is never read from the web address — publisher authority matches whole words, so `united-nations-fan-club.org` would otherwise match `United Nations`.
 
 Component sum (no floors — **unknown earns nothing**):
 
 | Component | Max | Rule |
 | --- | --- | --- |
 | Metadata completeness | 30 | 6 pts per present field (title, authors, publisher, date, DOI) |
-| Publisher authority | 30 | Word-boundary phrase match against configured tier lists: tier-1 → 30, tier-2 → 22.5, any other named publisher → 15, no publisher → 0. "UN"/"U.N." matches; "University" does not |
+| Publisher authority | 30 | Word-boundary phrase match against configured tier lists: tier-1 → 30, tier-2 → 22.5, any other named publisher → 15, no publisher → 0. "UN"/"U.N." matches; "University" does not. A needle written in capitals is an acronym and matches only in capitals, so "Who What Wear" and "Un Mundo Sostenible" score 15, not 30; spelled-out needles ignore case |
 | Recency | 20 | Age from publication year: ≤2 y → 20, ≤5 → 12, ≤10 → 6, older → 3; no year → 0 |
 | Verification | 20 | Tier points above |
 
@@ -105,11 +105,11 @@ Quoted from the JSON files in `backend/evals/`. Re-record only deliberately, wit
 - noise floor: "accuracy 0.84–0.86 over 2 runs; treat |delta| ≤ 0.03 as noise"
 - remaining misses are all under-commitment (S/C judged UNVERIFIABLE), never fabricated support
 
-### Dev run scores — `evals/score_reference.json` (recorded 2026-08-13; reference snapshot, not a golden eval — no labeled truth exists for these numbers)
+### Dev run scores — `evals/score_reference.json` (recorded 2026-08-13, credibility and validity re-recorded 2026-08-21; reference snapshot, not a golden eval — no labeled truth exists for these numbers)
 
 - accuracy **0.9524** (correct 20, incorrect 1), coverage **0.5526**; supported 12, contradicted 9, unverifiable 17, disavowed 14 — the stance-aware semantics working as designed: this report labels its fabrications, so debunking counts *for* the author. 6 disavowed claims sit UNVERIFIABLE in the coverage bucket (their fabrications reference things the sources never discuss).
-- credibility **50.2** (`usage_weighted_mean`): GHI synopsis 37.0 `METADATA_ONLY` (DOI-less brochure — honest), Heliyon review 92.5 `VERIFIED_DOI` (live Crossref resolution)
-- validity **42.8** (±2–3 pt rubric noise; a low score is plausibly *correct* for a deliberately self-contradicting report with no methodology section)
+- credibility **77.6** (`usage_weighted_mean`): GHI synopsis 73.0 `METADATA_ONLY` (the marker-guided imprint scan found the Welthungerhilfe imprint and 2025 date — authority 30 + recency 20; it scored 37.0 when only pages 1–2 were read), Heliyon review 92.5 `VERIFIED_DOI` (live Crossref resolution)
+- validity **42.1** (within rubric noise of the earlier 42.8/42.0/42.5 readings, ±2–3 pt; a low score is plausibly *correct* for a deliberately self-contradicting report with no methodology section)
 
 ### Holdout extraction — `evals/holdout/holdout_reference.json` (recorded 2026-08-13)
 

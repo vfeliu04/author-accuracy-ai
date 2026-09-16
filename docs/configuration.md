@@ -34,12 +34,13 @@ cp backend/.env.example backend/.env
 
 ## Source links
 
-How the ingest step fetches links added as sources (`backend/authorai/fetch.py`). The size cap follows the response's declared `Content-Type`: `text/html` and `application/xhtml+xml` are capped by `AUTHORAI_FETCH_MAX_BYTES`, even when the body turns out to be a PDF, and `application/pdf` and `application/octet-stream` by `AUTHORAI_MAX_UPLOAD_BYTES`. DNS lookups count against `AUTHORAI_FETCH_TIMEOUT_SECONDS`, but a slow lookup is not cut short: the budget is checked again once it returns.
+How the ingest step fetches links added as sources (`backend/authorai/fetch.py`) and reads the pages they serve (`backend/authorai/web.py`). The size cap follows the response's declared `Content-Type`: `text/html` and `application/xhtml+xml` are capped by `AUTHORAI_FETCH_MAX_BYTES`, even when the body turns out to be a PDF, and `application/pdf` and `application/octet-stream` by `AUTHORAI_MAX_UPLOAD_BYTES`. DNS lookups count against `AUTHORAI_FETCH_TIMEOUT_SECONDS`, but a slow lookup is not cut short: the budget is checked again once it returns.
 
 | Env var | Default | What it does |
 |---|---|---|
-| `AUTHORAI_FETCH_TIMEOUT_SECONDS` | `30.0` | Wall-clock budget for one link's whole fetch, every redirect hop included. Checked between hops and after each body chunk, applied as each request's socket timeouts, and enforced by a watchdog that shuts the connection's socket; the OS DNS lookup is the one wait it cannot interrupt |
-| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on the body of a response served as `text/html` or `application/xhtml+xml`, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it |
+| `AUTHORAI_FETCH_TIMEOUT_SECONDS` | `30.0` | Wall-clock budget for one link's whole fetch, every redirect hop included. Checked between hops and after each body chunk, applied as each request's socket timeouts, and enforced by a watchdog that shuts the connection's socket; the OS DNS lookup is the one wait it cannot interrupt. A body the watchdog cut short fails as a timeout, never as a stored page |
+| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on the body of a response served as `text/html` or `application/xhtml+xml`, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it. Only a single coding layer is accepted: stacked codings (`gzip, gzip`, or a repeated `Content-Encoding` header) are refused before the body is read |
+| `AUTHORAI_EXTRACT_TIMEOUT_SECONDS` | `60.0` | Wall-clock budget for reading one fetched web page. The page is read in a separate process that is stopped at the deadline, and the run fails naming the link (`too large or complex`); nothing else could interrupt the single worker thread. A link that serves a PDF is not subject to it |
 | `AUTHORAI_FETCH_MAX_REDIRECTS` | `5` | Redirect hops followed; each target is re-checked, re-resolved, and re-gated against private addresses |
 | `AUTHORAI_FETCH_USER_AGENT` | `AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)` | `User-Agent` sent with every fetch |
 
@@ -69,7 +70,7 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity components. Parsed loudly: unknown names, duplicates, non-finite/negative weights, or a sum ≠ 1 raise instead of falling back |
-| `AUTHORAI_AUTHORITY_TIER1` | `FAO,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,WHO,World Health Organization,UNICEF,OECD,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow |
+| `AUTHORAI_AUTHORITY_TIER1` | `FAO,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,WHO,World Health Organization,UNICEF,OECD,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow. A needle written entirely in capitals is an acronym and matches only in capitals (`WHO` matches `WHO` but not `Who What Wear`; `UN` not the article in `Un Mundo`); other needles ignore case. To accept another spelling of an acronym, add it as its own needle (`Unicef`). Known residual: a publisher styled entirely in capitals (`WHO WHAT WEAR`) still matches |
 | `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,NDMC,International Water Management Institute,IWMI,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
 | `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers) |
 

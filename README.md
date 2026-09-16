@@ -41,10 +41,11 @@ Accuracy measures agreement with the report's **stated positions**, not raw sour
 
 A source can be a link to a web page instead of a file. Add it in the upload dialog. The page is read once, when the run starts, and the copy is kept with the run, so the evidence you review is the text that was checked, not whatever the site shows later.
 
-- Only public web addresses are fetched: a link, a redirect, or an address lookup that leads to a private or internal network is refused. By default a page is capped at 10,000,000 bytes and each fetch at 30 seconds.
+- Only public web addresses are fetched: a link, a redirect, or an address lookup that leads to a private or internal network is refused. By default a page is capped at 10,000,000 bytes, each fetch at 30 seconds, and reading a fetched page at 60 seconds; a page too large or complex to read in that time stops the run.
 - The page's article text and tables are kept; navigation, cookie banners, and similar page furniture are left out. Pages that need JavaScript to show their content can't be read.
 - A link that serves a PDF is handled exactly like an uploaded PDF.
-- A link that can't be read stops the run, and the error names the link, or the page it redirected to. Retrying resumes where the run stopped.
+- A link that can't be read stops the run, and the error names the link as you added it, along with the page it redirected to when there was a redirect. Retrying resumes where the run stopped; a kept copy that can no longer be opened is fetched again, unless the run already finished reading it.
+- Deleting a run removes the copies kept for its links, and never a file outside the app's uploads folder or one another run still uses.
 - In the claims view, evidence from a web page opens as the stored text with the quoted passage highlighted, cited by its section heading, with a link to the original page.
 - Credibility uses what the page declares about itself: its authors, publisher, date, DOI, and title. When a page declares nothing beyond a title, its text is read for those details instead, the same way a PDF's is. The web address is never used.
 - YouTube links are not supported yet; the upload refuses them.
@@ -54,7 +55,7 @@ A source can be a link to a web page instead of a file. Add it in the upload dia
 - **Backend** — FastAPI + Pydantic v2, Python 3.11+
 - **Storage** — SQLite with sqlite-vec (vectors) + FTS5 (keywords), fused by reciprocal-rank hybrid search; every table is keyed by `run_id`, so runs are isolated and nothing is ever reset
 - **PDF parsing** — Docling (sections, tables, and figure images are all first-class)
-- **Web pages** — trafilatura for the readable article text, behind a fetcher that refuses private network addresses, connects only to the address it checked, and caps each page's size and fetch time
+- **Web pages** — trafilatura for the readable article text, behind a fetcher that refuses private network addresses, connects only to the address it checked, and caps each page's size, fetch time, and reading time
 - **LLM** — Anthropic SDK: structured outputs (`messages.parse()`) with code-verified evidence quotes, the Batch API for bulk verification, vision for chart evidence, prompt caching for chat. `claude-opus-5` for extraction, verdicts, and the validity rubric; `claude-haiku-4-5` for figure captions and source metadata; `claude-sonnet-5` for chat
 - **Embeddings** — OpenAI `text-embedding-3-large`
 - **Frontend** — React 18 + Vite + TanStack Query
@@ -148,7 +149,7 @@ python -m authorai.cli search <run_id> hunger 735 million                  # hyb
 
 ## Project status
 
-This is v2 — a clean-slate rewrite of the original Flask app, built on the `v2` branch and merging into `main` (the v1 lineage is documented in [docs/history.md](docs/history.md)):
+This is v2 — a clean-slate rewrite of the original Flask app, built on the `v2` branch and merged into `main` on 2026-08-14; `main` is the v2 app, and later work lands on it through pull requests (the v1 lineage is documented in [docs/history.md](docs/history.md)):
 
 - A new run never replaces an earlier one; every analysis is retained and comparable until you delete it.
 - Auth is a shared `X-API-Key` header and is always on — the server will not start without a key. Suitable for local, single-user use; not hardened for public deployment.
