@@ -347,22 +347,34 @@ def _redirected(exc: Exception, final_url: str, added_url: str) -> Exception:
 def _page_text(fetched: FetchedResponse) -> bytes | str:
     """The page as extract_web should read it. Raw bytes by default —
     extract_web honors a byte-order mark, valid UTF-8, and a <meta> charset —
-    except when the bytes are NOT UTF-8 and the HTTP Content-Type names a
-    charset: the one declaration only the fetch has seen."""
-    if fetched.charset is None:
-        return fetched.body
+    except when the bytes are NOT UTF-8, carry no UTF-16 byte-order mark, and
+    the HTTP Content-Type names a text encoding: the one declaration only the
+    fetch has seen. A label that names no text encoding leaves the bytes to
+    extract_web, which fails naming the link when nothing else declares one."""
+    if fetched.charset is None or fetched.body.startswith(
+        (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+    ):
+        return fetched.body  # WHATWG: a byte-order mark beats the header
     try:
         fetched.body.decode("utf-8")
         return fetched.body
     except UnicodeDecodeError:
         pass
     try:
-        codec = codecs.lookup(fetched.charset).name
+        info = codecs.lookup(fetched.charset)
     except LookupError:
         return fetched.body  # an unknown label: the page's own declaration decides
+    # codecs.lookup also resolves byte-to-byte codecs (base64, bz2 ...), which
+    # bytes.decode refuses with a LookupError: no charset a browser knows either.
+    if not info._is_text_encoding:
+        return fetched.body
+    codec = info.name
     if codec in ("iso8859-1", "ascii"):
         codec = "cp1252"  # WHATWG: browsers decode these labels as windows-1252
-    return fetched.body.decode(codec, errors="replace")
+    try:
+        return fetched.body.decode(codec, errors="replace")
+    except UnicodeError:
+        return fetched.body  # a text codec that refuses any byte ("undefined", "idna")
 
 
 def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:

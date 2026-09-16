@@ -1,5 +1,6 @@
 """Job worker tests: claiming, resume, failure, torn-ingest recovery, dedup."""
 
+import codecs
 import inspect
 import time
 from pathlib import Path
@@ -1208,3 +1209,78 @@ def test_a_page_whose_charset_only_the_http_header_names_is_decoded_with_it(
     step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
     parsed, _ = load_snapshot(planned)
     assert "Organización Mundial de la Salud" in " ".join(s.text for s in parsed.sections)
+
+
+_SPANISH_PAGE = "<p>La Organización Mundial — “agua”, €5 millones, œuvre</p>"
+
+
+def _header_labeled(body: bytes, charset: str):
+    from authorai.fetch import FetchedResponse
+
+    url = "https://www.salud.example.gob/agua"
+    return FetchedResponse(
+        url=url, final_url=url, content_type="text/html", charset=charset, body=body, is_pdf=False
+    )
+
+
+@pytest.mark.parametrize(
+    "body, charset",
+    [
+        # Valid UTF-8 wins over a wrong header label (servers defaulting to ISO-8859-1).
+        (_SPANISH_PAGE.encode("utf-8"), "iso-8859-1"),
+        # An iso-8859-1 label reads as windows-1252: 0x80 €, 0x93/0x94 quotes, 0x97 dash, 0x9C œ.
+        (_SPANISH_PAGE.encode("cp1252"), "iso-8859-1"),
+        # A UTF-16 byte-order mark beats the header, as in browsers and web._decode.
+        (codecs.BOM_UTF16_LE + _SPANISH_PAGE.encode("utf-16-le"), "utf-8"),
+        (codecs.BOM_UTF16_BE + _SPANISH_PAGE.encode("utf-16-be"), "iso-8859-1"),
+    ],
+    ids=[
+        "utf8-bytes-mislabeled",
+        "cp1252-bytes-labeled-latin1",
+        "utf16le-bom-labeled-utf8",
+        "utf16be-bom-labeled-latin1",
+    ],
+)
+def test_header_charset_decodes_like_a_browser_except_a_bom_or_valid_utf8_wins(body, charset):
+    from authorai.jobs import _page_text
+    from authorai.web import _decode
+
+    fetched = _header_labeled(body, charset)
+    result = _page_text(fetched)
+    assert (result if isinstance(result, str) else _decode(result, fetched.url)) == _SPANISH_PAGE
+
+
+@pytest.mark.parametrize(
+    "charset",
+    # Python codecs that are not text encodings (bytes.decode refuses them with a
+    # LookupError), and text codecs that refuse any byte ("undefined", "idna",
+    # "punycode" raise a UnicodeError even with errors="replace").
+    ["base64", "zlib_codec", "bz2_codec", "rot13", "hex", "quoted-printable", "uu"]
+    + ["undefined", "idna", "punycode"],
+)
+def test_a_header_charset_naming_no_text_encoding_leaves_the_page_bytes_to_the_reader(charset):
+    from authorai.jobs import _page_text
+
+    fetched = _header_labeled(_SPANISH_PAGE.encode("cp1252"), charset)
+    assert _page_text(fetched) is fetched.body
+
+
+def test_a_page_whose_header_charset_is_no_text_encoding_fails_naming_the_link(
+    conn, tmp_path, monkeypatch
+):
+    """Not a LookupError about Python codecs: the reader's own decoding failure,
+    which names the link (and the UI can flag its row)."""
+    from authorai import jobs as jobsmod
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, "https://www.salud.example.gob/agua")
+    monkeypatch.setattr(
+        jobsmod,
+        "fetch_url",
+        lambda u, s, **k: _header_labeled(_SPANISH_PAGE.encode("cp1252"), "base64"),
+    )
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    with pytest.raises(ValueError, match="^https://www.salud.example.gob/agua is not valid UTF-8"):
+        step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+    assert list(planned.parent.iterdir()) == []
