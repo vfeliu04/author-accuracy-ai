@@ -35,7 +35,13 @@ from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
 from authorai.fetch import FetchedResponse, _shown, fetch_url
-from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf, ingest_snapshot, write_snapshot
+from authorai.ingest import (
+    FIGURE_DESCRIPTION_PROMPT,
+    ingest_pdf,
+    ingest_snapshot,
+    load_snapshot,
+    write_snapshot,
+)
 from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
@@ -258,11 +264,15 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
 LINK_SOURCE_TYPES = ("web", "youtube")
 
 
-def _fetch_pending_links(context: PipelineContext, upload_ids: list[str]) -> int:
+def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list[str]) -> int:
     """Fetch every link whose page is not stored yet, BEFORE any document is
     processed: a link that cannot be read fails the run in seconds, not after
     the report's parse, figure captions, and embeddings have spent money.
-    A stored page is never fetched again, so a retry resumes where it stopped.
+    A stored page that loads is never fetched again, so a retry resumes where
+    it stopped. One that will not load (cut short by a power loss, or written
+    under an older snapshot schema) is fetched again — otherwise every retry
+    would fail on it identically — unless a finished document was already cut
+    from it: that document's chunks came from the page as stored, so it stays.
     Returns how many links this attempt fetched."""
     conn = context.conn
     fetched = 0
@@ -272,11 +282,30 @@ def _fetch_pending_links(context: PipelineContext, upload_ids: list[str]) -> int
             continue  # an unknown upload id is reported loudly by _reconcile_upload
         if upload["source_type"] == "youtube":
             raise ValueError(f"YouTube sources are not supported yet: {upload['url']!r}")
-        if Path(upload["path"]).exists():
-            continue
+        path = Path(upload["path"])
+        if path.exists():
+            if _snapshot_loads(path) or _has_finished_document(conn, run_id, upload_id):
+                continue
+            logger.warning("stored page for %s will not load — fetching it again", upload["url"])
+            path.unlink()
         _fetch_link(context, upload)
         fetched += 1
     return fetched
+
+
+def _snapshot_loads(path: Path) -> bool:
+    try:
+        load_snapshot(path)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_finished_document(conn: sqlite3.Connection, run_id: str, upload_id: str) -> bool:
+    document = conn.execute(
+        "SELECT id FROM documents WHERE run_id = ? AND upload_id = ?", (run_id, upload_id)
+    ).fetchone()
+    return document is not None and bool(_chunk_count(conn, document["id"]))
 
 
 def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
@@ -379,7 +408,7 @@ def _page_text(fetched: FetchedResponse) -> bytes | str:
 
 def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:
     upload_ids = [payload["report_upload_id"], *payload["source_upload_ids"]]
-    fetched = _fetch_pending_links(context, upload_ids)
+    fetched = _fetch_pending_links(context, run_id, upload_ids)
     reused = sum(_reconcile_upload(context, run_id, upload_id) for upload_id in upload_ids)
     # Shown verbatim under the finished step, so it counts in the reader's words.
     label = f"Read {len(upload_ids)} documents"

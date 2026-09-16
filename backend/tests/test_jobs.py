@@ -935,6 +935,86 @@ def test_retry_with_an_existing_snapshot_never_fetches_again(conn, tmp_path, mon
     assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Read 2 documents"
 
 
+@pytest.mark.parametrize("torn", [False, True], ids=["no-document", "torn-document"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"",
+        b'{"document": {"sections": [',
+        b'{"schema": 0, "document": {"title": null, "sections": []}, "provenance": {}}',
+    ],
+    ids=["zero-byte", "truncated", "other-schema"],
+)
+def test_retry_refetches_a_stored_page_that_will_not_load(
+    conn, tmp_path, monkeypatch, content, torn
+):
+    """A stored page that will not load (lost to a power cut mid-write, or from an
+    older snapshot schema) wedged every retry: the pre-pass skipped it because the
+    file existed, and ingest failed on it again. With no finished document cut
+    from it, it is fetched again."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection, load_snapshot
+    from authorai.web import PageMetadata
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    planned.write_bytes(content)
+    if torn:
+        dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)  # no chunks
+    fetches: list[str] = []
+    loaded: list[str] = []
+
+    def fake_fetch(u, settings, **kwargs):
+        fetches.append(u)
+        return _fetched(u)
+
+    def fresh_page(html, *, url, timeout):
+        section = ParsedSection(title="", page=None, text="fresh page text")
+        return ParsedDocument(title=None, sections=[section], tables=[], figures=[]), PageMetadata()
+
+    monkeypatch.setattr(jobsmod, "fetch_url", fake_fetch)
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", fresh_page)
+    monkeypatch.setattr(
+        jobsmod,
+        "ingest_snapshot",
+        lambda c, e, r, path, **k: loaded.append(load_snapshot(path)[0].sections[0].text),
+    )
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    label = step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+    assert fetches == [url]
+    assert label == "Read 2 documents (1 web page opened)"
+    assert loaded == ["fresh page text"]
+
+
+def test_an_unloadable_page_behind_a_completed_document_is_never_refetched(
+    conn, tmp_path, monkeypatch
+):
+    """A finished document's chunks were cut from its stored page, so that page
+    stays exactly as it is (an old schema is meant to fail loudly in the evidence
+    pane): the conftest fetch_url poison is the guard here."""
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, "https://www.who.int/facts")
+    planned.write_bytes(b"")
+    doc_id = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)
+    dbmod.add_chunks(
+        conn,
+        run_id,
+        doc_id,
+        [{"text": "cut earlier"}],
+        FakeEmbedder(dim=DIM).embed(["cut earlier"]),
+    )
+    poison_providers(monkeypatch)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Read 2 documents"
+    assert planned.read_bytes() == b""
+
+
 def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     conn, tmp_path, monkeypatch
 ):
