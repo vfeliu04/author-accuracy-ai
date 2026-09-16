@@ -29,7 +29,9 @@ treats both the same.
 import codecs
 import copy
 import json
+import multiprocessing
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
@@ -65,6 +67,10 @@ class ThinPageError(ValueError):
     """The page yielded no readable article text — typically a JavaScript-rendered shell."""
 
 
+class ExtractionTimeoutError(RuntimeError):
+    """Reading the page exceeded its wall-clock budget and was stopped."""
+
+
 @dataclass
 class PageMetadata:
     """What a page's markup declares about itself. Field names mirror
@@ -98,6 +104,83 @@ def extract_web(html: bytes | str, *, url: str) -> tuple[ParsedDocument, PageMet
         title=metadata.title or first_heading, sections=sections, tables=[], figures=[]
     )
     return document, metadata
+
+
+def extract_web_bounded(
+    html: bytes | str, *, url: str, timeout: float
+) -> tuple[ParsedDocument, PageMetadata]:
+    """extract_web in a child process, stopped after `timeout` seconds of wall
+    clock. The tree edits in _prepare_tree are linear, but trafilatura's own
+    cleaning still goes quadratic over a run of inline tags it strips itself
+    (<abbr>x</abbr> repeated: 6 s at 0.4 MB, an hour at the 10 MB fetch cap),
+    and nothing else can interrupt the single worker thread. A fresh
+    interpreter (spawned, never forked: the caller is a thread) costs about
+    half a second per page.
+
+    Raises ExtractionTimeoutError at the deadline. The child's ThinPageError
+    or ValueError is re-raised here as the same type with the same message;
+    any other failure of the child is a RuntimeError naming the URL.
+    """
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    child = context.Process(target=_extract_in_child, args=(sender, html, url), daemon=True)
+    outcome = None
+    try:
+        deadline = time.monotonic() + timeout
+        child.start()
+        sender.close()  # the child holds the only writing end: its exit reads as EOF
+        if not receiver.poll(max(0.0, deadline - time.monotonic())):
+            raise ExtractionTimeoutError(
+                f"{url} took longer than {timeout:g} seconds to read "
+                "(the page is too large or complex)"
+            )
+        try:
+            outcome = receiver.recv()
+        except EOFError:  # the child died before reporting (killed, out of memory)
+            pass
+    finally:
+        sender.close()
+        receiver.close()
+        if child.pid is not None:
+            _stop(child)
+    if outcome is None:
+        raise RuntimeError(f"{url} could not be read: the reader process exited without a result")
+    kind, payload = outcome
+    if kind == "result":
+        return payload
+    name, message = payload
+    if kind == "thin":
+        raise ThinPageError(message)
+    if kind == "value":
+        raise ValueError(message)
+    raise RuntimeError(f"{url} could not be read: {name}: {message}")
+
+
+def _extract_in_child(sender, html: bytes | str, url: str) -> None:
+    """The child's side of extract_web_bounded: the result, or the failure as
+    a (kind, (type name, message)) pair — exceptions themselves need not pickle."""
+    try:
+        outcome = ("result", extract_web(html, url=url))
+    except Exception as exc:
+        kind = "other"
+        if isinstance(exc, ThinPageError):
+            kind = "thin"
+        elif isinstance(exc, ValueError):
+            kind = "value"
+        outcome = (kind, (type(exc).__name__, str(exc)))
+    sender.send(outcome)
+    sender.close()
+
+
+def _stop(child) -> None:
+    """Reap the reader process: one still running is terminated, then killed."""
+    if child.is_alive():
+        child.terminate()
+        child.join(1.0)
+        if child.is_alive():
+            child.kill()
+    child.join()
+    child.close()
 
 
 # --- decoding ----------------------------------------------------------------
