@@ -6,6 +6,7 @@ runs never overwrite each other — there is no reset step, ever.
 """
 
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -741,12 +742,14 @@ def delete_run_data(conn: sqlite3.Connection, run_id: str) -> list[str]:
         conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         # A file another upload still names is not this run's to hand back: the
         # CLI can ingest a stored PDF by its absolute path while the uploading
-        # run's row names it relative to the working directory.
+        # run's row names it relative to the working directory. realpath, not
+        # Path.resolve: one stored path in a symlink loop must not raise here and
+        # make every run undeletable.
         still_named = {
-            Path(row["path"]).resolve() for row in conn.execute("SELECT path FROM uploads")
+            os.path.realpath(row["path"]) for row in conn.execute("SELECT path FROM uploads")
         }
         conn.commit()
-        return [path for path in paths if Path(path).resolve() not in still_named]
+        return [path for path in paths if os.path.realpath(path) not in still_named]
     except BaseException:
         conn.rollback()
         raise

@@ -471,6 +471,28 @@ def test_delete_run_keeps_a_stored_file_another_run_still_names(tmp_path, monkey
         conn.close()
 
 
+def test_a_stored_path_caught_in_a_symlink_loop_never_blocks_deleting_a_run(tmp_path):
+    """Deleting a run checks its files against every other upload's path. One path
+    that no longer resolves (a CLI-ingested folder later replaced by a symlink
+    loop) must not fail that check and make every run undeletable — nor its own."""
+    settings = _settings(tmp_path)
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "a").symlink_to(library / "b")
+    (library / "b").symlink_to(library / "a")
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    looped_run = dbmod.create_run(conn)
+    looped = dbmod.add_upload(conn, "REPORT", "looped.pdf", str(library / "a" / "looped.pdf"))
+    dbmod.add_document(conn, looped_run, "REPORT", upload_id=looped)
+    conn.close()
+    other_run = _seed_scored_run(settings)
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        assert client.delete(f"/api/runs/{other_run}", headers=AUTH).status_code == 204
+        assert client.delete(f"/api/runs/{looped_run}", headers=AUTH).status_code == 204
+    assert sorted(p.name for p in settings.uploads_dir.iterdir()) == []
+
+
 @pytest.mark.parametrize("stored", [".json", ".pdf"], ids=["page", "pdf"])
 def test_delete_run_removes_every_file_a_link_upload_can_leave(tmp_path, stored):
     """A link's files all share its planned name: the page or PDF its row names,

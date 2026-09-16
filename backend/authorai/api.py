@@ -12,6 +12,7 @@ configured key ⇒ 401).
 
 import hashlib
 import json
+import os
 import secrets
 import shutil
 import sqlite3
@@ -275,9 +276,10 @@ def delete_run(run_id: str, request: Request, conn: Conn) -> None:
     # never database rows pointing at missing ones. Only files the app wrote,
     # checked like get_document_file: a CLI ingest records the user's ORIGINAL
     # file (ingest_parsed with no upload id), which deletion must never touch.
+    # realpath, unlike Path.resolve, does not raise on a symlink loop.
     uploads_root = settings.uploads_dir.resolve()
     for path in upload_paths:
-        resolved = Path(path).resolve()
+        resolved = Path(os.path.realpath(path))
         if resolved.is_relative_to(uploads_root):
             resolved.unlink(missing_ok=True)
     shutil.rmtree(settings.run_figures_dir(run_id), ignore_errors=True)
