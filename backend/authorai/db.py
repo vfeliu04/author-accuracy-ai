@@ -721,12 +721,13 @@ def delete_run_data(conn: sqlite3.Connection, run_id: str) -> list[str]:
         paths: list[str] = []
         placeholders = ",".join("?" * len(upload_ids))
         if upload_ids:
-            paths = [
-                row["path"]
-                for row in conn.execute(
-                    f"SELECT path FROM uploads WHERE id IN ({placeholders})", list(upload_ids)
-                )
-            ]
+            for row in conn.execute(
+                f"SELECT path, url FROM uploads WHERE id IN ({placeholders})", list(upload_ids)
+            ):
+                if row["url"] is None:
+                    paths.append(row["path"])
+                else:  # a link: also whatever an interrupted fetch left beside its file
+                    paths.extend(str(path) for path in link_artifact_paths(row["path"]))
         conn.execute("DELETE FROM verdicts WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM claims WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM chunks WHERE run_id = ?", (run_id,))
@@ -855,6 +856,18 @@ def add_upload(
             (upload_id, kind, file_name, path, content_hash, source_type, url, now_iso()),
         )
     return upload_id
+
+
+def link_artifact_paths(path: str | Path) -> list[Path]:
+    """Every file a link upload can leave on disk, from the path its row names.
+    All share the planned path's server-generated stem: the page (.json), the
+    PDF the link can turn out to serve instead (.pdf), and the .part of either
+    that an interrupted write leaves."""
+    path = Path(path)
+    return [
+        path.with_name(path.stem + suffix)
+        for suffix in (".json", ".pdf", ".json.part", ".pdf.part")
+    ]
 
 
 def record_fetch(

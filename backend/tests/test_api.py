@@ -471,6 +471,40 @@ def test_delete_run_keeps_a_stored_file_another_run_still_names(tmp_path, monkey
         conn.close()
 
 
+@pytest.mark.parametrize("stored", [".json", ".pdf"], ids=["page", "pdf"])
+def test_delete_run_removes_every_file_a_link_upload_can_leave(tmp_path, stored):
+    """A link's files all share its planned name: the page or PDF its row names,
+    plus what an interrupted fetch left behind (a PDF stored but never recorded,
+    a half-written .part). Deleting the run reclaims every one of them."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        run_id = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=_upload_files(source_count=0),
+            data={"source_urls": ["https://example.org/report"]},
+        ).json()["run_id"]
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        link = conn.execute("SELECT id, path FROM uploads WHERE url IS NOT NULL").fetchone()
+        planned = Path(link["path"])
+        if stored == ".pdf":
+            dbmod.record_fetch(
+                conn,
+                link["id"],
+                path=str(planned.with_suffix(".pdf")),
+                source_type="pdf",
+                content_hash="abc",
+            )
+        for suffix in (".json", ".pdf", ".json.part", ".pdf.part"):
+            planned.with_name(planned.stem + suffix).write_bytes(b"left behind")
+        job = dbmod.get_run_job(conn, run_id)
+        dbmod.finish_job_and_run(conn, job["id"], run_id, "FAILED", error="database is locked")
+        conn.close()
+
+        assert client.delete(f"/api/runs/{run_id}", headers=AUTH).status_code == 204
+    assert sorted(p.name for p in settings.uploads_dir.iterdir()) == []
+
+
 def test_report_sources_include_extracted_metadata(tmp_path):
     settings = _settings(tmp_path)
     run_id = _seed_scored_run(settings)

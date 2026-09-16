@@ -339,6 +339,7 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
             source_type="pdf",
             content_hash=hashlib.sha256(fetched.body).hexdigest(),
         )
+        _drop_other_link_artifacts(planned, keep=target)
         return
     text = _page_text(fetched)
     try:
@@ -357,6 +358,18 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
         **asdict(page),
     }
     write_snapshot(planned, parsed, provenance)
+    _drop_other_link_artifacts(planned, keep=planned)
+
+
+def _drop_other_link_artifacts(planned: Path, *, keep: Path) -> None:
+    """Remove what an earlier attempt at this link left beside the file its row
+    now names: a PDF stored but never recorded, a page the link no longer serves,
+    a .part never renamed. Only once the row names the kept file, so no row ever
+    points at nothing; no row names the others (a stored PDF's row is never
+    fetched again), and deletion is refused while the job runs."""
+    for path in dbmod.link_artifact_paths(planned):
+        if path != keep:
+            path.unlink(missing_ok=True)
 
 
 # What reading a page raises, most specific first.

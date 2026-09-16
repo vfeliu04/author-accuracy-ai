@@ -1144,6 +1144,52 @@ def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     assert not planned.exists()
 
 
+@pytest.mark.parametrize(
+    ("left_behind", "body", "kept"),
+    [
+        ([".pdf", ".pdf.part"], b"<html><body>page</body></html>", ".json"),
+        ([".json.part"], b"%PDF-now-a-pdf", ".pdf"),
+    ],
+    ids=["page-after-a-pdf", "pdf-after-a-page"],
+)
+def test_a_link_fetch_leaves_only_the_artifact_its_row_names(
+    conn, tmp_path, monkeypatch, left_behind, body, kept
+):
+    """An earlier attempt stopped mid-fetch (a PDF stored but its row never
+    updated, a .part never renamed) and the retry finds the link serving the
+    other kind: the files the row does not name are removed, so nothing is left
+    that neither a row nor deleting the run would ever reclaim."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection
+    from authorai.web import PageMetadata
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, "https://example.org/report")
+    for suffix in left_behind:
+        planned.with_name(planned.stem + suffix).write_bytes(b"stale")
+
+    def page(html, *, url, timeout):
+        section = ParsedSection(title="", page=None, text="page text")
+        document = ParsedDocument(title="T", sections=[section], tables=[], figures=[])
+        return document, PageMetadata(title="T")
+
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, s, **k: _fetched(u, body=body))
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", page)
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: "doc")
+    monkeypatch.setattr(jobsmod, "_maybe_reuse_ingest", lambda *a, **k: False)
+    monkeypatch.setattr(jobsmod, "OpenAIEmbedder", lambda *a, **k: object())
+    monkeypatch.setattr(jobsmod, "AnthropicClient", lambda *a, **k: object())
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+    row = conn.execute("SELECT path FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+    assert row["path"] == str(planned.with_suffix(kept))
+    assert sorted(p.name for p in planned.parent.glob(planned.stem + "*")) == [planned.stem + kept]
+
+
 def test_a_link_is_read_out_of_process_within_the_configured_budget(conn, tmp_path, monkeypatch):
     """Reading a page runs in the bounded reader, never in the worker thread, with
     Settings.extract_timeout_seconds as its wall-clock budget (default 60 s,
