@@ -848,7 +848,7 @@ def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_pat
         fetches.append(u)
         return _fetched(u, final_url=u + "/")
 
-    def fake_extract(html, *, url):
+    def fake_extract(html, *, url, timeout):
         document = ParsedDocument(
             title="Drinking-water",
             sections=[
@@ -883,7 +883,7 @@ def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_pat
         return "doc"
 
     monkeypatch.setattr(jobsmod, "fetch_url", fake_fetch)
-    monkeypatch.setattr(jobsmod, "extract_web", fake_extract)
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", fake_extract)
     monkeypatch.setattr(jobsmod, "ingest_snapshot", fake_ingest_snapshot)
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
 
@@ -957,6 +957,68 @@ def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     stored = Path(row["path"])
     assert stored == planned.with_suffix(".pdf") and stored.read_bytes() == body
     assert not planned.exists()
+
+
+def test_a_link_is_read_out_of_process_within_the_configured_budget(conn, tmp_path, monkeypatch):
+    """Reading a page runs in the bounded reader, never in the worker thread, with
+    Settings.extract_timeout_seconds as its wall-clock budget (default 60 s,
+    AUTHORAI_EXTRACT_TIMEOUT_SECONDS overrides)."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection
+
+    assert SETTINGS.extract_timeout_seconds == 60.0
+    monkeypatch.setenv("AUTHORAI_EXTRACT_TIMEOUT_SECONDS", "12.5")
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    assert settings.extract_timeout_seconds == 12.5
+
+    from authorai.web import PageMetadata
+
+    reads: list[tuple[str, float]] = []
+
+    def fake_bounded(html, *, url, timeout):
+        reads.append((url, timeout))
+        section = ParsedSection(title="", page=None, text="page text")
+        return ParsedDocument(title=None, sections=[section], tables=[], figures=[]), PageMetadata()
+
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, s, **k: _fetched(u))
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", fake_bounded)
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    step_ingest(PipelineContext(conn, settings), run_id, payload)
+    assert reads == [(url, 12.5)]
+    assert planned.exists()
+
+
+def test_a_link_too_slow_to_read_fails_the_ingest_step_naming_it(conn, tmp_path, monkeypatch):
+    """The REAL bounded reader, given a budget no child process can meet: the run
+    fails at ingest, loudly, with the link named, and no page is stored."""
+    from authorai import jobs as jobsmod
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    poison_providers(monkeypatch)
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, s, **k: _fetched(u))
+    job_id = dbmod.create_job(
+        conn, run_id, {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", extract_timeout_seconds=0.001)
+
+    run_job(conn, settings, dbmod.claim_next_job(conn))
+
+    job = dbmod.get_job(conn, job_id)
+    assert job["status"] == "FAILED"
+    assert [(p["step"], p["status"]) for p in job["progress"]] == [("ingest", "failed")]
+    assert dbmod.get_run(conn, run_id)["error"] == (
+        f"ExtractionTimeoutError: {url} took longer than 0.001 seconds to read "
+        "(the page is too large or complex)"
+    )
+    assert list(planned.parent.iterdir()) == []  # no snapshot, no .part left behind
 
 
 def test_step_ingest_label_counts_opened_pages_in_plain_words(conn, tmp_path, monkeypatch):

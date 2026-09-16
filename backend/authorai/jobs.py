@@ -40,7 +40,7 @@ from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
-from authorai.web import extract_web
+from authorai.web import extract_web_bounded
 
 logger = setup_logger(__name__)
 
@@ -285,8 +285,10 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
     A page becomes a snapshot at the planned path — never hashed: link pages do
     not dedup. A PDF is stored beside it at .pdf and recorded (record_fetch) as
     a PDF upload with its content hash, so it is ingested, and dedups, exactly
-    like an uploaded PDF. FetchError / ThinPageError propagate: the step fails
-    with the link named, and the retry fetches again.
+    like an uploaded PDF. The page is read out of process under a wall-clock
+    budget (a page can hold trafilatura for hours). FetchError, ThinPageError
+    and ExtractionTimeoutError propagate: the step fails with the link named,
+    and the retry fetches again.
     """
     fetched = fetch_url(upload["url"], context.settings)
     planned = Path(upload["path"])
@@ -308,7 +310,9 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
             content_hash=hashlib.sha256(fetched.body).hexdigest(),
         )
         return
-    parsed, page = extract_web(_page_text(fetched), url=fetched.final_url)
+    parsed, page = extract_web_bounded(
+        _page_text(fetched), url=fetched.final_url, timeout=context.settings.extract_timeout_seconds
+    )
     provenance = {
         "url": upload["url"],
         "final_url": fetched.final_url,

@@ -81,13 +81,19 @@ class Settings(BaseSettings):
     # read, so an unauthenticated attacker cannot push gigabytes at us.
     max_request_bytes: int = 220_000_000
     max_source_files: int = 20
-    # Source-URL fetching (fetch.py); a fetched PDF is capped by max_upload_bytes.
+    # Source-URL fetching (fetch.py). A fetched response served as application/pdf
+    # or application/octet-stream is capped by max_upload_bytes; a PDF served
+    # under an HTML type is held to fetch_max_bytes.
     # Total wall-clock budget for one fetch across all redirect hops.
     fetch_timeout_seconds: float = 30.0
     # HTML body cap, counted in decoded bytes (after Content-Encoding).
     fetch_max_bytes: int = 10_000_000
     # Redirect hops followed; each one is re-validated, re-resolved, and re-gated.
     fetch_max_redirects: int = 5
+    # Wall-clock budget for reading one fetched page (web.extract_web_bounded):
+    # trafilatura's cleaning can go quadratic on markup inside the byte cap, and
+    # nothing else can interrupt the single worker thread.
+    extract_timeout_seconds: float = 60.0
     # Identifies the fetcher to the sites it reads.
     fetch_user_agent: str = "AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)"
     cors_origins: str = "http://localhost:5173"
