@@ -622,7 +622,7 @@ def test_dedup_ignores_torn_donors_and_null_hashes(conn, tmp_path, monkeypatch):
 
 
 def test_step_ingest_label_counts_reuse(conn, tmp_path, monkeypatch):
-    """The done-label the UI shows verbatim: '(M reused)' only when M > 0."""
+    """The done-label the UI shows verbatim: '(M already read)' only when M > 0."""
     from authorai import jobs as jobsmod
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
@@ -638,13 +638,13 @@ def test_step_ingest_label_counts_reuse(conn, tmp_path, monkeypatch):
     source_upload = dbmod.add_upload(conn, "SOURCE", "s.pdf", str(source_pdf), "feed99")
     payload = {"report_upload_id": report_upload, "source_upload_ids": [source_upload]}
     context = PipelineContext(conn, settings)
-    assert step_ingest(context, run_id, payload) == "Ingested 2 documents (1 reused)"
+    assert step_ingest(context, run_id, payload) == "Read 2 documents (1 already read)"
 
     other_run = dbmod.create_run(conn)
     fresh_a = dbmod.add_upload(conn, "REPORT", "a.pdf", str(report_pdf), "bbbb01")
     fresh_b = dbmod.add_upload(conn, "SOURCE", "b.pdf", str(source_pdf), "bbbb02")
     payload = {"report_upload_id": fresh_a, "source_upload_ids": [fresh_b]}
-    assert step_ingest(context, other_run, payload) == "Ingested 2 documents"
+    assert step_ingest(context, other_run, payload) == "Read 2 documents"
 
 
 def _api_style_delete(conn, settings, run_id):
@@ -888,7 +888,7 @@ def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_pat
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
 
     assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == (
-        "Ingested 2 documents (1 fetched)"
+        "Read 2 documents (1 web page opened)"
     )
     assert fetches == [url]
     parsed, provenance = load_snapshot(planned)
@@ -925,7 +925,7 @@ def test_retry_with_an_existing_snapshot_never_fetches_again(conn, tmp_path, mon
     )
     monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
-    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Ingested 2 documents"
+    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Read 2 documents"
 
 
 def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
@@ -950,13 +950,33 @@ def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
 
     label = step_ingest(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, payload)
-    assert label == "Ingested 2 documents (1 fetched, 1 reused)"
+    assert label == "Read 2 documents (1 web page opened, 1 already read)"
     row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
     assert (row["source_type"], row["content_hash"]) == ("pdf", digest)
     assert row["url"] == "https://example.org/report.pdf"
     stored = Path(row["path"])
     assert stored == planned.with_suffix(".pdf") and stored.read_bytes() == body
     assert not planned.exists()
+
+
+def test_step_ingest_label_counts_opened_pages_in_plain_words(conn, tmp_path, monkeypatch):
+    """Every link this attempt opened counts, pluralized; a zero count is left out."""
+    from authorai import jobs as jobsmod
+
+    bodies = iter([b"%PDF-first", b"%PDF-second"])
+    monkeypatch.setattr(
+        jobsmod,
+        "fetch_url",
+        lambda u, s, **k: _fetched(u, body=next(bodies), content_type="application/pdf"),
+    )
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    first, _ = _link_upload(conn, tmp_path, "https://example.org/a.pdf")
+    second, _ = _link_upload(conn, tmp_path, "https://example.org/b.pdf")
+    payload = {"report_upload_id": report, "source_upload_ids": [first, second]}
+    label = step_ingest(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, payload)
+    assert label == "Read 3 documents (2 web pages opened)"
 
 
 def test_youtube_links_fail_loudly_until_supported(conn, tmp_path, monkeypatch):

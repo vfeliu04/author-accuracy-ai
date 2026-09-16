@@ -344,10 +344,13 @@ def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:
     upload_ids = [payload["report_upload_id"], *payload["source_upload_ids"]]
     fetched = _fetch_pending_links(context, upload_ids)
     reused = sum(_reconcile_upload(context, run_id, upload_id) for upload_id in upload_ids)
-    label = f"Ingested {len(upload_ids)} documents"
-    notes = [
-        f"{count} {what}" for count, what in ((fetched, "fetched"), (reused, "reused")) if count
-    ]
+    # Shown verbatim under the finished step, so it counts in the reader's words.
+    label = f"Read {len(upload_ids)} documents"
+    notes = []
+    if fetched:
+        notes.append(f"{fetched} web {'page' if fetched == 1 else 'pages'} opened")
+    if reused:
+        notes.append(f"{reused} already read")
     return f"{label} ({', '.join(notes)})" if notes else label
 
 

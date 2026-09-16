@@ -238,14 +238,14 @@ def test_second_identical_upload_reuses_ingest_end_to_end(tmp_path, monkeypatch)
 
         detail = client.get(f"/api/runs/{second}", headers=AUTH).json()
         ingest = next(p for p in detail["job"]["progress"] if p["step"] == "ingest")
-        assert ingest["label"] == "Ingested 2 documents (2 reused)"
+        assert ingest["label"] == "Read 2 documents (2 already read)"
         assert detail["run"]["status"] == "DONE"
 
         # Run 1's report and source were ALSO the same bytes, so within-run
         # reuse already fired there: the source copied the report's ingest.
         first_detail = client.get(f"/api/runs/{first}", headers=AUTH).json()
         first_ingest = next(p for p in first_detail["job"]["progress"] if p["step"] == "ingest")
-        assert first_ingest["label"] == "Ingested 2 documents (1 reused)"
+        assert first_ingest["label"] == "Read 2 documents (1 already read)"
 
         assert client.delete(f"/api/runs/{first}", headers=AUTH).status_code == 204
         served = client.get(f"/api/runs/{second}/documents/{report_doc}/file", headers=AUTH)
