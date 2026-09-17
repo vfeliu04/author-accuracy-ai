@@ -83,7 +83,12 @@ describe("checkLink", () => {
   });
 
   it("refuses a link with a username or password in it", () => {
-    for (const input of ["https://user@example.org/a", "https://user:pw@example.org/report"]) {
+    for (const input of [
+      "https://user@example.org/a",
+      "https://user:pw@example.org/report",
+      // A password alone: the parser keeps an empty username and the password.
+      "https://:pw@example.org/a"
+    ]) {
       expect(checkLink(input, [])).toEqual({
         error: "Links with a username or password can't be added."
       });
@@ -173,9 +178,78 @@ describe("link display helpers", () => {
     expect(linkHost("https://xn--bcher-2024-9db.de/")).toBe("bücher-2024.de");
     expect(linkHost("https://xn--3e0b707e.kr/")).toBe("한국.kr");
     expect(linkHost("https://xn--tck2c4fb.jp/")).toBe("コーヒー.jp");
+    expect(linkHost("https://xn--r8jz45g.jp/")).toBe("例え.jp");
     expect(linkHost("https://xn--mgbh0fb.eg/")).toBe("مثال.eg");
     expect(linkHost("https://xn--9dbne9b.co.il/")).toBe("שלום.co.il");
     expect(linkHost("https://xn--o3cw4h.th/")).toBe("ไทย.th");
+  });
+
+  it("keeps a host carrying a mark with no glyph in its encoded form", () => {
+    // "apple" plus U+034F, U+FE0F, U+E0100 or U+180B: each reads exactly as apple.com.
+    for (const host of [
+      "xn--apple-osd.com",
+      "xn--apple-0613a.com",
+      "xn--apple-rs806b.com",
+      "xn--apple-ms3a.com"
+    ]) {
+      expect(linkHost(`https://${host}/`)).toBe(host);
+    }
+    expect(linkHostPath("https://xn--apple-osd.com/login")).toBe("xn--apple-osd.com/login");
+    // "例え" plus U+034F reads exactly as 例え.jp.
+    expect(linkHost("https://xn--tua931u7ut.jp/")).toBe("xn--tua931u7ut.jp");
+  });
+
+  it("keeps a host whose encoding adds nothing to a plain name in its encoded form", () => {
+    // "xn--apple-" encodes no letter at all, and would read as apple.com.
+    expect(linkHost("https://xn--apple-.com/")).toBe("xn--apple-.com");
+  });
+
+  it("keeps a host spelled in a form normalization changes in its encoded form", () => {
+    // ſ (long s), ａ (fullwidth a), ŀ (l with middle dot), halfwidth katakana, and
+    // "bücher" with its umlaut as a separate mark: each is another spelling of a
+    // name registered in its plain form, and the last looks exactly like it.
+    for (const host of [
+      "xn--microoft-z4b.com",
+      "xn--pple-zg0y.com",
+      "xn--googe-b7a.com",
+      "xn--yj7ca2aze.jp",
+      "xn--bucher-xyd.de"
+    ]) {
+      expect(linkHost(`https://${host}/`)).toBe(host);
+    }
+  });
+
+  it("keeps a host spelled with Latin letters that read as plain ones in its encoded form", () => {
+    // ɑ, ı, ȷ, ɡ, ǀ (a click that reads as l), and small capitals ᴏ and ɴ.
+    for (const host of [
+      "xn--pple-p5b.com",
+      "xn--paypa-r4a.com",
+      "xn--ava-gpb.com",
+      "xn--oogle-qmc.com",
+      "xn--pypl-q5bc.com",
+      "xn--appe-2kb.com",
+      "xn--penai-l29a.com",
+      "xn--amazo-4pc.com"
+    ]) {
+      expect(linkHost(`https://${host}/`)).toBe(host);
+    }
+    // A dot above on ı, i, j or l reads as the plain letter.
+    expect(linkHostPath("https://xn--wkpedia-rfbb218bca.org/wiki")).toBe(
+      "xn--wkpedia-rfbb218bca.org/wiki"
+    );
+    for (const host of ["xn--wikipedia-6jfc.org", "xn--java-qwc.com", "xn--apple-bgd.com"]) {
+      expect(linkHost(`https://${host}/`)).toBe(host);
+    }
+  });
+
+  it("still shows accented Latin names, and the letters Latin languages add, as written", () => {
+    expect(linkHost("https://xn--pple-9sa.com/")).toBe("ąpple.com"); // the ogonek shows
+    expect(linkHost("https://xn--blbr-roah.no/")).toBe("blåbær.no");
+    expect(linkHost("https://xn--strae-oqa.de/")).toBe("straße.de");
+    expect(linkHost("https://xn--d-uga0v4h.pl/")).toBe("łódź.pl");
+    expect(linkHost("https://xn--resund-9xa.dk/")).toBe("øresund.dk");
+    expect(linkHost("https://xn--uvre-f4a.fr/")).toBe("œuvre.fr");
+    expect(linkHost("https://xn--akovo-4ya.hr/")).toBe("đakovo.hr");
   });
 
   it("falls back to the raw text when it isn't a link", () => {

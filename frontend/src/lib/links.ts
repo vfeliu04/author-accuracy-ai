@@ -124,21 +124,42 @@ function decodePunycode(encoded: string): string | null {
   return String.fromCodePoint(...output);
 }
 
-// A decoded name is shown only when it can't pass for a familiar one. Letters
+// A decoded name is shown only when it can't be mistaken for another. Letters
 // from scripts with Latin look-alikes — Cyrillic, Greek and others — can spell
 // a whole name ("аррӏе" is all Cyrillic) or slip into a Latin one ("аpple"), and
 // symbols can stand in for letters, so any of those keeps the encoded form.
 // Allowed: Latin alone, or scripts with no Latin look-alikes without Latin.
-const LATIN_LABEL = /^[\p{Script=Latin}\p{M}0-9-]+$/u;
 const DISTINCT_SCRIPT_LABEL =
   /^[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Bopomofo}\p{scx=Arabic}\p{scx=Hebrew}\p{scx=Thai}\p{M}0-9-]+$/u;
+// Latin is read letter by letter with its accents split off: ASCII letters, plus
+// the few letters Latin languages add that can't pass for an ASCII one. Letters
+// that read as plain ones (ı ȷ ɑ ɡ, ǀ, small capitals) and a dot above an i, j
+// or l keep the encoded form.
+const LATIN_LABEL = /^(?:[a-z0-9ßæøœłđ-][\u0300-\u036f]*)+$/u;
+const DOTTED_STEM = /[ijl][\u0300-\u036f]*\u0307/u;
+// A mark with no glyph (U+034F, the variation selectors) makes a familiar name
+// out of another, in any script.
+const INVISIBLE = /\p{Default_Ignorable_Code_Point}/u;
+const ASCII_ONLY = /^[\x00-\x7f]*$/;
 
 function readableLabel(label: string): string {
   if (!label.startsWith("xn--")) return label;
   const decoded = decodePunycode(label.slice(4));
-  const safe =
-    decoded !== null && (LATIN_LABEL.test(decoded) || DISTINCT_SCRIPT_LABEL.test(decoded));
-  return safe ? decoded : label;
+  // A label that encodes nothing ("xn--apple-") reads as the name it isn't.
+  // Registered names hold only code points compatibility normalization leaves
+  // alone, so a label it changes (ſ, ａ, halfwidth katakana) is another spelling
+  // of some plain name.
+  if (
+    decoded === null ||
+    ASCII_ONLY.test(decoded) ||
+    INVISIBLE.test(decoded) ||
+    decoded.normalize("NFKC") !== decoded
+  ) {
+    return label;
+  }
+  const letters = decoded.normalize("NFD");
+  const latin = LATIN_LABEL.test(letters) && !DOTTED_STEM.test(letters);
+  return latin || DISTINCT_SCRIPT_LABEL.test(decoded) ? decoded : label;
 }
 
 // The host as people write it, port included.
