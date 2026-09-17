@@ -45,6 +45,7 @@ from datetime import date
 from html import unescape
 from html.parser import HTMLParser
 from multiprocessing import connection, resource_tracker
+from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
@@ -165,7 +166,7 @@ def extract_web_bounded(
             if child.pid is not None:
                 exitcode = _stop(child)
     finally:
-        os.unlink(page_path)
+        Path(page_path).unlink(missing_ok=True)  # the child removes it once read
     if outcome is None:
         logger.warning(
             "the reader process for %s exited without a result (%s)", url, _exit_status(exitcode)
@@ -192,7 +193,9 @@ def _page_file(html: bytes | str, url: str) -> str:
     first (an import that fails because a module was edited on disk under a
     running server, a kill during start-up), before any deadline is in force.
     A str is stored as UTF-8 with surrogates passed through, so it reads back
-    byte-exact whatever jobs._page_text decoded."""
+    byte-exact whatever jobs._page_text decoded. The child deletes the file as
+    soon as it has read it, since a server killed outright never reaches its
+    own removal; the caller removes it too, for a child that never read it."""
     try:
         handle, path = tempfile.mkstemp(prefix="authorai-page-")
         try:
@@ -231,6 +234,7 @@ def _extract_in_child(sender, page_path: str, is_text: bool, url: str, cpu_secon
     try:
         with open(page_path, "rb") as page_file:
             raw = page_file.read()
+        Path(page_path).unlink(missing_ok=True)
         html = raw.decode("utf-8", "surrogatepass") if is_text else raw
         outcome = ("result", extract_web(html, url=url))
     except Exception as exc:

@@ -348,7 +348,7 @@ def test_a_ctrl_c_reaching_the_reader_never_loses_the_page():
 
 _DYING_SERVER = textwrap.dedent(
     """
-    import multiprocessing, os, signal, sys, threading, time
+    import glob, multiprocessing, os, signal, sys, tempfile, threading, time
     import authorai.web as web
     print(web.__file__, flush=True)
     page = open(sys.argv[1], encoding="utf-8").read()
@@ -366,7 +366,12 @@ _DYING_SERVER = textwrap.dedent(
         time.sleep(0.01)
     if reader is None:
         sys.exit(2)
-    time.sleep(1.5)  # past its start-up, into the page
+    # Past its start-up, into the page: the reader deletes its page file once it
+    # has read it. Waited for at most 15 s, well inside the page's reading time.
+    pages = os.path.join(glob.escape(tempfile.gettempdir()), "authorai-page-*")
+    deadline = time.monotonic() + 15
+    while glob.glob(pages) and time.monotonic() < deadline:
+        time.sleep(0.01)
     print(reader.pid, flush=True)
     os.kill(os.getpid(), signal.SIGKILL)
     """
@@ -377,15 +382,19 @@ def test_a_reader_whose_server_dies_stops_reading(tmp_path):
     # A server killed outright (SIGTERM's default action after uvicorn's
     # graceful stop, SIGKILL, a crash) runs no exit hook: nothing stops the
     # reader, which reads on for as long as the page takes, and startup
-    # recovery starts another beside it.
+    # recovery starts another beside it. Nor does the server remove the page
+    # file: the reader has already done so, or every such kill would leave one
+    # (up to the 10 MB fetch cap) in the temporary directory.
     page = tmp_path / "slow.html"
     page.write_text(_slow_page("abbr", 60_000), encoding="utf-8")  # 25 s and more, unbounded
+    server_tmp = tmp_path / "server-tmp"
+    server_tmp.mkdir()
     errors = tmp_path / "stderr.txt"
     with errors.open("w") as stderr:  # a file, not a pipe: an orphan would hold a pipe open
         server = subprocess.Popen(
             [sys.executable, "-c", _DYING_SERVER, str(page)],
             cwd=BACKEND,
-            env=_subprocess_env(),
+            env={**_subprocess_env(), "TMPDIR": str(server_tmp)},
             stdout=subprocess.PIPE,
             stderr=stderr,
             text=True,
@@ -405,6 +414,7 @@ def test_a_reader_whose_server_dies_stops_reading(tmp_path):
         if _running(reader):
             os.kill(reader, signal.SIGKILL)
     assert not orphaned, "the reader kept running after its server died"
+    assert list(server_tmp.glob("authorai-page-*")) == []
 
 
 def test_a_reader_carries_a_cpu_limit_that_ends_it_without_its_parent():
