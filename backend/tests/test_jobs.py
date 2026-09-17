@@ -1362,7 +1362,9 @@ def test_a_link_is_read_out_of_process_within_the_configured_budget(conn, tmp_pa
     from authorai import jobs as jobsmod
     from authorai.ingest import ParsedDocument, ParsedSection
 
-    assert SETTINGS.extract_timeout_seconds == 60.0
+    # The declared default, not this machine's value: a backend/.env that raises the
+    # budget (the documented override) must not turn the suite red.
+    assert Settings.model_fields["extract_timeout_seconds"].default == 60.0
     monkeypatch.setenv("AUTHORAI_EXTRACT_TIMEOUT_SECONDS", "12.5")
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     assert settings.extract_timeout_seconds == 12.5

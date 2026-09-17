@@ -98,11 +98,13 @@ def clock(monkeypatch):
 
 
 def test_fetch_settings_have_the_documented_defaults_and_accept_overrides():
-    settings = Settings()
-    assert settings.fetch_timeout_seconds == 30.0
-    assert settings.fetch_max_bytes == 10_000_000
-    assert settings.fetch_max_redirects == 5
-    assert settings.fetch_user_agent == DEFAULT_USER_AGENT
+    # The declared defaults, not this machine's values: a backend/.env or environment
+    # that sets AUTHORAI_FETCH_* (the documented overrides) must not turn the suite red.
+    defaults = {name: field.default for name, field in Settings.model_fields.items()}
+    assert defaults["fetch_timeout_seconds"] == 30.0
+    assert defaults["fetch_max_bytes"] == 10_000_000
+    assert defaults["fetch_max_redirects"] == 5
+    assert defaults["fetch_user_agent"] == DEFAULT_USER_AGENT
     # extra="ignore" would silently drop a misspelled field — prove kwargs land.
     assert _settings(fetch_max_redirects=1, fetch_max_bytes=7).fetch_max_redirects == 1
     assert _settings(fetch_max_bytes=7).fetch_max_bytes == 7
