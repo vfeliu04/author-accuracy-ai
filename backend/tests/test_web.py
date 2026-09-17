@@ -1018,6 +1018,26 @@ def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_persona
     metadata = _page_metadata(site, url="https://example.org/s")
     assert (metadata.authors, metadata.publisher) == ([], "World Health Organization")
 
+    jsonld_publisher = _markup(
+        '<meta name="author" content="Daily Water">',
+        _ld(
+            {
+                "@type": "NewsArticle",
+                "headline": "Reservoirs at record lows",
+                "publisher": {"@type": "NewsMediaOrganization", "name": "Daily Water"},
+            }
+        ),
+    )
+    metadata = _page_metadata(jsonld_publisher, url="https://example.org/j")
+    assert (metadata.authors, metadata.publisher) == ([], "Daily Water")
+
+    citation = _markup(
+        '<meta name="author" content="daily water">',
+        '<meta name="citation_publisher" content="Daily Water">',
+    )
+    metadata = _page_metadata(citation, url="https://example.org/c")
+    assert (metadata.authors, metadata.publisher) == ([], "Daily Water")
+
     person = _markup(
         '<meta name="author" content="Sam Patel">',
         '<meta property="og:site_name" content="Daily Water">',
