@@ -25,6 +25,7 @@ from authorai.web import (
     ThinPageError,
     _normalize_date,
     _page_metadata,
+    _prepare_tree,
     extract_web,
 )
 
@@ -491,6 +492,67 @@ def test_a_page_of_many_small_inline_elements_is_read_in_linear_time():
     document, _ = extract_web(page, url="https://example.org/heavy")
     assert time.perf_counter() - started < 2.0
     assert "xy" * 16_000 + "^12" * 16_000 in _body(document)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("<a href='/start'>start</a> ", ""),  # the run lands in a kept child's tail
+        ("", " <a href='/end'>end</a>"),  # the run lands in the parent's text
+    ],
+    ids=["run-in-child-tail", "run-in-parent-text"],
+)
+def test_inline_runs_beside_a_kept_child_are_read_in_linear_time(before, after):
+    # The page above leaves its paragraph with no element at all. One element
+    # that stays (a link, a <br>) splits the joining of the text nodes the strip
+    # leaves into the parent's text and each kept child's tail; a run left
+    # unjoined in either makes trafilatura's XPaths quadratic (over 10 s here).
+    page = (
+        "<!DOCTYPE html><html><head><title>Heavy</title></head><body><main><article>"
+        f"<h1>Formatting</h1><p>{_prose(400)}</p><p>{before}"
+        + "<b>x</b><i>y</i>" * 8_000
+        + "<sup>1</sup><sub>2</sub>" * 8_000
+        + f"{after}</p></article></main></body></html>"
+    )
+    started = time.perf_counter()
+    document, _ = extract_web(page, url="https://example.org/heavy")
+    assert time.perf_counter() - started < 2.0
+    assert "xy" * 8_000 + "^12" * 8_000 in _body(document)
+
+
+def _paragraph_of_bold(lead: str, count: int) -> str:
+    return (
+        "<!DOCTYPE html><html><head><title>Heavy</title></head><body><main><article>"
+        f"<h1>Formatting</h1><p>{lead}" + "<b>x</b>" * count + "</p></article></main></body></html>"
+    )
+
+
+def _prepare_seconds(page: str):
+    """CPU seconds _prepare_tree spends on the page, best of two, and the tree."""
+    best, tree = float("inf"), None
+    for _ in range(2):
+        tree = trafilatura.load_html(page)
+        started = time.process_time()
+        _prepare_tree(tree)
+        best = min(best, time.process_time() - started)
+    return best, tree
+
+
+def test_joining_a_kept_childs_text_runs_is_itself_linear():
+    # Joining must not read a run after the strip: lxml's .text/.tail getter
+    # concatenates a run of adjacent text nodes one node at a time, quadratic in
+    # its length (with one <br>, a 2.4 MB paragraph took four to five times as
+    # long as without it, and a 10 MB one about a minute). Timed relative to
+    # the same page without the <br>, so machine speed cancels out.
+    count = 300_000
+    plain, _ = _prepare_seconds(_paragraph_of_bold("", count))
+    kept, tree = _prepare_seconds(_paragraph_of_bold("<br>", count))
+    assert kept < 2 * plain + 0.25, (kept, plain)
+    br = tree.find(".//br")
+    # One text node, counted in XPath: reading an unjoined run (below) is the
+    # quadratic getter itself, and listing its nodes in Python is slower still.
+    assert br.xpath("count(following-sibling::text())") == 1
+    assert br.tail == "x" * count
 
 
 def test_nested_scripts_emphasis_and_tables_read_the_same_after_the_linear_rewrite():

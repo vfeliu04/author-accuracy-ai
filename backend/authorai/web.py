@@ -520,12 +520,18 @@ def _prepare_tree(tree) -> None:
     # Reverse document order visits a nested table before the table holding it.
     for table in reversed(tree.xpath("//table[ancestor::table]")):
         _replace_with_text(table, f" {_table_text(table)} ")
-    spliced = {element.getparent() for element in root.iter(_UNWRAP, _DROP)}
+    runs = {}
+    for element in root.iter(_UNWRAP, _DROP):
+        parent = element.getparent()
+        # A parent that is itself unwrapped is gone: its nearest kept ancestor reads it.
+        if parent.tag not in (_UNWRAP, _DROP) and parent not in runs:
+            runs[parent] = _joined_runs(parent)
     etree.strip_elements(root, _DROP, with_tail=False)
     etree.strip_tags(root, _UNWRAP)
-    for parent in spliced:
-        if parent.tag not in (_UNWRAP, _DROP):  # a parent that was itself unwrapped is gone
-            _merge_text_nodes(parent)
+    for parent, (text, tails) in runs.items():
+        parent.text = text
+        for child, tail in tails:
+            child.tail = tail
 
 
 def _replace_with_text(element, text: str) -> None:
@@ -535,19 +541,39 @@ def _replace_with_text(element, text: str) -> None:
     element.tag = _UNWRAP
 
 
-def _merge_text_nodes(element) -> None:
-    """Join each run of adjacent text nodes directly under an element into one
-    node: strip_tags/strip_elements splice nodes without joining text, and
-    libxml2's XPath, which trafilatura runs over the tree, is quadratic over
-    such a run. Re-setting .text or .tail replaces the run it reads with one
-    node; lxml reads a run by concatenation (quadratic too), so an element left
-    with text only is read through libxml2's linear string value instead."""
-    if len(element) == 0:
-        element.text = element.text_content() or None
-        return
-    element.text = element.text
-    for child in element:
-        child.tail = child.tail
+def _joined_runs(parent) -> tuple[str | None, list[tuple[object, str | None]]]:
+    """The text a parent will hold once the strips have spliced its sentinel
+    descendants away: its own text, and the tail of each element that stays
+    under it, each joined into one string.
+
+    strip_tags/strip_elements splice text nodes without joining them, and
+    libxml2's XPath, which trafilatura runs over the tree, is quadratic over a
+    run of adjacent text nodes; setting .text or .tail replaces a run with one
+    node. The runs are read HERE, before the strips, while every piece is still
+    a single node: lxml's getter reads a spliced run by concatenation, one node
+    at a time, which is quadratic again. The walk mirrors the strips — an
+    unwrapped element leaves its text, its children and its tail; a dropped
+    one only its tail — with an explicit stack, as nesting is page-controlled."""
+    runs = [[parent.text or ""]]
+    kept = []
+    stack = [(None, iter(parent))]
+    while stack:
+        owner, children = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
+            if owner is not None:
+                runs[-1].append(owner.tail or "")
+        elif child.tag == _UNWRAP:
+            runs[-1].append(child.text or "")
+            stack.append((child, iter(child)))
+        elif child.tag == _DROP:
+            runs[-1].append(child.tail or "")
+        else:
+            kept.append(child)
+            runs.append([child.tail or ""])
+    tails = [(child, "".join(run) or None) for child, run in zip(kept, runs[1:], strict=True)]
+    return "".join(runs[0]) or None, tails
 
 
 def _table_text(table) -> str:
