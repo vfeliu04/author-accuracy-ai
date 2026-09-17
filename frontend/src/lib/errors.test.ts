@@ -383,21 +383,26 @@ describe("humanizeError explains every way a link can fail to open", () => {
 // showing the failure reads the message several times while it renders.
 describe("reading a failure that quotes a huge header", () => {
   const link = "http://enc.example:8080/page";
-  const run = 100 * 1024;
+  // Shorter than a real header could be: trimming that re-reads the link for
+  // every bracket takes seconds on 12,000 of them, well past the budget, but
+  // minutes on 100 KiB, and a test cannot interrupt synchronous code, so a
+  // run that long would hang instead of failing.
+  const brackets = 12_000;
+  const header = 100 * 1024;
   const cases: [string, string, string][] = [
     [
       "a Content-Encoding",
-      `FetchError: Fetching '${link}' failed: unsupported Content-Encoding 'x-https://a${")".repeat(run)}'`,
+      `FetchError: Fetching '${link}' failed: unsupported Content-Encoding 'x-https://a${")".repeat(brackets)}'`,
       `${link} — The site sent that page in a form that can't be read.`
     ],
     [
       "a content type",
-      `FetchError: Fetching '${link}' failed: unsupported content type 'x-https://a${"]".repeat(run)}' (a source must be an HTML page or a PDF)`,
+      `FetchError: Fetching '${link}' failed: unsupported content type 'x-https://a${"]".repeat(brackets)}' (a source must be an HTML page or a PDF)`,
       `${link} — That link isn't a web page or PDF.`
     ],
     [
       "a header repeating a word a hint looks for",
-      `FetchError: Fetching '${link}' failed: unsupported Content-Encoding '${"TimeoutError ".repeat(run / 13)}'`,
+      `FetchError: Fetching '${link}' failed: unsupported Content-Encoding '${"TimeoutError ".repeat(header / 13)}'`,
       `${link} — The site sent that page in a form that can't be read.`
     ]
   ];
