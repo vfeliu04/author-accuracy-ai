@@ -766,12 +766,15 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
         or _clean(parser.title)
     )
     # The untyped <meta name=author> carries no Person/Organization type: a name
-    # the page declares as an organization anywhere else is not a personal author.
+    # the page gives an organization or the site elsewhere is not a personal
+    # author. A publisher typed Person names no organization; og:site_name has
+    # no type at all, so a personal site titled with its author's own name
+    # loses that meta author (code cannot tell the two names apart).
     organizations = {
         name.casefold()
         for name in (
             *_names(work.get("author"), by_id, kind="organization"),
-            *_names(work.get("publisher"), by_id),
+            *_names(work.get("publisher"), by_id, kind="not_person"),
             *meta.get("citation_publisher", []),
             *meta.get("og:site_name", []),
         )
@@ -946,19 +949,24 @@ def _names(value: object, by_id: dict[str, dict], *, kind: str | None = None) ->
     """Names from a string, an object (a Person or an Organization), or a list
     of either. An object that is only an {"@id": ...} reference resolves
     against the page's graph. kind="person" skips Organization-typed objects (a
-    plain string counts as a person); kind="organization" keeps only them."""
+    plain string counts as a person); kind="organization" keeps only them;
+    kind="not_person" skips Person-typed objects, a Person type winning over an
+    Organization type given with it (a plain string or untyped object stays)."""
     names: list[str] = []
     for item in value if isinstance(value, list) else [value]:
         name = item
-        is_organization = False
+        is_organization = is_person = False
         if isinstance(item, dict):
             node = item
             if "name" not in node and isinstance(node.get("@id"), str):
                 node = by_id.get(node["@id"], node)
             is_organization = _is_organization(node)
+            is_person = "Person" in _types(node)
             name = _first_str(node.get("name"))
-        if (kind == "person" and is_organization) or (
-            kind == "organization" and not is_organization
+        if (
+            (kind == "person" and is_organization)
+            or (kind == "organization" and not is_organization)
+            or (kind == "not_person" and is_person)
         ):
             continue
         if cleaned := _clean_jsonld(name):

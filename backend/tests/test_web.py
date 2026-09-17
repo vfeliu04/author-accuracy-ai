@@ -995,9 +995,10 @@ def test_organization_authors_are_not_personal_authors_but_can_name_the_publishe
 
 def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_personal_author():
     # The untyped <meta name=author> fallback carries no Person/Organization
-    # type. A name the page itself declares as an organization elsewhere — the
-    # JSON-LD author or publisher, citation_publisher, og:site_name — cannot be
-    # a personal author (it would earn author points no PDF could).
+    # type. A name the page itself gives an organization or the site elsewhere
+    # — a JSON-LD Organization author, a JSON-LD publisher not typed Person,
+    # citation_publisher, og:site_name — is not taken as a personal author (it
+    # would earn author points no PDF could).
     typed = _markup(
         '<meta name="author" content="World Health Organization">',
         _ld(
@@ -1044,6 +1045,64 @@ def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_persona
     )
     metadata = _page_metadata(person, url="https://example.org/p")
     assert (metadata.authors, metadata.publisher) == (["Sam Patel"], "Daily Water")
+
+
+def test_a_person_typed_publisher_does_not_erase_the_matching_meta_author():
+    # A blog run by one person declares that person as its publisher; nothing
+    # there names an organization, so the meta author with that name stays.
+    # A Person type wins over an Organization type given with it (Yoast's node
+    # for a site that represents a person). An untyped publisher still counts.
+    url = "https://janewhitfield.example/p"
+    for publisher, graph in (
+        ({"@type": "Person", "name": "Jane Whitfield"}, []),
+        (
+            {"@id": "https://janewhitfield.example/#/schema/person/1"},
+            [
+                {
+                    "@type": ["Person", "Organization"],
+                    "@id": "https://janewhitfield.example/#/schema/person/1",
+                    "name": "Jane Whitfield",
+                }
+            ],
+        ),
+    ):
+        ld = {
+            "@graph": [
+                {
+                    "@type": "BlogPosting",
+                    "headline": "Drought notes",
+                    "mainEntityOfPage": {"@id": url},
+                    "publisher": publisher,
+                },
+                *graph,
+            ]
+        }
+        page = _markup('<meta name="author" content="Jane Whitfield">', _ld(ld))
+        metadata = _page_metadata(page, url=url)
+        assert (metadata.authors, metadata.publisher) == (["Jane Whitfield"], "Jane Whitfield")
+
+    untyped = _markup(
+        '<meta name="author" content="Daily Water">',
+        _ld({"@type": "BlogPosting", "headline": "Drought notes", "publisher": "Daily Water"}),
+    )
+    assert _page_metadata(untyped, url=url).authors == []
+
+
+def test_a_personal_site_named_after_its_author_loses_its_meta_author():
+    # The known cost of counting og:site_name as a name the page declares for
+    # an organization: code cannot tell "Jane Whitfield" from "World Health
+    # Organization", and the rule keeps an institution's own name from earning
+    # personal-author points no PDF could. Only the untyped meta author is
+    # affected; a typed JSON-LD Person author is kept.
+    tags = (
+        '<meta name="author" content="Jane Whitfield">',
+        '<meta property="og:site_name" content="Jane Whitfield">',
+    )
+    url = "https://janewhitfield.example/p"
+    metadata = _page_metadata(_markup(*tags), url=url)
+    assert (metadata.authors, metadata.publisher) == ([], "Jane Whitfield")
+    person = _ld({"@type": "BlogPosting", "author": {"@type": "Person", "name": "Jane Whitfield"}})
+    assert _page_metadata(_markup(*tags, person), url=url).authors == ["Jane Whitfield"]
 
 
 def test_first_doi_source_wins_and_an_invalid_one_becomes_none():
