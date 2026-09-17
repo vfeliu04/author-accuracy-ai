@@ -225,6 +225,24 @@ describe("SourcesPanel", () => {
     );
   });
 
+  it("flags a link with a backslash in its query when reading it after a redirect fails", () => {
+    const added = String.raw`https://www.example.org/search?q=C:\Users\data`;
+    const shorter = "https://www.example.org/search";
+    // Exactly what the server stores: its quoting doubles each backslash.
+    const runError = String.raw`ThinPageError: 'https://www.example.org/results' (redirected from 'https://www.example.org/search?q=C:\\Users\\data'): https://www.example.org/results has no readable article text (0 characters extracted, at least 250 needed) — JavaScript-only pages are not supported`;
+    render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("s", shorter), linkUpload("b", added)]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={runError}
+      />
+    );
+    expect(screen.getAllByText("Couldn't open")).toHaveLength(1);
+    const row = screen.getByTitle(added).closest(".src-row");
+    expect(row).toContainElement(screen.getByText("Couldn't open"));
+  });
+
   it("flags a long link the failure message cut short", () => {
     const long = `https://example.org/${"a".repeat(300)}`;
     render(

@@ -478,6 +478,27 @@ describe("linksNamedIn", () => {
     ).toEqual([long]);
   });
 
+  // The server quotes a link the way Python prints it, doubling each backslash
+  // a query string may keep ("?q=C:\Users"); the messages below are exactly its.
+  it("finds a link whose backslashes the message doubled, whole or cut short", () => {
+    const added = String.raw`https://www.example.org/search?q=C:\Users\data`;
+    const shorter = "https://www.example.org/search";
+    expect(
+      linksNamedIn(
+        String.raw`FetchError: Fetching 'https://www.example.org/search?q=C:\\Users\\data' failed: the server answered HTTP 404`,
+        [shorter, added]
+      )
+    ).toEqual([added]);
+    const long = String.raw`https://www.example.org/s?q=C:\Users\a` + "a".repeat(299);
+    expect(
+      linksNamedIn(
+        String.raw`FetchError: Fetching 'https://www.example.org/s?q=C:\\Users\\` +
+          `${"a".repeat(163)}...' failed: the server answered HTTP 404`,
+        [other, long]
+      )
+    ).toEqual([long]);
+  });
+
   it("names nothing when no added link appears", () => {
     expect(linksNamedIn("APIConnectionError: Connection error.", [wiki, other])).toEqual([]);
     expect(linksNamedIn(`Could not read ${wiki}: HTTP 404`, [])).toEqual([]);

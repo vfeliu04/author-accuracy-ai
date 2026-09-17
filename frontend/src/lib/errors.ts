@@ -230,17 +230,29 @@ function appearsWhole(error: string, link: string, links: readonly string[]): bo
   return false;
 }
 
+// A link as the server quotes it: Python's repr doubles each backslash, which a
+// query string may keep ("?q=C:\Users").
+function asQuoted(link: string): string {
+  return link.split("\\").join("\\\\");
+}
+
 // Which of a run's added links a failure message names. A link counts where
 // it appears whole, unless a longer added link starting the same way is what
 // appears there (".../report" inside ".../report-2024"), or where the message
-// cut a long link short and the added link starts with what is left.
+// cut a long link short and the added link starts with what is left. Each link
+// is looked for as added and as quoted.
 export function linksNamedIn(error: string, links: readonly string[]): string[] {
   const cutStarts = namedLinks(error)
     .filter((named) => named.cut)
     .map((named) => named.link);
-  return links.filter(
-    (link) =>
-      appearsWhole(error, link, links) || cutStarts.some((start) => link.startsWith(start))
+  const quoted = links.map(asQuoted);
+  const spellings = [...links, ...quoted];
+  return links.filter((link, index) =>
+    (quoted[index] === link ? [link] : [link, quoted[index]]).some(
+      (spelled) =>
+        appearsWhole(error, spelled, spellings) ||
+        cutStarts.some((start) => spelled.startsWith(start))
+    )
   );
 }
 
