@@ -517,6 +517,25 @@ def test_nested_scripts_emphasis_and_tables_read_the_same_after_the_linear_rewri
     assert "| Cell a, b c | Other |" in body
 
 
+def test_a_nested_table_keeps_the_cells_and_caption_an_inline_tag_wraps():
+    # The parser keeps malformed <tr><em><td> and <table><b><caption> as
+    # written. The nested table is flattened while those wrappers are still in
+    # place, and their cells and caption were lost; this is the reading the
+    # element-by-element edits gave.
+    page = (
+        "<!DOCTYPE html><html><head><title>Wrapped</title></head><body><main><article>"
+        f"<h1>Wrapped</h1><p>{_prose(300)}</p>"
+        "<table><tr><td>Outer</td><td><table><b><caption>Cap</caption></b>"
+        "<tr><td>Region</td><em><td>Deficit 41%</td></em></tr>"
+        "<tr><sup><td>North</td></sup><strong><th>12</th></strong></tr>"
+        "<tr><td>South</td><i><u><td>7</td></u></i></tr></table>"
+        "</td></tr></table>"
+        "</article></main></body></html>"
+    )
+    document, _ = extract_web(page, url="https://example.org/wrapped")
+    assert "| Outer | Cap; Region, Deficit 41%; North, 12; South, 7 |" in _body(document)
+
+
 def test_literal_asterisk_runs_survive_verbatim_and_fast():
     # The markdown post-pass this replaced went quadratic on unmatched openers
     # (90 KB of "*a " took minutes) and deleted literal asterisks.

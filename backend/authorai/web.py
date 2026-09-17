@@ -552,13 +552,25 @@ def _merge_text_nodes(element) -> None:
 
 def _table_text(table) -> str:
     rows = []
-    caption = table.find("caption")
+    caption = next(_children(table, ("caption",)), None)
     if caption is not None:
         rows.append(" ".join(caption.text_content().split()))
     for row in table.iter("tr"):
-        cells = (" ".join(cell.text_content().split()) for cell in row if cell.tag in ("td", "th"))
+        cells = (" ".join(cell.text_content().split()) for cell in _children(row, ("td", "th")))
         rows.append(", ".join(cell for cell in cells if cell))
     return "; ".join(row for row in rows if row)
+
+
+def _children(parent, tags: tuple[str, ...]):
+    """The children with these tags, looking through the emphasis and script
+    wrappers _prepare_tree has only renamed so far: the parser keeps a
+    malformed <tr><em><td> as written, and the strip that frees the cell runs
+    after the nested table is flattened."""
+    for child in parent:
+        if child.tag in tags:
+            yield child
+        elif child.tag == _UNWRAP:
+            yield from _children(child, tags)
 
 
 def _split_sections(body) -> tuple[list[ParsedSection], str | None]:
