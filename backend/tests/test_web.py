@@ -827,6 +827,62 @@ def test_every_jsonld_field_comes_from_one_work_node():
     assert _page_metadata(_markup(*map(_ld, (study, unnamed))), url=canonical) == PageMetadata()
 
 
+def test_nodes_declaring_the_same_work_are_one_work_not_an_ambiguity():
+    # WordPress: Yoast's @graph Article plus a theme's own BlogPosting, both
+    # naming the page (or, with a share parameter on the link, neither). Every
+    # JSON-LD field was dropped as ambiguous, the author with them.
+    url = "https://greenhydro.example/2025/03/aquifer-recharge/"
+    yoast = {
+        "@graph": [
+            {
+                "@type": "Article",
+                "@id": url + "#article",
+                "headline": "Aquifer recharge",
+                "datePublished": "2025-03-14T08:00:00+00:00",
+                "mainEntityOfPage": {"@id": url},
+                "author": {"@id": "https://greenhydro.example/#/schema/person/abc"},
+                "publisher": {"@id": "https://greenhydro.example/#organization"},
+            },
+            {
+                "@type": "Organization",
+                "@id": "https://greenhydro.example/#organization",
+                "name": "Green Hydro Media",
+            },
+            {
+                "@type": "Person",
+                "@id": "https://greenhydro.example/#/schema/person/abc",
+                "name": "Maria Lopez",
+            },
+        ]
+    }
+    theme = {
+        "@type": "BlogPosting",
+        "mainEntityOfPage": {"@type": "WebPage", "@id": url},
+        "headline": "Aquifer recharge",
+        "datePublished": "2025-03-14",
+        "author": {"@type": "Person", "name": "Maria Lopez"},
+        "publisher": {"@type": "Organization", "name": "Green Hydro Media"},
+    }
+    expected = PageMetadata(
+        title="Aquifer recharge",
+        authors=["Maria Lopez"],
+        publisher="Green Hydro Media",
+        publication_date="2025-03-14",
+    )
+    for blocks in ((yoast, theme), (theme, yoast), (theme, theme)):
+        for pasted in (url, url + "?ref=newsletter"):  # named by both, or by neither
+            markup = _markup(*map(_ld, blocks))
+            assert _page_metadata(markup, url=pasted) == expected, (blocks, pasted)
+
+    # Nodes that describe different works stay ambiguous, named or not.
+    cited = {**theme, "@id": url + "#cited-study", "headline": "Global groundwater decline"}
+    other_author = {**theme, "author": {"@type": "Person", "name": "Ana Ruiz"}}
+    for blocks in ((cited, theme), (theme, cited), (theme, other_author)):
+        for pasted in (url, url + "?ref=newsletter"):
+            metadata = _page_metadata(_markup(*map(_ld, blocks)), url=pasted)
+            assert (metadata.title, metadata.authors) == (None, []), (blocks, pasted)
+
+
 def test_the_work_node_that_names_this_url_is_the_page():
     url = "https://news.example/2025/aquifers"
     cited = {"@type": "ScholarlyArticle", "headline": "Global groundwater decline"}

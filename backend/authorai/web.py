@@ -756,7 +756,7 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     for node in nodes:
         if isinstance(node.get("@id"), str):
             by_id.setdefault(node["@id"], node)
-    work = _primary_work(nodes, url) or {}
+    work = _primary_work(nodes, url, by_id) or {}
 
     title = (
         first("citation_title")
@@ -847,25 +847,42 @@ def _jsonld_nodes(blocks: list[str], url: str) -> list[dict]:
     return nodes
 
 
-def _primary_work(nodes: list[dict], url: str) -> dict | None:
+def _primary_work(nodes: list[dict], url: str, by_id: dict[str, dict]) -> dict | None:
     """The node describing this page: among article-type nodes, the one whose
     url, @id or mainEntityOfPage names this URL, or the only one there is.
     Several article nodes with none — or more than one — naming the page
     decide nothing: document order is no evidence of which is the page's own
     (a news story's JSON-LD may list the study it reports on first, and its
-    DOI would then be verified as the page's). Only without any article node,
-    the same choice among page-type nodes — a WebPage node describes the
-    container ("Title - Site Name"), not the work."""
+    DOI would then be verified as the page's). Unless those nodes declare the
+    same work — the same title, authors, publisher, date and DOI, as when a
+    CMS and a theme plugin each emit the page's Article — which is one work,
+    not an ambiguity. Only without any article node, the same choice among
+    page-type nodes — a WebPage node describes the container ("Title - Site
+    Name"), not the work."""
     page = _comparable_url(url)
     for kinds in (_ARTICLE_TYPES, _PAGE_TYPES):
         candidates = [node for node in nodes if _types(node) & kinds]
         if not candidates:
             continue
-        named = [node for node in candidates if page in _named_urls(node)]
-        if len(named) == 1:
-            return named[0]
-        return candidates[0] if len(candidates) == 1 else None
+        pool = [node for node in candidates if page in _named_urls(node)] or candidates
+        work = _work_signature(pool[0], by_id)
+        if all(_work_signature(node, by_id) == work for node in pool[1:]):
+            return pool[0]
+        return None
     return None
+
+
+def _work_signature(node: dict, by_id: dict[str, dict]) -> tuple:
+    """What _page_metadata takes from a node, as it would read it."""
+    published = _clean_jsonld(_first_str(node.get("datePublished")))
+    return (
+        _clean_jsonld(_first_str(node.get("headline")))
+        or _clean_jsonld(_first_str(node.get("name"))),
+        tuple(_names(node.get("author"), by_id)),
+        tuple(_names(node.get("publisher"), by_id)),
+        _normalize_date(published) if published else None,
+        tuple(_doi_candidates(node)),
+    )
 
 
 def _named_urls(node: dict) -> set[str]:
