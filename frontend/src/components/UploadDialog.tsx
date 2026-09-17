@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCreateRun } from "../api/queries";
-import { formatBytes } from "../lib/format";
+import { formatBytes, plural } from "../lib/format";
 import { checkLink, linkHostPath } from "../lib/links";
 
 // Client-side mirrors of the server caps — fail fast in the dialog instead
@@ -19,10 +19,6 @@ function stem(name: string): string {
 
 function isPdf(file: File): boolean {
   return file.name.toLowerCase().endsWith(".pdf");
-}
-
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 // The server remains the authority: a link the dialog's checks let through can

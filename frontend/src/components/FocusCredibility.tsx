@@ -1,10 +1,11 @@
 import { useSearchParams } from "react-router-dom";
 import type { Report, ReportSource, SourceBiblio } from "../api/types";
+import { plural } from "../lib/format";
 import { sourceName } from "../lib/links";
 import { BAND_COLORS, credibilityGapHint, scoreBand } from "../lib/score";
 import FocusToolbar from "./FocusToolbar";
 import ScoreRing from "./ScoreRing";
-import { SOURCE_KINDS, tierLabel } from "./SourcesPanel";
+import { isScored, sourceKind, standing, tierLabel } from "./SourcesPanel";
 
 const COMPONENT_META: Array<{ key: string; label: string; max: number }> = [
   { key: "metadata_completeness", label: "Metadata completeness", max: 30 },
@@ -88,10 +89,6 @@ function explainComponent(
   return null;
 }
 
-function isScored(source: ReportSource): source is ReportSource & { total: number } {
-  return source.scorable && source.total !== null;
-}
-
 // Why a listed source carries no score, or null when it has one.
 function missingScore(source: ReportSource): { name: string; text: string } | null {
   if (!source.scorable) {
@@ -137,10 +134,8 @@ export default function FocusCredibility({ report }: { report: Report }) {
 
   const summary = selected
     ? [
-        isScored(selected)
-          ? tierLabel(selected.tier)
-          : (SOURCE_KINDS[selected.source_type] ?? SOURCE_KINDS.pdf).label,
-        usage !== null ? `cited by ${usage} verified verdict${usage === 1 ? "" : "s"}` : null
+        isScored(selected) ? tierLabel(selected.tier) : sourceKind(selected.source_type).label,
+        usage !== null ? `cited by ${plural(usage, "verified verdict")}` : null
       ]
         .filter((part): part is string => Boolean(part))
         .join(" · ")
@@ -174,10 +169,7 @@ export default function FocusCredibility({ report }: { report: Report }) {
                   {Math.round(source.total)}
                 </span>
               ) : (
-                <span
-                  className="cred-badge cred-badge--none"
-                  title={source.scorable ? "Not scored" : "Not scorable"}
-                >
+                <span className="cred-badge cred-badge--none" title={standing(source)}>
                   —
                 </span>
               )}

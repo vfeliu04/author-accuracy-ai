@@ -23,8 +23,18 @@ export const SOURCE_KINDS: Record<SourceType, { glyph: string; label: string }> 
   youtube: { glyph: "🎬", label: "Video" }
 };
 
+// A type this build does not know is marked as a PDF.
+export function sourceKind(type: SourceType): { glyph: string; label: string } {
+  return SOURCE_KINDS[type] ?? SOURCE_KINDS.pdf;
+}
+
+// Whether a source carries a credibility number.
+export function isScored(source: ReportSource): source is ReportSource & { total: number } {
+  return source.scorable && source.total !== null;
+}
+
 function SourceGlyph({ type }: { type: SourceType }) {
-  const kind = SOURCE_KINDS[type] ?? SOURCE_KINDS.pdf;
+  const kind = sourceKind(type);
   return (
     <span className="src-row__icon" role="img" aria-label={kind.label}>
       {kind.glyph}
@@ -65,7 +75,7 @@ function UploadStatus({
 
 // Where a finished source stands: its verification tier when scored, or why
 // it carries no score.
-function standing(source: ReportSource): string {
+export function standing(source: ReportSource): string {
   if (!source.scorable) return "Not scorable";
   if (source.total === null) return "Not scored";
   return tierLabel(source.tier);
@@ -148,7 +158,7 @@ export default function SourcesPanel({
                   ) : null}
                   <div className="src-row__sub">{standing(source)}</div>
                 </div>
-                {source.scorable && source.total !== null ? (
+                {isScored(source) ? (
                   <span className={`cred-badge cred-badge--${scoreBand(source.total)}`}>
                     {Math.round(source.total)}
                   </span>

@@ -13,6 +13,11 @@ export function formatDate(iso: string): string {
   return date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 }
 
+// "1 link", "2 links".
+export function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 export function pct(fraction: number | null | undefined): string {
   return fraction === null || fraction === undefined ? "—" : `${Math.round(fraction * 100)}%`;
 }
