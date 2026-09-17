@@ -298,6 +298,31 @@ describe("humanizeError explains every way a link can fail to open", () => {
       "https://www.example.org/huge/ — That page is too large or complex to read in time."
     ],
     [
+      "a page whose reader stopped without a result",
+      "RuntimeError: https://www.who.int/facts could not be read: the reader process exited without a result",
+      "https://www.who.int/facts — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    ],
+    [
+      "a page whose reader failed with an unexpected error",
+      "RuntimeError: https://www.who.int/facts could not be read: RecursionError: maximum recursion depth exceeded while calling a Python object",
+      "https://www.who.int/facts — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    ],
+    [
+      "a page whose reader failed with an error that mentions a timeout",
+      "RuntimeError: https://www.who.int/facts could not be read: OSError: [Errno 60] Operation timed out",
+      "https://www.who.int/facts — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    ],
+    [
+      "a page whose reader stopped without a result, reached by a redirect",
+      "RuntimeError: 'https://who.int/facts/' (redirected from 'https://www.who.int/facts'): https://who.int/facts/ could not be read: the reader process exited without a result",
+      "https://who.int/facts/ — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    ],
+    [
+      "a page whose reader failed with an unexpected error, reached by a redirect",
+      "RuntimeError: 'https://who.int/facts/' (redirected from 'https://www.who.int/facts'): https://who.int/facts/ could not be read: RecursionError: maximum recursion depth exceeded while calling a Python object",
+      "https://who.int/facts/ — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    ],
+    [
       "a thin page reached by a redirect",
       "ThinPageError: 'https://www.example.org/a/' (redirected from 'https://example.org/a'): https://www.example.org/a/ has no readable article text (0 characters extracted, at least 250 needed) — JavaScript-only pages are not supported",
       "https://www.example.org/a/ — That page has no readable text. Pages that need JavaScript to show their content can't be read."

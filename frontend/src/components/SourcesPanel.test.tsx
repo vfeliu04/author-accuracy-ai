@@ -195,6 +195,36 @@ describe("SourcesPanel", () => {
     expect(row).toContainElement(screen.getByText("Couldn't open"));
   });
 
+  it("gives a link whose page failed to be read its reason on hover, redirected or not", () => {
+    const link = "https://www.who.int/facts";
+    const reason =
+      "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link.";
+    const { rerender } = render(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("r", link), linkUpload("o", "https://example.org/other")]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={`RuntimeError: ${link} could not be read: the reader process exited without a result`}
+      />
+    );
+    expect(screen.getAllByText("Couldn't open")).toHaveLength(1);
+    expect(screen.getByText("Couldn't open")).toHaveAttribute("title", `${link} — ${reason}`);
+
+    rerender(
+      <SourcesPanel
+        uploads={[uploads[0], linkUpload("r", link), linkUpload("o", "https://example.org/other")]}
+        report={undefined}
+        ingestStatus="failed"
+        runError={`RuntimeError: 'https://who.int/facts/' (redirected from '${link}'): https://who.int/facts/ could not be read: the reader process exited without a result`}
+      />
+    );
+    expect(screen.getAllByText("Couldn't open")).toHaveLength(1);
+    expect(screen.getByText("Couldn't open")).toHaveAttribute(
+      "title",
+      `https://who.int/facts/ — ${reason}`
+    );
+  });
+
   it("flags a long link the failure message cut short", () => {
     const long = `https://example.org/${"a".repeat(300)}`;
     render(

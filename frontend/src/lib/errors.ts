@@ -55,6 +55,15 @@ const ERROR_HINTS: ErrorHint[] = [
     needsLink: true,
     hint: () => "That page is too large or complex to read in time."
   },
+  // Any other way reading an arrived page fails: the reader stopped, or raised
+  // something unexpected. Its inner text must not pick a hint below.
+  {
+    match: /could not be read: /,
+    aboutLink: true,
+    needsLink: true,
+    hint: () =>
+      "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+  },
   // The ways a link fails before its page arrives, each keyed to the server's
   // own wording. They come before the generic status and timeout phrasing: a
   // redirect with no address also names its HTTP status.
