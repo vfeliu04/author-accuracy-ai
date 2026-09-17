@@ -155,6 +155,12 @@ describe("humanizeError reads the words around a link, never the link itself", (
     ).toBe(
       "https://deadline.example.org/ — That link points to a private network address, so it can't be opened."
     );
+    // The link keeps its port; the host the server repeats does not.
+    expect(
+      humanizeError(
+        "FetchError: Fetching 'https://billing.example.org:8443/x' failed: 'billing.example.org' could not be resolved ([Errno 8] nodename nor servname provided, or not known)"
+      )
+    ).toBe(`https://billing.example.org:8443/x — ${notFound}`);
   });
 
   it("ignores the words in every link a message names, not only the first", () => {
