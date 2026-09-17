@@ -10,7 +10,8 @@ as PNG files, their chunk text carrying the caption plus an LLM description.
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -187,9 +188,19 @@ def write_snapshot(path: Path | str, parsed: ParsedDocument, provenance: dict) -
         "provenance": provenance,
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    with replaced_atomically(path) as part:
+        part.write_text(text, encoding="utf-8")
+
+
+@contextmanager
+def replaced_atomically(path: Path) -> Iterator[Path]:
+    """Write a file whole or not at all: the caller writes the yielded
+    `<name>.part`, which is renamed over `path` once the block finishes and
+    removed if anything in it (or the rename) fails. db.link_artifact_paths
+    names the .part files a link upload can leave by this same convention."""
     part = path.with_name(path.name + ".part")
     try:
-        part.write_text(text, encoding="utf-8")
+        yield part
         os.replace(part, path)
     except BaseException:
         part.unlink(missing_ok=True)

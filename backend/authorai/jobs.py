@@ -21,7 +21,6 @@ Design constraints, each the negation of a v1 defect:
 
 import codecs
 import hashlib
-import os
 import shutil
 import sqlite3
 import threading
@@ -40,6 +39,7 @@ from authorai.ingest import (
     ingest_pdf,
     ingest_snapshot,
     load_snapshot,
+    replaced_atomically,
     write_snapshot,
 )
 from authorai.llm import AnthropicClient, StaleBatchError
@@ -340,13 +340,8 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
     planned.parent.mkdir(parents=True, exist_ok=True)
     if fetched.is_pdf:
         target = planned.with_suffix(".pdf")
-        part = target.with_name(target.name + ".part")
-        try:
+        with replaced_atomically(target) as part:
             part.write_bytes(fetched.body)
-            os.replace(part, target)
-        except BaseException:
-            part.unlink(missing_ok=True)
-            raise
         dbmod.record_fetch(
             context.conn,
             upload["id"],
