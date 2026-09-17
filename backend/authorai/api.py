@@ -279,7 +279,10 @@ def delete_run(run_id: str, request: Request, conn: Conn) -> None:
     # realpath, unlike Path.resolve, does not raise on a symlink loop.
     uploads_root = settings.uploads_dir.resolve()
     for path in upload_paths:
-        resolved = Path(os.path.realpath(path))
+        try:
+            resolved = Path(os.path.realpath(path))
+        except ValueError:  # a NUL byte (a tampered row) names no file the app wrote
+            continue
         if resolved.is_relative_to(uploads_root):
             resolved.unlink(missing_ok=True)
     shutil.rmtree(settings.run_figures_dir(run_id), ignore_errors=True)

@@ -740,19 +740,33 @@ def delete_run_data(conn: sqlite3.Connection, run_id: str) -> list[str]:
         if upload_ids:
             conn.execute(f"DELETE FROM uploads WHERE id IN ({placeholders})", list(upload_ids))
         conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
-        # A file another upload still names is not this run's to hand back: the
-        # CLI can ingest a stored PDF by its absolute path while the uploading
-        # run's row names it relative to the working directory. realpath, not
-        # Path.resolve: one stored path in a symlink loop must not raise here and
-        # make every run undeletable.
-        still_named = {
-            os.path.realpath(row["path"]) for row in conn.execute("SELECT path FROM uploads")
-        }
+        remaining = [row["path"] for row in conn.execute("SELECT path FROM uploads")]
         conn.commit()
-        return [path for path in paths if os.path.realpath(path) not in still_named]
     except BaseException:
         conn.rollback()
         raise
+    # A file another upload still names is not this run's to hand back: the CLI
+    # can ingest a stored PDF by its absolute path, or by its name in other
+    # letter case, while the uploading run's row names it relative to the
+    # working directory. Compared as the filesystem sees files (a case-insensitive
+    # volume opens both spellings), and only AFTER the commit: reading one stored
+    # path on a hung mount must stall this request, never the write lock the
+    # worker's writes wait on.
+    if not paths:
+        return []
+    still_named = {identity for path in remaining if (identity := _file_identity(path)) is not None}
+    return [path for path in paths if _file_identity(path) not in still_named]
+
+
+def _file_identity(path: str) -> tuple[int, int] | None:
+    """The file a stored path names, as (device, inode); None when it names no
+    readable file (missing, caught in a symlink loop, or holding a NUL byte), so
+    one broken row never makes a run undeletable."""
+    try:
+        stat = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (stat.st_dev, stat.st_ino)
 
 
 def list_runs(conn: sqlite3.Connection) -> list[dict]:

@@ -413,19 +413,28 @@ def test_delete_refuses_active_jobs_and_unknown_runs(tmp_path):
         assert client.delete(f"/api/runs/{poisoned}", headers=AUTH).status_code == 204
 
 
-@pytest.mark.parametrize("recorded", ["absolute", "dot-dot"])
+@pytest.mark.parametrize("recorded", ["absolute", "dot-dot", "symlinked-folder", "sibling-prefix"])
 def test_delete_run_never_removes_a_file_outside_the_uploads_folder(tmp_path, recorded):
     """A CLI ingest records the user's ORIGINAL file (ingest_parsed with no upload
     id stores its absolute path): deleting that run from the gallery removes its
-    rows, never the user's own PDF — nor one reached by climbing out of uploads."""
+    rows, never the user's own PDF — nor one reached by climbing out of uploads,
+    through a folder inside uploads that links out, or kept in a sibling folder
+    whose name merely starts with the uploads folder's."""
     settings = _settings(tmp_path)
-    library = tmp_path / "library" / "my_only_copy.pdf"
+    # "uploads-archive" shares the uploads folder's name as a string prefix, so
+    # only a whole-component check (not a string prefix) keeps it out.
+    folder = "uploads-archive" if recorded == "sibling-prefix" else "library"
+    library = tmp_path / folder / "my_only_copy.pdf"
     library.parent.mkdir()
     library.write_bytes(PDF_BYTES)
     settings.uploads_dir.mkdir()  # so the dot-dot path really reaches the library
+    if recorded == "symlinked-folder":  # inside uploads by spelling, outside on disk
+        (settings.uploads_dir / "linked").symlink_to(library.parent, target_is_directory=True)
     path = {
         "absolute": str(library.resolve()),
         "dot-dot": str(settings.uploads_dir / ".." / "library" / library.name),
+        "symlinked-folder": str(settings.uploads_dir / "linked" / library.name),
+        "sibling-prefix": str(library.resolve()),
     }[recorded]
     conn = dbmod.connect(settings.db_path, settings.embedding_dim)
     run_id = dbmod.create_run(conn)
@@ -471,25 +480,75 @@ def test_delete_run_keeps_a_stored_file_another_run_still_names(tmp_path, monkey
         conn.close()
 
 
-def test_a_stored_path_caught_in_a_symlink_loop_never_blocks_deleting_a_run(tmp_path):
+@pytest.mark.parametrize("deleted", ["uploading", "cli"])
+def test_delete_run_keeps_a_stored_file_another_run_names_in_other_letter_case(
+    tmp_path, monkeypatch, deleted
+):
+    """A case-insensitive volume (macOS APFS, the default) opens a stored PDF under
+    its name in any letter case, so a CLI row spelling it <ID>.PDF names the same
+    file as the uploading run's <id>.pdf. Deleting either run leaves the other's
+    file served; deleting the last run naming it removes it."""
+    monkeypatch.chdir(tmp_path)
+    settings = _settings(tmp_path, uploads_dir=Path("uploads"))
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        api_run = client.post("/api/runs", headers=AUTH, files=_upload_files()).json()["run_id"]
+        conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+        [(upload_id, stored)] = [
+            (row["id"], Path(row["path"]))
+            for row in conn.execute("SELECT id, path FROM uploads WHERE kind = 'REPORT'")
+        ]
+        alias = stored.resolve().with_name(stored.name.upper())
+        if not alias.exists():
+            conn.close()
+            pytest.skip("case-sensitive volume: names differing in case are different files")
+        api_doc = dbmod.add_document(conn, api_run, "REPORT", upload_id=upload_id)
+        cli_run = dbmod.create_run(conn)
+        cli_upload = dbmod.add_upload(conn, "REPORT", "report.pdf", str(alias))
+        cli_doc = dbmod.add_document(conn, cli_run, "REPORT", upload_id=cli_upload)
+        job = dbmod.get_run_job(conn, api_run)
+        dbmod.finish_job_and_run(conn, job["id"], api_run, "FAILED", error="boom")
+        conn.close()
+        runs = {"uploading": (api_run, api_doc), "cli": (cli_run, cli_doc)}
+        [(kept_run, kept_doc)] = [ids for name, ids in runs.items() if name != deleted]
+
+        assert client.delete(f"/api/runs/{runs[deleted][0]}", headers=AUTH).status_code == 204
+        served = client.get(f"/api/runs/{kept_run}/documents/{kept_doc}/file", headers=AUTH)
+        assert served.status_code == 200
+        assert served.content == PDF_BYTES
+
+        assert client.delete(f"/api/runs/{kept_run}", headers=AUTH).status_code == 204
+        assert not stored.exists()
+
+
+@pytest.mark.parametrize("broken", ["missing", "symlink-loop", "nul-byte"])
+def test_a_stored_path_naming_no_readable_file_never_blocks_deleting_a_run(tmp_path, broken):
     """Deleting a run checks its files against every other upload's path. One path
-    that no longer resolves (a CLI-ingested folder later replaced by a symlink
-    loop) must not fail that check and make every run undeletable — nor its own."""
+    that names no readable file (a CLI-ingested PDF since removed, a folder later
+    replaced by a symlink loop, a tampered row with a NUL byte) must not fail that
+    check and make every run undeletable — nor its own."""
     settings = _settings(tmp_path)
     library = tmp_path / "library"
     library.mkdir()
     (library / "a").symlink_to(library / "b")
     (library / "b").symlink_to(library / "a")
+    path = {
+        "missing": str(library / "gone.pdf"),
+        "symlink-loop": str(library / "a" / "looped.pdf"),
+        "nul-byte": str(library / "tampered\x00.pdf"),
+    }[broken]
     conn = dbmod.connect(settings.db_path, settings.embedding_dim)
-    looped_run = dbmod.create_run(conn)
-    looped = dbmod.add_upload(conn, "REPORT", "looped.pdf", str(library / "a" / "looped.pdf"))
-    dbmod.add_document(conn, looped_run, "REPORT", upload_id=looped)
+    broken_run = dbmod.create_run(conn)
+    upload = dbmod.add_upload(conn, "REPORT", "broken.pdf", path)
+    dbmod.add_document(conn, broken_run, "REPORT", upload_id=upload)
+    [stored] = [row["path"] for row in conn.execute("SELECT path FROM uploads")]
+    assert stored == path  # the row really holds the unreadable spelling
     conn.close()
     other_run = _seed_scored_run(settings)
 
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
         assert client.delete(f"/api/runs/{other_run}", headers=AUTH).status_code == 204
-        assert client.delete(f"/api/runs/{looped_run}", headers=AUTH).status_code == 204
+        assert client.delete(f"/api/runs/{broken_run}", headers=AUTH).status_code == 204
+        assert client.get("/api/runs", headers=AUTH).json()["runs"] == []
     assert sorted(p.name for p in settings.uploads_dir.iterdir()) == []
 
 

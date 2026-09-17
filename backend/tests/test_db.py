@@ -322,6 +322,53 @@ def test_delete_cleans_both_indexes(conn):
     assert conn.execute("SELECT count(*) FROM chunks_vec").fetchone()[0] == 0
 
 
+def test_delete_run_data_reads_no_file_while_holding_the_write_lock(conn, tmp_path, monkeypatch):
+    """Deleting a run compares its files with every other upload's, which reads the
+    filesystem once per stored path. Under BEGIN IMMEDIATE, one stored path on a
+    hung mount would hold the database write lock for the whole stall: the worker's
+    writes fail with 'database is locked' and its job can be left RUNNING."""
+    import os
+
+    doomed_file, kept_file = tmp_path / "doomed.pdf", tmp_path / "kept.pdf"
+    for file in (doomed_file, kept_file):
+        file.write_bytes(b"%PDF-1.4")
+    doomed = dbmod.create_run(conn)
+    upload = dbmod.add_upload(conn, "REPORT", "doomed.pdf", str(doomed_file))
+    dbmod.add_document(conn, doomed, "REPORT", upload_id=upload)
+    other = dbmod.create_run(conn)
+    kept = dbmod.add_upload(conn, "REPORT", "kept.pdf", str(kept_file))
+    dbmod.add_document(conn, other, "REPORT", upload_id=kept)
+
+    locked = False
+    calls: list[tuple[str, str, bool]] = []  # (function, path, write lock held)
+
+    def trace(statement: str) -> None:
+        nonlocal locked
+        keyword = statement.lstrip().upper()
+        if keyword.startswith("BEGIN"):
+            locked = True
+        elif keyword.startswith(("COMMIT", "ROLLBACK")):
+            locked = False
+
+    def recording(name, real):
+        def call(path, *args, **kwargs):
+            calls.append((name, str(path), locked))
+            return real(path, *args, **kwargs)
+
+        return call
+
+    monkeypatch.setattr(os.path, "realpath", recording("os.path.realpath", os.path.realpath))
+    monkeypatch.setattr(os, "stat", recording("os.stat", os.stat))
+    monkeypatch.setattr(os, "lstat", recording("os.lstat", os.lstat))
+    conn.set_trace_callback(trace)
+    try:
+        assert dbmod.delete_run_data(conn, doomed) == [str(doomed_file)]
+    finally:
+        conn.set_trace_callback(None)
+    assert [call for call in calls if call[2]] == []
+    assert str(kept_file) in {path for _, path, _ in calls}  # the comparison still ran
+
+
 # --- ingest dedup primitives ---------------------------------------------
 
 
