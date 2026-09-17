@@ -14,6 +14,33 @@ def conn(tmp_path):
     connection.close()
 
 
+def _attached_to(logger, caplog):
+    """authorai loggers do not propagate to the root logger (log.setup_logger),
+    so caplog's handler is attached to the module logger itself."""
+    logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
+@pytest.fixture()
+def web_log(caplog):
+    """caplog, capturing authorai.web's records (imported here, not at the top,
+    so collecting unrelated tests does not import the page reader)."""
+    import authorai.web as web_mod
+
+    yield from _attached_to(web_mod.logger, caplog)
+
+
+@pytest.fixture()
+def jobs_log(caplog):
+    """caplog, capturing authorai.jobs's records."""
+    from authorai import jobs as jobsmod
+
+    yield from _attached_to(jobsmod.logger, caplog)
+
+
 def poison_providers(monkeypatch):
     """Make any provider work during an ingest reuse a test failure — not just
     calls: CONSTRUCTING a client already means the dedup path leaked. The one

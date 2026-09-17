@@ -3,36 +3,13 @@ a declaration nothing can decode with fails (loudly, naming the link)."""
 
 import codecs
 import logging
-from pathlib import Path
 
 import pytest
 
-import authorai.web as web_mod
 from authorai.web import ThinPageError, _decode, extract_web
+from tests.test_web import DIARIO_URL, _body, _diario
 
-FIXTURES = Path(__file__).parent / "fixtures" / "web"
-DIARIO_URL = "https://www.diariodelagua.com/salud/desnutricion-cronica-infantil-america-latina"
-_META_UTF8 = '<meta charset="utf-8">'
 _SPANISH = "<p>La Organización Mundial — “agua”, €5 millones, œuvre</p>"
-
-
-@pytest.fixture()
-def web_log(caplog):
-    """authorai loggers do not propagate to the root logger (log.setup_logger),
-    so caplog's handler is attached to the module logger itself."""
-    web_mod.logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        web_mod.logger.removeHandler(caplog.handler)
-
-
-def _diario(meta: str) -> str:
-    return (FIXTURES / "diario_agua_es.html").read_text(encoding="utf-8").replace(_META_UTF8, meta)
-
-
-def _body(document) -> str:
-    return "\n\n".join(section.text for section in document.sections)
 
 
 # --- a UTF-8 byte-order mark -------------------------------------------------

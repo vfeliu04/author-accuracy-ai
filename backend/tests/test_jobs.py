@@ -999,19 +999,6 @@ def test_retry_refetches_a_stored_page_that_will_not_load(
     assert loaded == ["fresh page text"]
 
 
-@pytest.fixture()
-def jobs_log(caplog):
-    """authorai loggers do not propagate to the root logger (log.setup_logger),
-    so caplog's handler is attached to the module logger itself."""
-    from authorai import jobs as jobsmod
-
-    jobsmod.logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        jobsmod.logger.removeHandler(caplog.handler)
-
-
 @pytest.mark.parametrize(
     ("content", "mode", "reason"),
     [
@@ -1602,7 +1589,6 @@ def test_a_page_whose_charset_only_the_http_header_names_is_decoded_with_it(
     """Latin-1 bytes, no <meta> charset: only the Content-Type header says how to
     read them, and only the fetch step has that header."""
     from authorai import jobs as jobsmod
-    from authorai.fetch import FetchedResponse
     from authorai.ingest import load_snapshot
 
     run_id = dbmod.create_run(conn)
@@ -1625,16 +1611,7 @@ def test_a_page_whose_charset_only_the_http_header_names_is_decoded_with_it(
         f"<p>{paragraph}</p><p>{second}</p></article></body></html>"
     ).encode("latin-1")
     monkeypatch.setattr(
-        jobsmod,
-        "fetch_url",
-        lambda u, s, **k: FetchedResponse(
-            url=u,
-            final_url=u,
-            content_type="text/html",
-            charset="iso-8859-1",
-            body=html,
-            is_pdf=False,
-        ),
+        jobsmod, "fetch_url", lambda u, s, **k: _fetched(u, body=html, charset="iso-8859-1")
     )
     monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
@@ -1646,13 +1623,8 @@ def test_a_page_whose_charset_only_the_http_header_names_is_decoded_with_it(
 _SPANISH_PAGE = "<p>La Organización Mundial — “agua”, €5 millones, œuvre</p>"
 
 
-def _header_labeled(body: bytes, charset: str):
-    from authorai.fetch import FetchedResponse
-
-    url = "https://www.salud.example.gob/agua"
-    return FetchedResponse(
-        url=url, final_url=url, content_type="text/html", charset=charset, body=body, is_pdf=False
-    )
+def _header_labeled(body: bytes, charset: str | None):
+    return _fetched("https://www.salud.example.gob/agua", body=body, charset=charset)
 
 
 @pytest.mark.parametrize(

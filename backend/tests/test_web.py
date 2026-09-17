@@ -31,6 +31,7 @@ from authorai.web import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web"
+BACKEND = Path(web_mod.__file__).resolve().parents[1]
 
 NEWS_URL = "https://www.globalwatermonitor.org/fact-sheets/detail/drought-and-water-scarcity"
 SCHOLARLY_URL = "https://journals.hydrosynth.org/jhs/article/view/2024-0173"
@@ -68,6 +69,11 @@ def _page(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+def _diario(meta: str) -> str:
+    """The Spanish fixture with its <meta charset="utf-8"> replaced by `meta`."""
+    return _page("diario_agua_es.html").replace('<meta charset="utf-8">', meta)
+
+
 def _body(document) -> str:
     return "\n\n".join(section.text for section in document.sections)
 
@@ -82,21 +88,16 @@ def _assert_no_chrome(document, chrome: tuple[str, ...]) -> None:
             assert text not in section.text, (section.title, text)
 
 
+def _subprocess_env() -> dict[str, str]:
+    """A subprocess imports THIS checkout's authorai, never the editable
+    install's (a script run by path would put its own directory first)."""
+    return {**os.environ, "PYTHONPATH": str(BACKEND)}
+
+
 def _prose(length: int) -> str:
     """Real sentences cut to exactly `length` characters, never ending in a space."""
     text = (PROSE * (length // len(PROSE) + 1))[:length]
     return text if not text.endswith(" ") else text[:-1] + "."
-
-
-@pytest.fixture()
-def web_log(caplog):
-    """authorai loggers do not propagate to the root logger (log.setup_logger),
-    so caplog's handler is attached to the module logger itself."""
-    web_mod.logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        web_mod.logger.removeHandler(caplog.handler)
 
 
 # --- (a) news / fact-sheet page ----------------------------------------------
@@ -1473,10 +1474,7 @@ def test_utf8_bytes_page_keeps_non_ascii_text_intact():
 def test_declared_legacy_charset_decodes_like_a_browser():
     # Servers still label windows-1252 pages "iso-8859-1"; browsers decode that
     # label as windows-1252, where 0x93/0x94 are curly quotes, not C1 controls.
-    page = _page("diario_agua_es.html").replace(
-        '<meta charset="utf-8">',
-        '<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">',
-    )
+    page = _diario('<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">')
     raw = page.encode("cp1252")
     with pytest.raises(UnicodeDecodeError):
         raw.decode("utf-8")
@@ -1488,10 +1486,9 @@ def test_declared_legacy_charset_decodes_like_a_browser():
 
 
 def test_charset_inside_another_meta_value_is_not_a_declaration(web_log):
-    page = _page("diario_agua_es.html").replace(
-        '<meta charset="utf-8">',
+    page = _diario(
         '<meta name="description" content="How to declare charset=utf-8 on legacy pages">'
-        '<meta charset="windows-1252">',
+        '<meta charset="windows-1252">'
     )
     document, _ = extract_web(page.encode("cp1252"), url=DIARIO_URL)
     assert "“La reducción es real, pero frágil”" in _body(document)
@@ -1499,7 +1496,7 @@ def test_charset_inside_another_meta_value_is_not_a_declaration(web_log):
 
 
 def test_utf16_page_with_a_byte_order_mark_decodes():
-    page = _page("diario_agua_es.html").replace('<meta charset="utf-8">', '<meta charset="utf-16">')
+    page = _diario('<meta charset="utf-16">')
     document, metadata = extract_web(page.encode("utf-16"), url=DIARIO_URL)
     assert "La Organización Mundial de la Salud informó" in _body(document)
     assert metadata.authors == ["Lucía Fernández Ibáñez"]
@@ -1508,7 +1505,7 @@ def test_utf16_page_with_a_byte_order_mark_decodes():
 def test_utf16_label_on_ascii_compatible_bytes_means_utf8(web_log):
     # WHATWG: a declaration readable as ASCII cannot be UTF-16, so the label
     # means UTF-8 — decoding these bytes as UTF-16 would yield CJK-looking noise.
-    page = _page("diario_agua_es.html").replace('<meta charset="utf-8">', '<meta charset="utf-16">')
+    page = _diario('<meta charset="utf-16">')
     document, _ = extract_web(page.encode("cp1252"), url=DIARIO_URL)
     body = _body(document)
     assert "Mundial de la Salud inform" in body
@@ -1517,7 +1514,7 @@ def test_utf16_label_on_ascii_compatible_bytes_means_utf8(web_log):
 
 
 def test_undeclared_non_utf8_bytes_fail_loudly_naming_the_url():
-    page = _page("diario_agua_es.html").replace('<meta charset="utf-8">', "")
+    page = _diario("")
     with pytest.raises(ValueError) as excinfo:
         extract_web(page.encode("cp1252"), url=DIARIO_URL)
     assert DIARIO_URL in str(excinfo.value)
@@ -1525,9 +1522,7 @@ def test_undeclared_non_utf8_bytes_fail_loudly_naming_the_url():
 
 
 def test_unknown_declared_charset_fails_loudly_naming_the_url():
-    page = _page("diario_agua_es.html").replace(
-        '<meta charset="utf-8">', '<meta charset="x-legacy-klingon">'
-    )
+    page = _diario('<meta charset="x-legacy-klingon">')
     with pytest.raises(ValueError, match="x-legacy-klingon") as excinfo:
         extract_web(page.encode("cp1252"), url=DIARIO_URL)
     assert DIARIO_URL in str(excinfo.value)
@@ -1540,9 +1535,7 @@ def test_a_charset_label_that_is_not_a_text_encoding_fails_like_an_unknown_one(l
     # a few text codecs refuse any byte at all ("undefined", "idna"). Neither
     # failure was the documented ValueError naming the link, so the run showed
     # Python internals and no source row was marked.
-    page = _page("diario_agua_es.html").replace(
-        '<meta charset="utf-8">', f'<meta charset="{label}">'
-    )
+    page = _diario(f'<meta charset="{label}">')
     with pytest.raises(ValueError, match="declares an unknown charset") as excinfo:
         extract_web(page.encode("cp1252"), url=DIARIO_URL)
     assert DIARIO_URL in str(excinfo.value)
@@ -1615,7 +1608,6 @@ def test_extraction_is_deterministic(name, url):
 def test_extraction_is_deterministic_across_hash_seeds():
     # Same-process calls share one string-hash seed, so set- or hash-ordered
     # output would still compare equal there. Separate interpreters do not.
-    backend = Path(web_mod.__file__).resolve().parents[1]
     script = (
         "import dataclasses, json, pathlib, sys\n"
         "import authorai.web as web\n"
@@ -1627,13 +1619,12 @@ def test_extraction_is_deterministic_across_hash_seeds():
     )
     outputs = []
     for seed in ("1", "2", "3"):
-        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(backend)}
         result = subprocess.run(
             [sys.executable, "-c", script, str(FIXTURES / "report_jsonld_graph.html"), REPORT_URL],
             capture_output=True,
             text=True,
-            env=env,
-            cwd=backend,
+            env={**_subprocess_env(), "PYTHONHASHSEED": seed},
+            cwd=BACKEND,
             check=True,
         )
         imported, payload = result.stdout.splitlines()

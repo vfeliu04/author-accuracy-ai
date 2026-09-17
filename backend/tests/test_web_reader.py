@@ -21,15 +21,22 @@ import textwrap
 import threading
 import time
 from multiprocessing import resource_tracker
-from pathlib import Path
 
 import pytest
 
 import authorai.web as web_mod
 from authorai.web import ExtractionTimeoutError, ThinPageError, extract_web, extract_web_bounded
-from tests.test_web import DIARIO_URL, FIXTURES, REPORT_URL, SPA_URL, _page, _prose
-
-BACKEND = Path(web_mod.__file__).resolve().parents[1]
+from tests.test_web import (
+    BACKEND,
+    DIARIO_URL,
+    FIXTURES,
+    REPORT_URL,
+    SPA_URL,
+    _diario,
+    _page,
+    _prose,
+    _subprocess_env,
+)
 
 
 def _slow_page(tag: str, count: int = 30_000) -> str:
@@ -57,12 +64,6 @@ def _running(pid: int) -> bool:
     return state.returncode == 0 and not state.stdout.strip().startswith("Z")
 
 
-def _subprocess_env() -> dict[str, str]:
-    """A subprocess imports THIS checkout's authorai, never the editable
-    install's (a script run by path would put its own directory first)."""
-    return {**os.environ, "PYTHONPATH": str(BACKEND)}
-
-
 def _signal_the_reader(before: set, signum: int, box: dict) -> None:
     """From a helper thread: signal the first reader that appears beyond
     `before`. The child is registered the moment start() returns, so the
@@ -77,17 +78,6 @@ def _signal_the_reader(before: set, signum: int, box: dict) -> None:
             os.kill(child.pid, signum)
             box["pid"] = child.pid
         time.sleep(0.005)
-
-
-@pytest.fixture()
-def reader_log(caplog):
-    """authorai loggers do not propagate to the root logger (log.setup_logger),
-    so caplog's handler is attached to the module logger itself."""
-    web_mod.logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        web_mod.logger.removeHandler(caplog.handler)
 
 
 @pytest.fixture()
@@ -124,7 +114,7 @@ def test_bounded_extraction_reraises_thin_page_and_decoding_errors_as_the_same_t
     assert type(bounded.value) is ThinPageError
     assert str(bounded.value) == str(direct.value)
 
-    undeclared = _page("diario_agua_es.html").replace('<meta charset="utf-8">', "")
+    undeclared = _diario("")
     with pytest.raises(ValueError) as decoding:
         extract_web_bounded(undeclared.encode("cp1252"), url=DIARIO_URL, timeout=30)
     assert type(decoding.value) is ValueError
@@ -238,7 +228,7 @@ def test_the_time_bound_holds_while_the_reader_is_still_starting(tmp_path, monke
 # --- a reader that dies, and one that fails unexpectedly ---------------------
 
 
-def test_a_reader_killed_mid_read_fails_naming_the_link_and_logs_the_signal(reader_log):
+def test_a_reader_killed_mid_read_fails_naming_the_link_and_logs_the_signal(web_log):
     # An out-of-memory kill, from the parent's side: the pipe closes with no
     # result. That must be the documented RuntimeError at once (the child holds
     # the only writing end), not a TypeError and not the deadline.
@@ -258,11 +248,11 @@ def test_a_reader_killed_mid_read_fails_naming_the_link_and_logs_the_signal(read
     )
     assert not _running(killed["pid"])
     assert set(multiprocessing.active_children()) == before
-    assert "https://example.org/oom" in reader_log.text
-    assert "killed by signal SIGKILL" in reader_log.text
+    assert "https://example.org/oom" in web_log.text
+    assert "killed by signal SIGKILL" in web_log.text
 
 
-def test_any_other_failure_in_the_reader_names_the_link_and_logs_its_traceback(reader_log):
+def test_any_other_failure_in_the_reader_names_the_link_and_logs_its_traceback(web_log):
     # A failure that is neither thin-page nor decoding, raised by the real
     # reader: the run's error names the link and the type, and the frame it
     # came from goes to the log — the child's traceback, not the re-raise here.
@@ -272,9 +262,9 @@ def test_any_other_failure_in_the_reader_names_the_link_and_logs_its_traceback(r
     assert type(excinfo.value) is RuntimeError
     assert str(excinfo.value).startswith("12345 could not be read: AttributeError: ")
     assert set(multiprocessing.active_children()) == children
-    assert "12345" in reader_log.text
-    assert "Traceback (most recent call last)" in reader_log.text
-    assert "in extract_web" in reader_log.text  # the child's own frames
+    assert "12345" in web_log.text
+    assert "Traceback (most recent call last)" in web_log.text
+    assert "in extract_web" in web_log.text  # the child's own frames
 
 
 def _reader_dies_mid_report(sender, *_args):

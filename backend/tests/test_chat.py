@@ -192,9 +192,7 @@ def test_context_lists_image_and_unscored_sources_honestly(conn):
 
 def test_context_phrases_each_evidence_locator_by_source_type(conn):
     run_id = _scored_run(conn)
-    report = conn.execute(
-        "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT'", (run_id,)
-    ).fetchone()["id"]
+    report = dbmod.get_report_doc_id(conn, run_id)
     embedder = FakeEmbedder(dim=DIM)
 
     def cited(source_type, title, chunk):

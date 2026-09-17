@@ -434,9 +434,7 @@ def _add_source(conn, run_id, *, source_type, title, metadata, text, chunk_kind=
 
 
 def _cite(conn, run_id, chunk_id, claim_text):
-    report = conn.execute(
-        "SELECT id FROM documents WHERE run_id = ? AND kind = 'REPORT'", (run_id,)
-    ).fetchone()["id"]
+    report = dbmod.get_report_doc_id(conn, run_id)
     [claim_id] = dbmod.add_claims(conn, run_id, report, [{"text": claim_text}])
     dbmod.add_verdicts(
         conn,
