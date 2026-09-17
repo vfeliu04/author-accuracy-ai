@@ -36,7 +36,7 @@ const runningDetail: RunDetail = {
     status: "RUNNING",
     payload: { report_upload_id: "u1", source_upload_ids: ["u2", "u3"] },
     progress: [
-      { step: "ingest", label: "Read 3 documents (1 web page opened)", status: "done", ts: "t" },
+      { step: "ingest", label: "Read 3 documents (1 link opened)", status: "done", ts: "t" },
       { step: "extract", label: "Extracting claims", status: "running", ts: "t" }
     ],
     error: null,
@@ -134,7 +134,7 @@ describe("RunView", () => {
     );
     // Client vocabulary for unfinished steps; server result string once done.
     expect(screen.getByText("Extract claims")).toBeInTheDocument();
-    expect(screen.getByText("Read 3 documents (1 web page opened)")).toBeInTheDocument();
+    expect(screen.getByText("Read 3 documents (1 link opened)")).toBeInTheDocument();
     // Sources panel shows the uploaded filenames before scoring exists; the
     // link's page has been read, so it reads like the uploaded file.
     expect(screen.getByText("ipcc_ch3.pdf")).toBeInTheDocument();
