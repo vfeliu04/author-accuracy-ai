@@ -369,6 +369,66 @@ def test_superscripts_subscripts_and_footnote_markers():
     assert "<sub>" not in _body(document) and "<sup>" not in _body(document)
 
 
+# Numeric references to code points XML forbids, in the spellings pages use.
+CONTROL_REFERENCES = ["&#12;", "&#11;", "&#x0B;", "&#8", "&#0000031;", "&#x1B;", "&#xFFFE;"]
+
+
+@pytest.mark.parametrize("reference", CONTROL_REFERENCES)
+def test_a_control_character_reference_in_article_or_chrome_does_not_fail_the_page(reference):
+    # The parser keeps &#12; or Word's &#11; as that character, and lxml refuses
+    # to set text holding it: the tree edits re-set the text of every element
+    # that had an emphasis child — chrome trafilatura discards later included —
+    # so the page failed with an error naming no link.
+    page = (
+        f"<html><head><title>Basin{reference}report</title>"
+        f'<meta property="og:site_name" content="Daily{reference}Water"></head>'
+        "<body><article><h1>Basin</h1>"
+        + "".join(f"<p>Gauge {n}: {PROSE}</p>" for n in range(3))
+        + f"<p>Page{reference}break <a href='/x'>link</a> then <b>bold</b> text.</p>"
+        + f"</article><footer><p>Contact{reference} us <a href='/c'>here</a> or <b>call</b></p>"
+        + "</footer></body></html>"
+    )
+    document, metadata = extract_web(page, url=NEWS_URL)
+    body = _body(document)
+    assert "Page break link then bold text." in body
+    assert body.count(PROSE.strip()) == 3
+    assert not any(character in body for character in "\x08\x0b\x0c\x1b\x1f\ufffe")
+    # Only the body's reading changes: the metadata is still the stdlib parser's.
+    assert metadata == _page_metadata(page, url=NEWS_URL)
+    assert metadata.publisher.replace(" ", "") == "DailyWater"
+
+
+@pytest.mark.parametrize("reference", ["&#11;", "&#12;", "&#x1B;", "&#xFFFE;"])
+@pytest.mark.parametrize(
+    "paragraph",
+    [
+        "<p>{prose} <b>held</b> releases <a href='/n'>note</a>{ref} {prose}</p>",
+        "<p><span>{prose}</span>{ref}<span>{prose}</span><b>.</b></p>",
+        "<p>{prose} 10<sup>6</sup> <a href='/n'>note</a>{ref} {prose}</p>",
+        "<p><b>Note</b> {prose}<br>{ref}{prose}</p>",
+        "<p>{prose} <b>held{ref}</b> {prose}</p>",
+        "<p>{prose}{ref} {prose}</p>",
+    ],
+    ids=["link-tail", "span-tail", "sup-sibling", "br-tail", "inside-bold", "plain-text"],
+)
+def test_a_control_character_reference_anywhere_in_a_paragraph_keeps_the_page(reference, paragraph):
+    # Beside emphasis the tree edits raised over it; in plain text trafilatura
+    # swallowed the same refusal and discarded the page as thin.
+    page = (
+        "<html><body><article><h1>Basin</h1><p>"
+        + PROSE
+        + "</p>"
+        + paragraph.format(prose=PROSE, ref=reference)
+        + "<p>"
+        + PROSE
+        + "</p></article></body></html>"
+    )
+    document, _ = extract_web(page, url=REPORT_URL)
+    body = _body(document)
+    assert body.count("reservoir operators cut releases") >= 3
+    assert not any(character in body for character in "\x0b\x0c\x1b\ufffe")
+
+
 def test_inline_svg_title_is_never_the_page_title():
     page = _page("hydrology_bulletin.html")
     for tag in (

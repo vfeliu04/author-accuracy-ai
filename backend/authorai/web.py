@@ -426,6 +426,15 @@ _DROP = "authorai-drop"
 _SCRIPT_CHARACTERS = frozenset("0123456789+-−=()")
 _ASCII_MINUS = str.maketrans({"−": "-"})
 _HEADING_PREFIX = re.compile(r"^#{1,6} ?")
+# A numeric reference to a code point XML forbids (&#12;, Word's &#11;) parses
+# into that character, which lxml refuses to set as text: the tree edits raised
+# over one, and trafilatura discarded the page as thin. Raw control bytes need
+# nothing — the parser drops them. Decimal values are matched digit by digit,
+# never converted, so a reference with thousands of digits costs nothing extra.
+_XML_INVALID_REFERENCE = re.compile(
+    r"&#(?:0*(?:[1-8]|1[124-9]|2\d|3[01]|6553[45])(?!\d)"
+    r"|[xX]0*(?:[1-8bBcCeEfF]|1[\da-fA-F]|[fF]{3}[eEfF])(?![\da-fA-F]));?"
+)
 
 
 def _body_sections(text: str, url: str) -> tuple[list[ParsedSection], str | None]:
@@ -439,7 +448,9 @@ def _body_sections(text: str, url: str) -> tuple[list[ParsedSection], str | None
     rescue of layouts trafilatura's own extractor misreads, so a page fast
     mode finds thin gets the full cascade before it is called thin.
     """
-    tree = trafilatura.load_html(text)
+    # The body's reading only: the stdlib parser that reads the metadata drops
+    # these references or reads them as whitespace, and never refuses one.
+    tree = trafilatura.load_html(_XML_INVALID_REFERENCE.sub(" ", text))
     if tree is None:
         return [], None
     _prepare_tree(tree)
