@@ -18,9 +18,9 @@ One page, two independent readings:
   head, JSON-LD anywhere) with the stdlib HTML parser. Never from
   trafilatura's metadata (its site name can be derived from the hostname and
   its date search is heuristic — guesses that would feed credibility
-  scoring), never from the hostname (the authority matcher token-fuses, so
-  "who-cares.com" would borrow the World Health Organization's authority),
-  and never from body text (reference lists describe OTHER works).
+  scoring), never from the hostname (publisher authority matches whole words,
+  so "united-nations-fan-club.org" would borrow the United Nations'
+  authority), and never from body text (reference lists describe OTHER works).
 
 The result is a ParsedDocument like a PDF's: everything downstream of parsing
 treats both the same.

@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1574,6 +1575,21 @@ def test_hostname_never_becomes_the_publisher():
         "Myth 2: one wet winter ends a drought",
     ]
     _assert_no_chrome(document, ("About me", "Built with Hugo", "RSS", "4 min read"))
+
+
+def test_the_module_docstrings_hostname_example_really_borrows_tier_one_authority():
+    # web.py justifies never reading the publisher from the hostname with an
+    # example; once acronym needles matched only in capitals, "who-cares.com"
+    # stopped being one. Pinned against the default tier lists.
+    from authorai.config import Settings
+    from authorai.credibility import _publisher_authority
+
+    fields = Settings.model_fields
+    tier1 = [p.strip() for p in fields["authority_tier1"].default.split(",") if p.strip()]
+    tier2 = [p.strip() for p in fields["authority_tier2"].default.split(",") if p.strip()]
+    host = re.search(r'never from the hostname \(.*?"([^"]+)"', web_mod.__doc__, re.S).group(1)
+    assert _publisher_authority(host, tier1, tier2) == 30.0, host
+    assert _publisher_authority("Random Blog", tier1, tier2) == 15.0
 
 
 # --- cross-cutting ---------------------------------------------------------------
