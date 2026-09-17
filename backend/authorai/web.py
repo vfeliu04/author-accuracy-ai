@@ -694,19 +694,19 @@ class _MarkupParser(HTMLParser):
         self._parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
         if tag == "body":
             self._in_head = False
         elif tag in _FOREIGN_CONTENT:
             self._foreign_depth += 1
         elif tag == "meta" and self._in_head:
+            attributes = dict(attrs)
             content = attributes.get("content")
             keys = (attributes.get("name"), attributes.get("property"))
             for key in dict.fromkeys(key.strip().lower() for key in keys if key):
                 if content is not None:
                     self.meta.append((key, content))
         elif tag == "script":
-            kind = (attributes.get("type") or "").split(";")[0].strip().lower()
+            kind = (dict(attrs).get("type") or "").split(";")[0].strip().lower()
             if kind == "application/ld+json":
                 self._capturing, self._parts = "script", []
         elif (
@@ -775,21 +775,18 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     work = _primary_work(nodes, url, by_id) or {}
 
     title = (
-        first("citation_title")
-        or _clean_jsonld(_first_str(work.get("headline")))
-        or _clean_jsonld(_first_str(work.get("name")))
-        or first("og:title")
-        or _clean(parser.title)
+        first("citation_title") or _jsonld_title(work) or first("og:title") or _clean(parser.title)
     )
     # The untyped <meta name=author> carries no Person/Organization type: a name
     # the page gives an organization or the site elsewhere is not a personal
     # author. A publisher typed Person names no organization; og:site_name has
     # no type at all, so a personal site titled with its author's own name
     # loses that meta author (code cannot tell the two names apart).
+    organization_authors = _names(work.get("author"), by_id, kind="organization")
     organizations = {
         name.casefold()
         for name in (
-            *_names(work.get("author"), by_id, kind="organization"),
+            *organization_authors,
             *_names(work.get("publisher"), by_id, kind="not_person"),
             *meta.get("citation_publisher", []),
             *meta.get("og:site_name", []),
@@ -807,11 +804,11 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
         or first("og:site_name")
         # An institution credited as the author published the page when nothing
         # else says so. It is never a PERSONAL author (SourceMetadata.authors).
-        or next(iter(_names(work.get("author"), by_id, kind="organization")), None)
+        or next(iter(organization_authors), None)
     )
     published = (
         first("citation_publication_date", "citation_date")
-        or _clean_jsonld(_first_str(work.get("datePublished")))
+        or _jsonld_date(work)
         or first("article:published_time")
     )
     declared_doi = first("citation_doi") or next(iter(_doi_candidates(work)), None)
@@ -893,15 +890,24 @@ def _primary_work(nodes: list[dict], url: str, by_id: dict[str, dict]) -> dict |
 
 def _work_signature(node: dict, by_id: dict[str, dict]) -> tuple:
     """What _page_metadata takes from a node, as it would read it."""
-    published = _clean_jsonld(_first_str(node.get("datePublished")))
+    published = _jsonld_date(node)
     return (
-        _clean_jsonld(_first_str(node.get("headline")))
-        or _clean_jsonld(_first_str(node.get("name"))),
+        _jsonld_title(node),
         tuple(_names(node.get("author"), by_id)),
         tuple(_names(node.get("publisher"), by_id)),
         _normalize_date(published) if published else None,
         tuple(_doi_candidates(node)),
     )
+
+
+# A node's title and date as both _page_metadata and _work_signature read them.
+def _jsonld_title(node: dict) -> str | None:
+    headline = _clean_jsonld(_first_str(node.get("headline")))
+    return headline or _clean_jsonld(_first_str(node.get("name")))
+
+
+def _jsonld_date(node: dict) -> str | None:
+    return _clean_jsonld(_first_str(node.get("datePublished")))
 
 
 def _named_urls(node: dict) -> set[str]:
