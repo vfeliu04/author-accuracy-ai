@@ -307,15 +307,17 @@ _CONTENT_CHARSET = re.compile(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", re.I
 
 
 def _decode(raw: bytes, url: str) -> str:
-    """A UTF-16 byte-order mark decides first; then UTF-8 whenever the bytes
-    are valid UTF-8 (whatever the page claims); then the charset the page
-    declares, decoded the way a browser does; otherwise a loud failure — a
-    guessed encoding would silently corrupt text that is later quoted as
-    evidence."""
+    """A byte-order mark (UTF-16 or UTF-8) decides first, over any <meta>
+    charset; then UTF-8 whenever the bytes are valid UTF-8 (whatever the page
+    claims); then the charset the page declares, decoded the way a browser
+    does; otherwise a loud failure — a guessed encoding would silently corrupt
+    text that is later quoted as evidence."""
     if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return _decode_as(raw, "utf-16", "UTF-16 byte-order mark", url)
+    if raw.startswith(codecs.BOM_UTF8):
+        return _decode_as(raw[3:], "utf-8", "UTF-8 byte-order mark", url)
     try:
-        return raw.decode("utf-8-sig")
+        return raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
     label = _declared_charset(raw[:_CHARSET_SCAN_BYTES])
@@ -327,7 +329,7 @@ def _decode(raw: bytes, url: str) -> str:
         )
     try:
         info = codecs.lookup(label)
-    except LookupError as exc:
+    except (LookupError, ValueError) as exc:  # ValueError: a label holding a NUL byte
         raise _unknown_charset(url, label) from exc
     # codecs.lookup also resolves Python's byte-to-byte codecs (bz2, base64,
     # hex ...), which bytes.decode refuses with a LookupError, and a few text

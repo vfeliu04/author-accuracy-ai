@@ -1513,15 +1513,21 @@ def _header_labeled(body: bytes, charset: str):
         (_SPANISH_PAGE.encode("utf-8"), "iso-8859-1"),
         # An iso-8859-1 label reads as windows-1252: 0x80 €, 0x93/0x94 quotes, 0x97 dash, 0x9C œ.
         (_SPANISH_PAGE.encode("cp1252"), "iso-8859-1"),
+        # So does an ascii label (us-ascii resolves to Python's strict "ascii" codec).
+        (_SPANISH_PAGE.encode("cp1252"), "us-ascii"),
         # A UTF-16 byte-order mark beats the header, as in browsers and web._decode.
         (codecs.BOM_UTF16_LE + _SPANISH_PAGE.encode("utf-16-le"), "utf-8"),
         (codecs.BOM_UTF16_BE + _SPANISH_PAGE.encode("utf-16-be"), "iso-8859-1"),
+        # So does a UTF-8 one, and the mark itself is not part of the text.
+        (codecs.BOM_UTF8 + _SPANISH_PAGE.encode("utf-8"), "iso-8859-1"),
     ],
     ids=[
         "utf8-bytes-mislabeled",
         "cp1252-bytes-labeled-latin1",
+        "cp1252-bytes-labeled-ascii",
         "utf16le-bom-labeled-utf8",
         "utf16be-bom-labeled-latin1",
+        "utf8-bom-labeled-latin1",
     ],
 )
 def test_header_charset_decodes_like_a_browser_except_a_bom_or_valid_utf8_wins(body, charset):
@@ -1533,19 +1539,74 @@ def test_header_charset_decodes_like_a_browser_except_a_bom_or_valid_utf8_wins(b
     assert (result if isinstance(result, str) else _decode(result, fetched.url)) == _SPANISH_PAGE
 
 
+@pytest.mark.parametrize("charset", ["iso-8859-1", "windows-1252", "utf-8", None])
+def test_a_utf8_byte_order_mark_beats_the_header_even_with_a_stray_byte(charset):
+    """A UTF-8 byte-order mark decides the encoding (WHATWG), so one invalid byte
+    costs one replacement character — never a whole page read as windows-1252,
+    with every accent stored as mojibake and no warning."""
+    from authorai.jobs import _page_text
+    from authorai.web import _decode
+
+    fetched = _header_labeled(codecs.BOM_UTF8 + _SPANISH_PAGE.encode("utf-8") + b"\x92", charset)
+    result = _page_text(fetched)
+    text = result if isinstance(result, str) else _decode(result, fetched.url)
+    assert text == _SPANISH_PAGE + "�"
+
+
 @pytest.mark.parametrize(
     "charset",
     # Python codecs that are not text encodings (bytes.decode refuses them with a
-    # LookupError), and text codecs that refuse any byte ("undefined", "idna",
-    # "punycode" raise a UnicodeError even with errors="replace").
+    # LookupError), and text codecs that refuse these bytes ("undefined" and "idna"
+    # raise a UnicodeError even with errors="replace"). Not "punycode": it decodes
+    # only what follows the last hyphen, so a page with a hyphen after its first
+    # non-ASCII byte comes back as altered text — the documented residual of text
+    # codecs no browser knows.
     ["base64", "zlib_codec", "bz2_codec", "rot13", "hex", "quoted-printable", "uu"]
-    + ["undefined", "idna", "punycode"],
+    + ["undefined", "idna"],
 )
 def test_a_header_charset_naming_no_text_encoding_leaves_the_page_bytes_to_the_reader(charset):
     from authorai.jobs import _page_text
 
-    fetched = _header_labeled(_SPANISH_PAGE.encode("cp1252"), charset)
+    # A hyphen after the non-ASCII bytes, as nearly every real page has (a comment,
+    # a class name): a codec that refuses only some pages cannot pass by accident.
+    fetched = _header_labeled(_SPANISH_PAGE.encode("cp1252") + b"<!-- end-of-page -->", charset)
     assert _page_text(fetched) is fetched.body
+
+
+def test_a_header_charset_label_holding_a_nul_byte_leaves_the_page_bytes_to_the_reader():
+    """codecs.lookup raises ValueError, not LookupError, for such a label: without
+    this, the step failed with 'embedded null character', naming no link."""
+    from authorai.jobs import _page_text
+
+    fetched = _header_labeled(_SPANISH_PAGE.encode("cp1252"), "utf-8\x00")
+    assert _page_text(fetched) is fetched.body
+
+
+def test_a_page_whose_meta_charset_holds_a_nul_byte_fails_naming_the_link(
+    conn, tmp_path, monkeypatch
+):
+    """The REAL bounded reader: the run's error names the link as added (so the UI
+    flags its row) and reads as an unknown charset (so the failure hint matches)."""
+    from authorai import jobs as jobsmod
+
+    added = "https://example.org/latin"
+    body = (
+        '<html><head><meta charset="utf-8\x00"></head><body><p>Organización</p></body></html>'
+    ).encode("latin-1")
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, added)
+    poison_providers(monkeypatch)
+    monkeypatch.setattr(
+        jobsmod, "fetch_url", lambda u, s, **k: _fetched(u, body=body, charset=None)
+    )
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    with pytest.raises(ValueError) as raised:
+        step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+    assert str(raised.value) == f"{added} declares an unknown charset 'utf-8\\x00'"
+    assert list(planned.parent.iterdir()) == []
 
 
 def test_a_page_whose_header_charset_is_no_text_encoding_fails_naming_the_link(
