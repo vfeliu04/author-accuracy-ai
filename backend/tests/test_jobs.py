@@ -2,6 +2,8 @@
 
 import codecs
 import inspect
+import logging
+import os
 import time
 from pathlib import Path
 
@@ -902,7 +904,7 @@ def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_pat
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
 
     assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == (
-        "Read 2 documents (1 web page opened)"
+        "Read 2 documents (1 link opened)"
     )
     assert fetches == [url]
     parsed, provenance = load_snapshot(planned)
@@ -993,19 +995,88 @@ def test_retry_refetches_a_stored_page_that_will_not_load(
     label = step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
 
     assert fetches == [url]
-    assert label == "Read 2 documents (1 web page opened)"
+    assert label == "Read 2 documents (1 link opened)"
     assert loaded == ["fresh page text"]
 
 
+@pytest.fixture()
+def jobs_log(caplog):
+    """authorai loggers do not propagate to the root logger (log.setup_logger),
+    so caplog's handler is attached to the module logger itself."""
+    from authorai import jobs as jobsmod
+
+    jobsmod.logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        jobsmod.logger.removeHandler(caplog.handler)
+
+
+@pytest.mark.parametrize(
+    ("content", "mode", "reason"),
+    [
+        (b"", 0o644, "unreadable snapshot"),
+        (b'{"document": {"sections": [', 0o644, "unreadable snapshot"),
+        (
+            b'{"schema": 0, "document": {"title": null, "sections": []}, "provenance": {}}',
+            0o644,
+            "unsupported snapshot schema 0",
+        ),
+        pytest.param(
+            b"{}",
+            0o000,
+            "Permission denied",
+            marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file"),
+        ),
+    ],
+    ids=["zero-byte", "truncated", "other-schema", "not-readable"],
+)
+def test_a_refetched_stored_page_logs_why_it_would_not_load(
+    conn, tmp_path, monkeypatch, jobs_log, content, mode, reason
+):
+    """The page is deleted right after this warning, so the warning is the only
+    record of why it would not load (a cut-short write, an older schema, a file
+    the server may not read) and of which file it was."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection
+    from authorai.web import PageMetadata
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    planned.write_bytes(content)
+    planned.chmod(mode)
+
+    def fresh_page(html, *, url, timeout):
+        section = ParsedSection(title="", page=None, text="fresh page text")
+        return ParsedDocument(title=None, sections=[section], tables=[], figures=[]), PageMetadata()
+
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, s, **k: _fetched(u))
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", fresh_page)
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+    [record] = [r for r in jobs_log.records if "will not load" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert url in record.getMessage() and "fetching it again" in record.getMessage()
+    assert reason in record.getMessage()
+    assert str(planned) in record.getMessage()
+
+
 def test_an_unloadable_page_behind_a_completed_document_is_never_refetched(
-    conn, tmp_path, monkeypatch
+    conn, tmp_path, monkeypatch, jobs_log
 ):
     """A finished document's chunks were cut from its stored page, so that page
     stays exactly as it is (an old schema is meant to fail loudly in the evidence
-    pane): the conftest fetch_url poison is the guard here."""
+    pane): the conftest fetch_url poison is the guard here. Keeping it is logged,
+    with why it would not load, so the evidence pane's failure can be traced."""
     run_id = dbmod.create_run(conn)
     report = _completed_report(conn, tmp_path, run_id)
-    upload_id, planned = _link_upload(conn, tmp_path, "https://www.who.int/facts")
+    url = "https://www.who.int/facts"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
     planned.write_bytes(b"")
     doc_id = dbmod.add_document(conn, run_id, "SOURCE", upload_id=upload_id)
     dbmod.add_chunks(
@@ -1020,6 +1091,11 @@ def test_an_unloadable_page_behind_a_completed_document_is_never_refetched(
 
     assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Read 2 documents"
     assert planned.read_bytes() == b""
+    [record] = [r for r in jobs_log.records if "will not load" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert url in record.getMessage() and "fetching it again" not in record.getMessage()
+    assert "unreadable snapshot" in record.getMessage()
+    assert str(planned) in record.getMessage()
 
 
 def _stored_page(conn, tmp_path):
@@ -1135,7 +1211,7 @@ def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
 
     label = step_ingest(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, payload)
-    assert label == "Read 2 documents (1 web page opened, 1 already read)"
+    assert label == "Read 2 documents (1 link opened, 1 already read)"
     row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
     assert (row["source_type"], row["content_hash"]) == ("pdf", digest)
     assert row["url"] == "https://example.org/report.pdf"
@@ -1144,12 +1220,14 @@ def test_link_serving_a_pdf_becomes_a_pdf_upload_and_dedups_by_its_bytes(
     assert not planned.exists()
 
 
+@pytest.mark.parametrize("fail_on", ["part-write", "rename"])
 def test_a_fetched_pdf_that_fails_to_write_leaves_the_link_to_fetch_again(
-    conn, tmp_path, monkeypatch
+    conn, tmp_path, monkeypatch, fail_on
 ):
-    """Files first, then the row: a disk that fills while a fetched PDF is written
-    leaves the upload a link still to fetch, so the retry fetches again and ingests
-    a PDF that is really there. Row first would leave a PDF upload naming a missing
+    """Files first, then the row: a disk that fills while a fetched PDF is written,
+    or while its .part is renamed into place, leaves the upload a link still to
+    fetch, so the retry fetches again and ingests a PDF that is really there. A row
+    recorded before the file is in place would leave a PDF upload naming a missing
     file that is never fetched again — a run no retry can mend."""
     import errno
 
@@ -1162,6 +1240,7 @@ def test_a_fetched_pdf_that_fails_to_write_leaves_the_link_to_fetch_again(
     upload_id, planned = _link_upload(conn, tmp_path, url)
     fetches: list[str] = []
     ingested: list[bytes] = []
+    in_place_when_recorded: list[bool] = []
 
     def fake_fetch(u, settings, **kwargs):
         fetches.append(u)
@@ -1171,20 +1250,45 @@ def test_a_fetched_pdf_that_fails_to_write_leaves_the_link_to_fetch_again(
         ingested.append(Path(path).read_bytes())  # raises when the row names nothing
         return "doc"
 
-    real_write_bytes = Path.write_bytes
-    filled: list[str] = []
+    real_record_fetch = dbmod.record_fetch
 
-    def disk_fills_once(self, data):
-        if self.name.endswith(".part") and not filled:
-            filled.append(self.name)
-            raise OSError(errno.ENOSPC, "No space left on device", str(self))
-        return real_write_bytes(self, data)
+    def recording_record_fetch(conn_, upload_id_, *, path, **kwargs):
+        stored = Path(path)
+        in_place_when_recorded.append(stored.is_file() and stored.read_bytes() == body)
+        return real_record_fetch(conn_, upload_id_, path=path, **kwargs)
+
+    failed: list[str] = []
+
+    def disk_full(path):
+        failed.append(Path(path).name)
+        return OSError(errno.ENOSPC, "No space left on device", str(path))
+
+    if fail_on == "part-write":
+        real_write_bytes = Path.write_bytes
+
+        def fills_once(self, data):
+            if self.name.endswith(".part") and not failed:
+                raise disk_full(self)
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", fills_once)
+        failed_name = planned.stem + ".pdf.part"
+    else:
+        real_replace = os.replace
+
+        def fills_once(src, dst, *args, **kwargs):
+            if str(dst).endswith(".pdf") and not failed:
+                raise disk_full(dst)
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", fills_once)
+        failed_name = planned.stem + ".pdf"
 
     monkeypatch.setattr(jobsmod, "fetch_url", fake_fetch)
     monkeypatch.setattr(jobsmod, "ingest_pdf", fake_ingest_pdf)
+    monkeypatch.setattr(dbmod, "record_fetch", recording_record_fetch)
     monkeypatch.setattr(jobsmod, "OpenAIEmbedder", lambda *a, **k: object())
     monkeypatch.setattr(jobsmod, "AnthropicClient", lambda *a, **k: object())
-    monkeypatch.setattr(Path, "write_bytes", disk_fills_once)
     context = PipelineContext(conn, SETTINGS)
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
 
@@ -1194,12 +1298,14 @@ def test_a_fetched_pdf_that_fails_to_write_leaves_the_link_to_fetch_again(
 
     with pytest.raises(OSError, match="No space left"):
         step_ingest(context, run_id, payload)
-    assert filled == [planned.stem + ".pdf.part"]
+    assert failed == [failed_name]
     assert upload_row() == ("web", str(planned), None)
+    assert sorted(planned.parent.iterdir()) == []  # no .part left behind either
 
     step_ingest(context, run_id, payload)
     assert fetches == [url, url]
     assert ingested == [body]
+    assert in_place_when_recorded == [True]
     assert upload_row()[:2] == ("pdf", str(planned.with_suffix(".pdf")))
 
 
@@ -1413,24 +1519,65 @@ def test_reading_errors_keep_their_type_and_name_the_added_link_once(
         assert str(raised.value).count(added) == 1
 
 
-def test_step_ingest_label_counts_opened_pages_in_plain_words(conn, tmp_path, monkeypatch):
-    """Every link this attempt opened counts, pluralized; a zero count is left out."""
+def test_step_ingest_label_counts_opened_links_in_plain_words(conn, tmp_path, monkeypatch):
+    """Every link this attempt opened counts, whether it served a page or a PDF,
+    pluralized; a zero count is left out."""
     from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection
+    from authorai.web import PageMetadata
 
-    bodies = iter([b"%PDF-first", b"%PDF-second"])
-    monkeypatch.setattr(
-        jobsmod,
-        "fetch_url",
-        lambda u, s, **k: _fetched(u, body=next(bodies), content_type="application/pdf"),
-    )
+    bodies = {
+        "https://example.org/facts": b"<html><body>page</body></html>",
+        "https://example.org/b.pdf": b"%PDF-second",
+    }
+
+    def page(html, *, url, timeout):
+        section = ParsedSection(title="", page=None, text="page text")
+        return ParsedDocument(title=None, sections=[section], tables=[], figures=[]), PageMetadata()
+
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, s, **k: _fetched(u, body=bodies[u]))
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", page)
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
+    monkeypatch.setattr(jobsmod, "OpenAIEmbedder", lambda *a, **k: object())
+    monkeypatch.setattr(jobsmod, "AnthropicClient", lambda *a, **k: object())
     run_id = dbmod.create_run(conn)
     report = _completed_report(conn, tmp_path, run_id)
-    first, _ = _link_upload(conn, tmp_path, "https://example.org/a.pdf")
+    first, _ = _link_upload(conn, tmp_path, "https://example.org/facts")
     second, _ = _link_upload(conn, tmp_path, "https://example.org/b.pdf")
     payload = {"report_upload_id": report, "source_upload_ids": [first, second]}
     label = step_ingest(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, payload)
-    assert label == "Read 3 documents (2 web pages opened)"
+    assert label == "Read 3 documents (2 links opened)"
+    kinds = conn.execute(
+        "SELECT source_type FROM uploads WHERE id IN (?, ?) ORDER BY source_type", (first, second)
+    ).fetchall()
+    assert [row[0] for row in kinds] == ["pdf", "web"]
+
+
+def test_a_link_that_served_a_pdf_is_never_called_a_web_page(conn, tmp_path, monkeypatch):
+    """The label sits beside the sources list, which shows this source as a PDF."""
+    from authorai import jobs as jobsmod
+
+    monkeypatch.setattr(
+        jobsmod,
+        "fetch_url",
+        lambda u, s, **k: _fetched(u, body=b"%PDF-only", content_type="application/pdf"),
+    )
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: None)
+    monkeypatch.setattr(
+        jobsmod, "ingest_snapshot", lambda *a, **k: pytest.fail("a PDF link was read as a page")
+    )
+    monkeypatch.setattr(jobsmod, "OpenAIEmbedder", lambda *a, **k: object())
+    monkeypatch.setattr(jobsmod, "AnthropicClient", lambda *a, **k: object())
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, _ = _link_upload(conn, tmp_path, "https://example.org/only.pdf")
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    label = step_ingest(PipelineContext(conn, _dedup_settings(tmp_path)), run_id, payload)
+    row = conn.execute("SELECT source_type FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+    assert row[0] == "pdf"
+    assert "web page" not in label
+    assert label == "Read 2 documents (1 link opened)"
 
 
 def test_youtube_links_fail_loudly_until_supported(conn, tmp_path, monkeypatch):

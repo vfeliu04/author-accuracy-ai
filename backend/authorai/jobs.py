@@ -284,21 +284,36 @@ def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list
             raise ValueError(f"YouTube sources are not supported yet: {upload['url']!r}")
         path = Path(upload["path"])
         if path.exists():
-            if _snapshot_loads(path) or _has_finished_document(conn, run_id, upload_id):
+            problem = _snapshot_problem(path)
+            if problem is None:
                 continue
-            logger.warning("stored page for %s will not load — fetching it again", upload["url"])
+            if _has_finished_document(conn, run_id, upload_id):
+                logger.info(
+                    "stored page for %s will not load (%s) — kept: a finished document was cut "
+                    "from it",
+                    upload["url"],
+                    problem,
+                )
+                continue
+            # The page is deleted next, so this line is the only record of why.
+            logger.warning(
+                "stored page for %s will not load (%s) — fetching it again", upload["url"], problem
+            )
             path.unlink()
         _fetch_link(context, upload)
         fetched += 1
     return fetched
 
 
-def _snapshot_loads(path: Path) -> bool:
+def _snapshot_problem(path: Path) -> str | None:
+    """Why a stored page will not load — load_snapshot's message, which names the
+    file and tells a cut-short write from an older schema or an unreadable file —
+    or None when it loads."""
     try:
         load_snapshot(path)
-    except ValueError:
-        return False
-    return True
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 def _has_finished_document(conn: sqlite3.Connection, run_id: str, upload_id: str) -> bool:
@@ -426,8 +441,8 @@ def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:
     # Shown verbatim under the finished step, so it counts in the reader's words.
     label = f"Read {len(upload_ids)} documents"
     notes = []
-    if fetched:
-        notes.append(f"{fetched} web {'page' if fetched == 1 else 'pages'} opened")
+    if fetched:  # links, not pages: a link that served a PDF counts too
+        notes.append(f"{fetched} {'link' if fetched == 1 else 'links'} opened")
     if reused:
         notes.append(f"{reused} already read")
     return f"{label} ({', '.join(notes)})" if notes else label
