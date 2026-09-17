@@ -4,11 +4,11 @@
 type ErrorHint = {
   match: RegExp;
   hint: (found: RegExpExecArray) => string;
-  // A link failure names the link, so the reader knows which one to fix.
-  aboutLink?: boolean;
-  // "HTTP 404" and "timed out" are generic network phrasing; they describe a
-  // link only when the message names one.
-  needsLink?: boolean;
+  // "prefix": a link failure names the link, so the reader knows which one to
+  // fix. "required": the same, and the hint is skipped when the message names
+  // no link — "HTTP 404" and "timed out" are generic network phrasing that
+  // describe a link only when the message names one.
+  link?: "prefix" | "required";
 };
 
 const ERROR_HINTS: ErrorHint[] = [
@@ -37,32 +37,30 @@ const ERROR_HINTS: ErrorHint[] = [
   },
   {
     match: /private or reserved network address/i,
-    aboutLink: true,
+    link: "prefix",
     hint: () => "That link points to a private network address, so it can't be opened."
   },
   {
     match: /unsupported content type/i,
-    aboutLink: true,
+    link: "prefix",
     hint: () => "That link isn't a web page or PDF."
   },
   {
     match: /no readable article text/i,
-    aboutLink: true,
+    link: "prefix",
     hint: () =>
       "That page has no readable text. Pages that need JavaScript to show their content can't be read."
   },
   {
     match: /too large or complex/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "That page is too large or complex to read in time."
   },
   // Any other way reading an arrived page fails: the reader stopped, or raised
   // something unexpected. Its inner text must not pick a hint below.
   {
     match: /could not be read: /,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () =>
       "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
   },
@@ -71,71 +69,60 @@ const ERROR_HINTS: ErrorHint[] = [
   // redirect with no address also names its HTTP status.
   {
     match: /could not be resolved|resolved to no addresses|returned an unparseable address/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () =>
       "That site couldn't be found. Check the link for typos, or the internet connection."
   },
   // A certificate failure is also a ConnectError, so it is recognized first.
   {
     match: /CERTIFICATE_VERIFY_FAILED|certificate verify failed|\[SSL[:\]]|_ssl\.c/i,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "A secure connection to the site couldn't be established."
   },
   {
     match: /failed: \w*(?:Connect|Read|Write|Protocol|Network|Close)Error\b/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "The site couldn't be reached, or it dropped the connection."
   },
   {
     match: /exceeds the [\d,]+-byte limit/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "That page is too large to read."
   },
   {
     match: /more than \d+ redirects/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "That link redirects too many times to follow."
   },
   {
     match:
       /refused redirect|invalid redirect Location|redirected to an invalid URL|redirect without a Location/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "That link redirects to an address that can't be opened."
   },
   {
     match: /body is not a PDF/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "The site says that link is a PDF, but the file it sent isn't one."
   },
   {
     match: /unsupported (?:stacked )?Content-Encoding|\bDecodingError\b|malformed Content-Length/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "The site sent that page in a form that can't be read."
   },
   {
     match: /is not valid UTF-8|declares an unknown charset/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "That page's text is in an encoding that can't be read."
   },
   {
     match: /\bHTTP (\d{3})\b/,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: (found) => `The site returned an error (${found[1]}).`
   },
   {
     match: /timed out|deadline/i,
-    aboutLink: true,
-    needsLink: true,
+    link: "required",
     hint: () => "The site took too long to respond."
   }
 ];
@@ -206,19 +193,24 @@ function hostOf(link: string): string {
   return authority.split(":", 1)[0];
 }
 
-// The message with every link blanked out, so words in an address
-// (".../billing", ".../batch-jobs", ".../deadlines") never pick a translation.
-// The server also repeats a link's host on its own, in quotes
-// ("'billing.example.org' could not be resolved"), so that copy goes too.
-// `named` is namedLinks(error): replace visits the same matches in the same order.
-function withoutLinks(error: string, named: readonly NamedLink[]): string {
-  let index = 0;
-  let words = error.replace(LINK, (raw) => ` ${raw.slice(named[index++].link.length)}`);
+// The links a message names (as namedLinks reads them), and the message with
+// every link blanked out, so words in an address (".../billing",
+// ".../batch-jobs", ".../deadlines") never pick a translation. The server also
+// repeats a link's host on its own, in quotes ("'billing.example.org' could
+// not be resolved"), so that copy goes too. One pass: each link is trimmed
+// once, where it is blanked.
+function scanLinks(error: string): { named: NamedLink[]; words: string } {
+  const named: NamedLink[] = [];
+  let words = error.replace(LINK, (raw) => {
+    const found = trimLink(raw);
+    named.push(found);
+    return ` ${raw.slice(found.link.length)}`;
+  });
   for (const { link } of named) {
     const host = hostOf(link);
     if (host !== "") words = words.split(`'${host}'`).join(" ");
   }
-  return words;
+  return { named, words };
 }
 
 function appearsWhole(error: string, link: string, links: readonly string[]): boolean {
@@ -258,15 +250,14 @@ export function linksNamedIn(error: string, links: readonly string[]): string[] 
 
 export function humanizeError(error: string | null): string | null {
   if (!error) return null;
-  const named = namedLinks(error);
+  const { named, words } = scanLinks(error);
   const first = named[0];
   const shown = first ? `${first.link}${first.cut ? "…" : ""}` : null;
-  const words = withoutLinks(error, named);
-  for (const { match, hint, aboutLink, needsLink } of ERROR_HINTS) {
+  for (const { match, hint, link } of ERROR_HINTS) {
     const found = match.exec(words);
-    if (found === null || (needsLink && shown === null)) continue;
+    if (found === null || (link === "required" && shown === null)) continue;
     const sentence = hint(found);
-    return aboutLink && shown !== null ? `${shown} — ${sentence}` : sentence;
+    return link !== undefined && shown !== null ? `${shown} — ${sentence}` : sentence;
   }
   return null;
 }
