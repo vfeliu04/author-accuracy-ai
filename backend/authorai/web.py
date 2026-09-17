@@ -45,8 +45,9 @@ from datetime import date
 from html import unescape
 from html.parser import HTMLParser
 from multiprocessing import connection, resource_tracker
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
+import httpx
 import trafilatura
 from lxml import etree
 
@@ -878,25 +879,39 @@ def _named_urls(node: dict) -> set[str]:
 # Query parameters that record how a reader arrived, not which page; any other
 # query is part of the address (?id=2 is not the page ?id=1 describes).
 _TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid")
+_PERCENT_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
+# What a path keeps as written. "%" is kept too: an existing escape is never
+# decoded, so an escaped "%2F" stays distinct from the separator "/".
+_PATH_SAFE = "/%:@!$&'()*+,;=-._~"
 
 
 def _comparable_url(value: str) -> str:
     """The address without what a pasted link adds to the canonical one: the
     scheme, a leading www., host case, a fragment, a trailing slash and
-    tracking parameters."""
+    tracking parameters — spelled as the fetched URL is: an international host
+    in punycode (encoded as httpx encodes the link), the path's non-ASCII
+    characters and its escapes as upper-case %XX. A CMS writes its own url
+    decoded, or with lower-case escapes."""
     try:
         parts = urlsplit(value.strip())
         host = (parts.hostname or "").removeprefix("www.")
-    except ValueError:  # a JSON-LD value that is not a URL at all
+        if not host.isascii():
+            host = httpx.URL(scheme="https", host=host).raw_host.decode("ascii")
+        path = _PERCENT_ESCAPE.sub(
+            lambda escape: escape[0].upper(), quote(parts.path, safe=_PATH_SAFE)
+        )
+        query = urlencode(
+            [
+                (key, item)
+                for key, item in parse_qsl(parts.query, keep_blank_values=True)
+                if not key.lower().startswith(_TRACKING_PARAMS)
+            ]
+        )
+    # Not a URL at all, a host IDNA refuses, or text UTF-8 cannot encode (a
+    # lone surrogate): no page's address, compared as written.
+    except (ValueError, httpx.InvalidURL):
         return value.strip()
-    query = urlencode(
-        [
-            (key, item)
-            for key, item in parse_qsl(parts.query, keep_blank_values=True)
-            if not key.lower().startswith(_TRACKING_PARAMS)
-        ]
-    )
-    return host + parts.path.rstrip("/") + (f"?{query}" if query else "")
+    return host + path.rstrip("/") + (f"?{query}" if query else "")
 
 
 def _types(node: dict) -> set[str]:

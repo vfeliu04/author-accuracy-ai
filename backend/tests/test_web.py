@@ -854,6 +854,56 @@ def test_the_work_node_that_names_this_url_is_the_page():
     assert _page_metadata(markup, url=url + "?utm_term=y&id=1").authors == ["Kim Osei"]
 
 
+def test_the_page_node_match_ignores_how_the_address_is_encoded():
+    # The fetched URL is spelled the way the link check spells it: an
+    # international host in punycode, a typed non-ASCII path as upper-case %XX,
+    # an escape pasted in lower case kept as pasted. A CMS writes its own url
+    # decoded, or with lower-case escapes (WordPress slugs). With a cited work
+    # also listed, the page's own node must still be found, in either order.
+    cited = {
+        "@type": "ScholarlyArticle",
+        "headline": "Groundwater in Iberia",
+        "author": {"@type": "Person", "name": "A. Researcher"},
+    }
+    for fetched, declared in (
+        ("https://diario.example/agua-en-espa%C3%B1a/", "https://diario.example/agua-en-españa/"),
+        (
+            "https://diario.example/agua-en-espa%C3%B1a/",
+            "https://diario.example/agua-en-espa%c3%b1a",
+        ),
+        ("https://diario.example/agua-en-espa%c3%b1a/", "https://diario.example/agua-en-españa/"),
+        ("https://xn--bcher-kva.example/agua", "https://www.Bücher.example/agua/"),
+        ("https://xn--strae-oqa.example/agua", "https://straße.example/agua"),
+    ):
+        own = {
+            "@type": "NewsArticle",
+            "headline": "Agua en España",
+            "url": declared,
+            "author": {"@type": "Person", "name": "Lucía Pérez"},
+        }
+        for blocks in ((own, cited), (cited, own)):
+            metadata = _page_metadata(_markup(*map(_ld, blocks)), url=fetched)
+            assert (metadata.title, metadata.authors) == ("Agua en España", ["Lucía Pérez"]), (
+                fetched,
+                declared,
+            )
+
+    # A different address stays different: "espana" is not "españa", and an
+    # escaped slash is not a path separator.
+    for fetched, declared in (
+        ("https://diario.example/agua-en-espa%C3%B1a/", "https://diario.example/agua-en-espana/"),
+        ("https://diario.example/agua/en", "https://diario.example/agua%2Fen"),
+    ):
+        own = {"@type": "NewsArticle", "headline": "Agua", "url": declared}
+        markup = _markup(_ld(own), _ld(cited))
+        assert _page_metadata(markup, url=fetched).title is None, declared
+
+    # A declared url no text encoding can spell is simply not this page's.
+    broken = {"@type": "NewsArticle", "headline": "A", "url": "https://a.example/x?q=\ud800"}
+    markup = _markup(_ld(broken), _ld(cited))
+    assert _page_metadata(markup, url="https://a.example/x").title is None
+
+
 def test_organization_authors_are_not_personal_authors_but_can_name_the_publisher():
     """Authors are personal names, as the PDF path extracts them, so an institution
     credited as author earns no author points. It names the publisher only when the
