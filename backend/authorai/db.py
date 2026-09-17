@@ -868,12 +868,9 @@ def add_upload(
 ) -> str:
     check_source_type(source_type)
     upload_id = new_id()
+    spec = UploadSpec(kind, file_name, path, content_hash, source_type, url)
     with conn:
-        conn.execute(
-            "INSERT INTO uploads(id, kind, file_name, path, content_hash, source_type, url,"
-            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (upload_id, kind, file_name, path, content_hash, source_type, url, now_iso()),
-        )
+        _insert_upload(conn, upload_id, spec, now_iso())
     return upload_id
 
 
@@ -1143,6 +1140,25 @@ class UploadSpec:
     url: str | None = None
 
 
+def _insert_upload(
+    conn: sqlite3.Connection, upload_id: str, spec: UploadSpec, created_at: str
+) -> None:
+    conn.execute(
+        "INSERT INTO uploads(id, kind, file_name, path, content_hash, source_type, url,"
+        " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            upload_id,
+            spec.kind,
+            spec.file_name,
+            spec.path,
+            spec.content_hash,
+            spec.source_type,
+            spec.url,
+            created_at,
+        ),
+    )
+
+
 def create_run_with_uploads_and_job(
     conn: sqlite3.Connection,
     uploads: list[UploadSpec],
@@ -1168,20 +1184,7 @@ def create_run_with_uploads_and_job(
         )
         for spec in uploads:
             upload_id = new_id()
-            conn.execute(
-                "INSERT INTO uploads(id, kind, file_name, path, content_hash, source_type, url,"
-                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    upload_id,
-                    spec.kind,
-                    spec.file_name,
-                    spec.path,
-                    spec.content_hash,
-                    spec.source_type,
-                    spec.url,
-                    now,
-                ),
-            )
+            _insert_upload(conn, upload_id, spec, now)
             if spec.kind == "REPORT":
                 report_upload_id = upload_id
             else:
