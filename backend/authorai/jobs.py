@@ -46,7 +46,13 @@ from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
-from authorai.web import ExtractionTimeoutError, ThinPageError, browser_codec, extract_web_bounded
+from authorai.web import (
+    ExtractionTimeoutError,
+    ThinPageError,
+    _decode_as,
+    browser_codec,
+    extract_web_bounded,
+)
 
 logger = setup_logger(__name__)
 
@@ -416,7 +422,11 @@ def _page_text(fetched: FetchedResponse) -> bytes | str:
     if codec is None:
         return fetched.body  # a byte-to-byte codec: no charset a browser knows either
     try:
-        return fetched.body.decode(codec, errors="replace")
+        # Replacement characters are logged naming the page, as on the
+        # byte-order-mark and <meta> charset paths.
+        return _decode_as(
+            fetched.body, codec, f"HTTP charset {fetched.charset!r}", fetched.final_url
+        )
     except UnicodeError:
         return fetched.body  # a text codec that refuses any byte ("undefined", "idna")
 

@@ -1675,6 +1675,41 @@ def test_a_utf8_byte_order_mark_beats_the_header_even_with_a_stray_byte(charset)
 
 
 @pytest.mark.parametrize(
+    "stray, expected, warning",
+    [
+        (b"", _SPANISH_PAGE, None),
+        # 0x81 and 0x8D are undefined in windows-1252: each becomes U+FFFD.
+        (
+            b"\x81<p>fin</p>\x8d",
+            _SPANISH_PAGE + "�<p>fin</p>�",
+            "https://www.salud.example.gob/agua/2026: 2 undecodable byte sequence(s) "
+            "replaced (HTTP charset 'windows-1252')",
+        ),
+    ],
+    ids=["clean", "two-stray-bytes"],
+)
+def test_a_header_charset_decode_logs_the_bytes_it_replaced(
+    jobs_log, web_log, stray, expected, warning
+):
+    """The HTTP charset path warns about replacement characters like the
+    byte-order-mark and <meta> charset paths do, naming the page where the fetch
+    ended — never a silent U+FFFD in text later quoted as evidence. The message
+    is web._decode_as's, so both loggers are captured (one caplog): a second copy
+    from jobs would be counted too."""
+    from authorai.jobs import _page_text
+
+    fetched = _fetched(
+        "https://www.salud.example.gob/agua",
+        final_url="https://www.salud.example.gob/agua/2026",
+        body=_SPANISH_PAGE.encode("cp1252") + stray,
+        charset="windows-1252",
+    )
+    assert _page_text(fetched) == expected
+    assert [record.getMessage() for record in jobs_log.records] == ([warning] if warning else [])
+    assert all(record.levelno == logging.WARNING for record in jobs_log.records)
+
+
+@pytest.mark.parametrize(
     "charset",
     # Python codecs that are not text encodings (bytes.decode refuses them with a
     # LookupError), and text codecs that refuse these bytes ("undefined" and "idna"
