@@ -56,6 +56,7 @@ def _settings(**overrides) -> Settings:
         "fetch_max_bytes": 10_000,
         "max_upload_bytes": 50_000,
         "fetch_max_redirects": 5,
+        "fetch_user_agent": DEFAULT_USER_AGENT,
     }
     values.update(overrides)
     return Settings(**values)
@@ -100,6 +101,8 @@ def clock(monkeypatch):
 def test_fetch_settings_have_the_documented_defaults_and_accept_overrides():
     # The declared defaults, not this machine's values: a backend/.env or environment
     # that sets AUTHORAI_FETCH_* (the documented overrides) must not turn the suite red.
+    # The offline tests below build their settings with _settings(), which passes
+    # every fetch setting explicitly.
     defaults = {name: field.default for name, field in Settings.model_fields.items()}
     assert defaults["fetch_timeout_seconds"] == 30.0
     assert defaults["fetch_max_bytes"] == 10_000_000
