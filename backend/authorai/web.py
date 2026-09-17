@@ -335,21 +335,31 @@ def _decode(raw: bytes, url: str) -> str:
         info = codecs.lookup(label)
     except (LookupError, ValueError) as exc:  # ValueError: a label holding a NUL byte
         raise _unknown_charset(url, label) from exc
-    # codecs.lookup also resolves Python's byte-to-byte codecs (bz2, base64,
-    # hex ...), which bytes.decode refuses with a LookupError, and a few text
-    # codecs refuse any byte at all ("undefined", "idna"): either is a charset
-    # no browser knows, and neither failure names the page on its own.
-    if not info._is_text_encoding:
+    # A byte-to-byte codec (browser_codec) and a text codec that refuses any
+    # byte ("undefined", "idna") are both charsets no browser knows, and neither
+    # failure names the page on its own.
+    codec = browser_codec(info)
+    if codec is None:
         raise _unknown_charset(url, label)
-    codec = info.name
-    if codec in ("iso8859-1", "ascii"):
-        codec = "cp1252"  # WHATWG: browsers decode these labels as windows-1252
-    elif codec.startswith("utf-16"):
+    if codec.startswith("utf-16"):
         codec = "utf-8"  # WHATWG: a declaration readable as ASCII cannot mean UTF-16
     try:
         return _decode_as(raw, codec, f"declared charset {label!r}", url)
     except UnicodeError as exc:
         raise _unknown_charset(url, label) from exc
+
+
+def browser_codec(info: codecs.CodecInfo) -> str | None:
+    """The codec a browser decodes a looked-up charset label with, or None when
+    the label names no text encoding: codecs.lookup also resolves Python's
+    byte-to-byte codecs (bz2, base64, hex ...), which bytes.decode refuses with
+    a LookupError. The one place both the page's own declaration (_decode) and
+    the HTTP Content-Type charset (jobs._page_text) are read the browser's way."""
+    if not info._is_text_encoding:
+        return None
+    if info.name in ("iso8859-1", "ascii"):
+        return "cp1252"  # WHATWG: browsers decode these labels as windows-1252
+    return info.name
 
 
 def _unknown_charset(url: str, label: str) -> ValueError:

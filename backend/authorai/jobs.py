@@ -34,7 +34,7 @@ from authorai import db as dbmod
 from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.fetch import FetchedResponse, _shown, fetch_url
+from authorai.fetch import FetchedResponse, _where, fetch_url
 from authorai.ingest import (
     FIGURE_DESCRIPTION_PROMPT,
     ingest_pdf,
@@ -46,7 +46,7 @@ from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
-from authorai.web import ExtractionTimeoutError, ThinPageError, extract_web_bounded
+from authorai.web import ExtractionTimeoutError, ThinPageError, browser_codec, extract_web_bounded
 
 logger = setup_logger(__name__)
 
@@ -398,7 +398,7 @@ def _redirected(exc: Exception, final_url: str, added_url: str) -> Exception:
     hints still match — built from the known class, never type(exc)(...), since a
     ValueError subclass such as UnicodeDecodeError takes other arguments."""
     kind = next(cls for cls in _READING_ERRORS if isinstance(exc, cls))
-    return kind(f"{_shown(final_url)} (redirected from {_shown(added_url)}): {exc}")
+    return kind(f"{_where(added_url, final_url)}: {exc}")
 
 
 def _page_text(fetched: FetchedResponse) -> bytes | str:
@@ -421,13 +421,9 @@ def _page_text(fetched: FetchedResponse) -> bytes | str:
         info = codecs.lookup(fetched.charset)
     except (LookupError, ValueError):  # ValueError: a label holding a NUL byte
         return fetched.body  # an unknown label: the page's own declaration decides
-    # codecs.lookup also resolves byte-to-byte codecs (base64, bz2 ...), which
-    # bytes.decode refuses with a LookupError: no charset a browser knows either.
-    if not info._is_text_encoding:
-        return fetched.body
-    codec = info.name
-    if codec in ("iso8859-1", "ascii"):
-        codec = "cp1252"  # WHATWG: browsers decode these labels as windows-1252
+    codec = browser_codec(info)
+    if codec is None:
+        return fetched.body  # a byte-to-byte codec: no charset a browser knows either
     try:
         return fetched.body.decode(codec, errors="replace")
     except UnicodeError:
