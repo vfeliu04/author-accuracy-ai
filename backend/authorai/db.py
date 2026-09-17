@@ -32,6 +32,8 @@ DOC_KINDS = ("SOURCE", "REPORT")
 # widen its vocabulary later. Every writer goes through add_upload or
 # create_run_with_uploads_and_job, and both call check_source_type first.
 SOURCE_TYPES = ("pdf", "web", "image", "youtube")
+# Source types whose content is fetched from a link by the ingest step itself.
+LINK_SOURCE_TYPES = ("web", "youtube")
 
 
 def check_source_type(source_type: str) -> None:

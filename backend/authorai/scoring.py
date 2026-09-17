@@ -415,7 +415,7 @@ def score_run(
     try:
         for document in scorable:
             metadata, title_search = None, True
-            if document["source_type"] in ("web", "youtube"):
+            if document["source_type"] in dbmod.LINK_SOURCE_TYPES:
                 # The page declared its own metadata at ingest; a model call is the
                 # fallback only when it declared nothing beyond a title.
                 provenance = json.loads(document["metadata"]).get("provenance") or {}

@@ -338,7 +338,7 @@ _IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image
 def _media_type(source_type: str, path: Path) -> str:
     """What the stored artifact is: the PDF, the image, or the JSON snapshot a
     web page or transcript was stored as (the evidence pane renders it)."""
-    if source_type in ("web", "youtube"):
+    if source_type in dbmod.LINK_SOURCE_TYPES:
         return "application/json"
     if source_type == "image":
         return _IMAGE_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")

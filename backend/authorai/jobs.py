@@ -220,7 +220,7 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
     if _maybe_reuse_ingest(context, run_id, upload):
         return True
 
-    if upload["source_type"] in LINK_SOURCE_TYPES:
+    if upload["source_type"] in dbmod.LINK_SOURCE_TYPES:
         # A link's page was stored by the fetch pre-pass; ingesting it needs no
         # figure captions (a stored page carries sections only).
         ingest_snapshot(
@@ -260,10 +260,6 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
     return False
 
 
-# Upload source types whose content is fetched by the ingest step itself.
-LINK_SOURCE_TYPES = ("web", "youtube")
-
-
 def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list[str]) -> int:
     """Fetch every link whose page is not stored yet, BEFORE any document is
     processed: a link that cannot be read fails the run in seconds, not after
@@ -278,7 +274,7 @@ def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list
     fetched = 0
     for upload_id in upload_ids:
         upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
-        if upload is None or upload["source_type"] not in LINK_SOURCE_TYPES:
+        if upload is None or upload["source_type"] not in dbmod.LINK_SOURCE_TYPES:
             continue  # an unknown upload id is reported loudly by _reconcile_upload
         if upload["source_type"] == "youtube":
             raise ValueError(f"YouTube sources are not supported yet: {upload['url']!r}")
