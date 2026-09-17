@@ -129,7 +129,7 @@ trafilatura runs in fast mode, and its full extraction cascade runs only when fa
 | Field | Precedence |
 | --- | --- |
 | title | `citation_title` > JSON-LD `headline` > JSON-LD `name` > `og:title` > `<title>` |
-| authors | `citation_author` (all) > JSON-LD personal author names > `author` meta (one, unless the page declares that name as an organization: a JSON-LD Organization author, a JSON-LD publisher not typed `Person`, `citation_publisher`, or `og:site_name`, compared case-insensitively) |
+| authors | `citation_author` (all) > JSON-LD personal author names > `author` meta (one, unless the page declares that name as an organization: a JSON-LD Organization author, a JSON-LD publisher not typed `Person`, or `citation_publisher`, compared case-insensitively; `og:site_name` has no type and declares nothing, so a personal site named after its author keeps that author — and an institution whose `author` meta matches only its `og:site_name` counts as a personal author too) |
 | publisher | `citation_publisher` > JSON-LD `publisher` name > `og:site_name` > JSON-LD Organization author name |
 | publication date | `citation_publication_date` > `citation_date` > JSON-LD `datePublished` > `article:published_time` |
 | DOI | `citation_doi` > JSON-LD `identifier` or `sameAs` DOI |

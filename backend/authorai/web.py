@@ -744,7 +744,8 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
 
     title       citation_title > JSON-LD headline/name > og:title > <title>
     authors     citation_author (all) > JSON-LD personal author names > meta author
-                (one, unless it names an organization the page declares)
+                (one, unless it names an organization the page declares;
+                og:site_name alone declares none)
     publisher   citation_publisher > JSON-LD publisher name > og:site_name
                 > JSON-LD Organization author name
     date        citation_publication_date > citation_date > JSON-LD datePublished
@@ -777,11 +778,14 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
     title = (
         first("citation_title") or _jsonld_title(work) or first("og:title") or _clean(parser.title)
     )
-    # The untyped <meta name=author> carries no Person/Organization type: a name
-    # the page gives an organization or the site elsewhere is not a personal
-    # author. A publisher typed Person names no organization; og:site_name has
-    # no type at all, so a personal site titled with its author's own name
-    # loses that meta author (code cannot tell the two names apart).
+    # The untyped <meta name=author> carries no Person/Organization type, so only
+    # a name the page itself declares for an organization excludes it: a JSON-LD
+    # author typed as an organization, a JSON-LD publisher not typed Person, or
+    # citation_publisher. og:site_name has no type either and is no such
+    # declaration, so a personal site named after its author keeps that author.
+    # The accepted cost (code cannot tell the two names apart): an institution
+    # whose meta author matches only its og:site_name, with no other
+    # organization signal, counts as a personal author too.
     organization_authors = _names(work.get("author"), by_id, kind="organization")
     organizations = {
         name.casefold()
@@ -789,7 +793,6 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
             *organization_authors,
             *_names(work.get("publisher"), by_id, kind="not_person"),
             *meta.get("citation_publisher", []),
-            *meta.get("og:site_name", []),
         )
     }
     meta_authors = [n for n in meta.get("author", [])[:1] if n.casefold() not in organizations]

@@ -1003,10 +1003,11 @@ def test_organization_authors_are_not_personal_authors_but_can_name_the_publishe
 
 def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_personal_author():
     # The untyped <meta name=author> fallback carries no Person/Organization
-    # type. A name the page itself gives an organization or the site elsewhere
-    # — a JSON-LD Organization author, a JSON-LD publisher not typed Person,
-    # citation_publisher, og:site_name — is not taken as a personal author (it
-    # would earn author points no PDF could).
+    # type. A name the page itself declares for an organization — a JSON-LD
+    # Organization author, a JSON-LD publisher not typed Person,
+    # citation_publisher — is not taken as a personal author (it would earn
+    # author points no PDF could). og:site_name alone is no such declaration:
+    # test_a_personal_site_named_after_its_author_keeps_its_meta_author.
     typed = _markup(
         '<meta name="author" content="World Health Organization">',
         _ld(
@@ -1018,13 +1019,6 @@ def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_persona
         ),
     )
     metadata = _page_metadata(typed, url="https://example.org/o")
-    assert (metadata.authors, metadata.publisher) == ([], "World Health Organization")
-
-    site = _markup(
-        '<meta name="author" content="world health organization">',  # compared casefolded
-        '<meta property="og:site_name" content="World Health Organization">',
-    )
-    metadata = _page_metadata(site, url="https://example.org/s")
     assert (metadata.authors, metadata.publisher) == ([], "World Health Organization")
 
     jsonld_publisher = _markup(
@@ -1041,7 +1035,7 @@ def test_a_meta_author_naming_an_organization_the_page_declares_is_not_a_persona
     assert (metadata.authors, metadata.publisher) == ([], "Daily Water")
 
     citation = _markup(
-        '<meta name="author" content="daily water">',
+        '<meta name="author" content="daily water">',  # compared casefolded
         '<meta name="citation_publisher" content="Daily Water">',
     )
     metadata = _page_metadata(citation, url="https://example.org/c")
@@ -1096,21 +1090,34 @@ def test_a_person_typed_publisher_does_not_erase_the_matching_meta_author():
     assert _page_metadata(untyped, url=url).authors == []
 
 
-def test_a_personal_site_named_after_its_author_loses_its_meta_author():
-    # The known cost of counting og:site_name as a name the page declares for
-    # an organization: code cannot tell "Jane Whitfield" from "World Health
-    # Organization", and the rule keeps an institution's own name from earning
-    # personal-author points no PDF could. Only the untyped meta author is
-    # affected; a typed JSON-LD Person author is kept.
+def test_a_personal_site_named_after_its_author_keeps_its_meta_author():
+    # og:site_name carries no Person/Organization type, so it alone is no
+    # evidence that the untyped meta author names an organization: a personal
+    # site titled with its author's own name keeps that author. A typed JSON-LD
+    # Person author is kept as before.
     tags = (
         '<meta name="author" content="Jane Whitfield">',
         '<meta property="og:site_name" content="Jane Whitfield">',
     )
     url = "https://janewhitfield.example/p"
     metadata = _page_metadata(_markup(*tags), url=url)
-    assert (metadata.authors, metadata.publisher) == ([], "Jane Whitfield")
+    assert (metadata.authors, metadata.publisher) == (["Jane Whitfield"], "Jane Whitfield")
     person = _ld({"@type": "BlogPosting", "author": {"@type": "Person", "name": "Jane Whitfield"}})
     assert _page_metadata(_markup(*tags, person), url=url).authors == ["Jane Whitfield"]
+
+    # The accepted cost: code cannot tell "Jane Whitfield" from "World Health
+    # Organization", so an institution whose untyped meta author matches only
+    # its og:site_name, with no other organization signal, counts as a
+    # personal author too — chosen over dropping real personal authors.
+    institution = _markup(
+        '<meta name="author" content="World Health Organization">',
+        '<meta property="og:site_name" content="World Health Organization">',
+    )
+    metadata = _page_metadata(institution, url="https://example.org/s")
+    assert (metadata.authors, metadata.publisher) == (
+        ["World Health Organization"],
+        "World Health Organization",
+    )
 
 
 def test_first_doi_source_wins_and_an_invalid_one_becomes_none():
