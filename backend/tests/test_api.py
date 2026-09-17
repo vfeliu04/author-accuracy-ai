@@ -383,6 +383,26 @@ def test_delete_run_removes_every_trace(tmp_path):
     assert all(not Path(p).exists() for p in target_files)
 
 
+def test_delete_run_removes_its_figure_directory_and_no_other_runs(tmp_path):
+    """Figure images are not uploads (no upload row names them): deletion removes
+    the run's figure directory as a whole, and leaves another run's in place."""
+    settings = _settings(tmp_path)
+    keeper = _seed_scored_run(settings)
+    target = _seed_scored_run(settings)
+    figures = {}
+    for run_id in (keeper, target):
+        png = settings.run_figures_dir(run_id) / dbmod.new_id() / "fig-1.png"
+        png.parent.mkdir(parents=True)
+        png.write_bytes(b"\x89PNG\r\n\x1a\n figure bytes")
+        figures[run_id] = png
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        assert client.delete(f"/api/runs/{target}", headers=AUTH).status_code == 204
+
+    assert not settings.run_figures_dir(target).exists()
+    assert figures[keeper].read_bytes() == b"\x89PNG\r\n\x1a\n figure bytes"
+
+
 def test_delete_refuses_active_jobs_and_unknown_runs(tmp_path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
