@@ -1266,22 +1266,22 @@ def test_a_fetched_pdf_that_fails_to_write_leaves_the_link_to_fetch_again(
     if fail_on == "part-write":
         real_write_bytes = Path.write_bytes
 
-        def fills_once(self, data):
+        def part_write_fills_once(self, data):
             if self.name.endswith(".part") and not failed:
                 raise disk_full(self)
             return real_write_bytes(self, data)
 
-        monkeypatch.setattr(Path, "write_bytes", fills_once)
+        monkeypatch.setattr(Path, "write_bytes", part_write_fills_once)
         failed_name = planned.stem + ".pdf.part"
     else:
         real_replace = os.replace
 
-        def fills_once(src, dst, *args, **kwargs):
+        def replace_fills_once(src, dst, *args, **kwargs):
             if str(dst).endswith(".pdf") and not failed:
                 raise disk_full(dst)
             return real_replace(src, dst, *args, **kwargs)
 
-        monkeypatch.setattr(os, "replace", fills_once)
+        monkeypatch.setattr(os, "replace", replace_fills_once)
         failed_name = planned.stem + ".pdf"
 
     monkeypatch.setattr(jobsmod, "fetch_url", fake_fetch)

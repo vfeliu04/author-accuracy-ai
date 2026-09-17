@@ -1587,7 +1587,9 @@ def test_the_module_docstrings_hostname_example_really_borrows_tier_one_authorit
     fields = Settings.model_fields
     tier1 = [p.strip() for p in fields["authority_tier1"].default.split(",") if p.strip()]
     tier2 = [p.strip() for p in fields["authority_tier2"].default.split(",") if p.strip()]
-    host = re.search(r'never from the hostname \(.*?"([^"]+)"', web_mod.__doc__, re.S).group(1)
+    doc = web_mod.__doc__
+    assert doc is not None
+    host = re.search(r'never from the hostname \(.*?"([^"]+)"', doc, re.S).group(1)
     assert _publisher_authority(host, tier1, tier2) == 30.0, host
     assert _publisher_authority("Random Blog", tier1, tier2) == 15.0
 
