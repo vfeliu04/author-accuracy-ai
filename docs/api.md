@@ -35,8 +35,8 @@ curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 | Fetched response served as `application/pdf` or `application/octet-stream` | 50,000,000 bytes, counted after decompression (`max_upload_bytes`) | In the ingest step's fetch → run `FAILED` |
 | Time to fetch one link, redirects and DNS lookups included | 30 seconds (`fetch_timeout_seconds`); a slow DNS lookup is not cut short, and the budget is checked again once it returns | In the ingest step's fetch → run `FAILED` |
 | Redirects per link | 5 (`fetch_max_redirects`) | In the ingest step's fetch → run `FAILED` |
-| Compression layers on a fetched response | One (`gzip` or `deflate`); stacked codings such as `gzip, gzip`, or a repeated `Content-Encoding` header, are refused before the body is read | In the ingest step's fetch → run `FAILED` |
-| Time to read one fetched web page | 60 seconds (`extract_timeout_seconds`), in a separate process that is stopped at the deadline | In the ingest step → run `FAILED` |
+| Compression layers on a fetched response | One (`gzip` or `deflate`); more than one compression layer, such as `gzip, gzip`, is refused before the body is read, whether the layers come in one header or in repeated `Content-Encoding` headers (`identity` is not a layer) | In the ingest step's fetch → run `FAILED` |
+| Time to read one fetched web page | 60 seconds (`extract_timeout_seconds`), in a separate process that is stopped at the deadline; starting the process counts against it | In the ingest step → run `FAILED` |
 
 ## Error shapes
 
@@ -90,7 +90,7 @@ Every file (extension, size, magic bytes — without reading it into memory) and
 
 Response: `{"run_id": "<hex>", "job_id": "<hex>"}`. The job starts `QUEUED`; a single worker thread picks it up (poll interval `job_poll_seconds`). Poll `GET /api/runs/{run_id}` for progress.
 
-**Links are read by the pipeline, not by this request.** The ingest step fetches the links one at a time, in the order they were added, before it processes any document ([architecture.md](architecture.md#fetching-links-fetchpy) describes the fetch). A link that serves a PDF becomes a PDF upload; a web page is stored as a JSON snapshot. The first link that cannot be read fails the run, and links after it are not fetched in that attempt. The run's `status` becomes `FAILED` and its `error` names the link as added. A fetch error names it as `'<target>' (redirected from '<link>')` when it failed at a redirect target. A page that redirected and then could not be read (too little readable text, bytes that cannot be decoded, or too large or complex to read in time) keeps its error type and message, with both addresses in front: `'<final>' (redirected from '<link>'): <message>`. For example:
+**Links are read by the pipeline, not by this request.** The ingest step fetches the links one at a time, in the order they were added, before it processes any document ([architecture.md](architecture.md#fetching-links-fetchpy) describes the fetch). A link that serves a PDF becomes a PDF upload; a web page is stored as a JSON snapshot. The first link that cannot be read fails the run, and links after it are not fetched in that attempt. The run's `status` becomes `FAILED` and its `error` names the link as added. A fetch error names it as `'<target>' (redirected from '<link>')` when it failed at a redirect target. A page that redirected and then could not be read (too little readable text, bytes that cannot be decoded, too large or complex to read in time, or a reader that failed unexpectedly) keeps its error type and message, with both addresses in front: `'<final>' (redirected from '<link>'): <message>`. For example:
 
 ```
 BlockedAddressError: Refusing to fetch 'http://10.0.0.5/admin': '10.0.0.5' resolves to a private or reserved network address
@@ -152,7 +152,7 @@ Requeues a `FAILED` run's job. The worker resumes from the first incomplete step
 
 ### `DELETE /api/runs/{run_id}` → 204
 
-Permanently deletes the run: every database row in one transaction, then the stored upload files (PDFs and web-page snapshots — for a link, every file it left, including a PDF or partial file an interrupted fetch left behind) and the run's figure images. Only files inside `uploads_dir` are removed, and never one another upload still names: a run ingested through the CLI records the user's original file, which deletion leaves in place. 404 `Unknown run '<id>'`; 409 `Run '<id>' has a <STATUS> job — wait for it to finish or fail first` while its job is queued or running.
+Permanently deletes the run: every database row in one transaction, then the stored upload files (PDFs and web-page snapshots — for a link, every file it left, including a PDF or partial file an interrupted fetch left behind) and the run's figure directory (`<figures_dir>/<run_id>/`, which lies outside `uploads_dir` and is always removed). An upload file is removed only if it lies inside `uploads_dir` and no other upload still names it: a run ingested through the CLI records the user's original file, which deletion leaves in place. Whether another upload names the file is decided after the transaction commits, by filesystem identity (device and inode), so a relative and an absolute path, a symlink, or another letter case on a case-insensitive volume all count as the same file, and a stored path that names no readable file (missing, in a symlink loop) protects nothing and never blocks the deletion. Reading those paths never holds the database's write lock: a stalled one delays only this request. 404 `Unknown run '<id>'`; 409 `Run '<id>' has a <STATUS> job — wait for it to finish or fail first` while its job is queued or running.
 
 ### `GET /api/jobs/{job_id}`
 

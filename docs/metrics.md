@@ -54,7 +54,7 @@ Component sum (no floors — **unknown earns nothing**):
 | Component | Max | Rule |
 | --- | --- | --- |
 | Metadata completeness | 30 | 6 pts per present field (title, authors, publisher, date, DOI) |
-| Publisher authority | 30 | Word-boundary phrase match against configured tier lists: tier-1 → 30, tier-2 → 22.5, any other named publisher → 15, no publisher → 0. "UN"/"U.N." matches; "University" does not. A needle written in capitals is an acronym and matches only in capitals, so "Who What Wear" and "Un Mundo Sostenible" score 15, not 30; spelled-out needles ignore case |
+| Publisher authority | 30 | Word-boundary phrase match against configured tier lists: tier-1 → 30, tier-2 → 22.5, any other named publisher → 15, no publisher → 0. "UN"/"U.N." matches; "University" does not. A needle written in capitals is an acronym and matches only in capitals, so "Who What Wear" and "Un Mundo Sostenible" score 15, not 30; spelled-out needles ignore case. The default lists also carry the mixed-case spellings sites use as needles of their own — `Fao`, `Unicef`, `Oecd` in tier 1 and `Bbc` in tier 2 — so "Unicef" scores 30 and "Bbc News" 22.5; `Who` and `Un` are never added |
 | Recency | 20 | Age from publication year: ≤2 y → 20, ≤5 → 12, ≤10 → 6, older → 3; no year → 0 |
 | Verification | 20 | Tier points above |
 

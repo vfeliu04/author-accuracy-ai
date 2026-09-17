@@ -30,7 +30,7 @@ cp backend/.env.example backend/.env
 | `AUTHORAI_MAX_REQUEST_BYTES` | `220000000` | Whole-request ceiling, checked against `Content-Length` **before** the body is read, so an unauthenticated attacker cannot push gigabytes → 413 |
 | `AUTHORAI_MAX_UPLOAD_BYTES` | `50000000` | Per-file upload cap, checked from the spooled part's size without materializing the bytes → 413. Also caps a fetched link's response served as `application/pdf` or `application/octet-stream` |
 | `AUTHORAI_MAX_SOURCE_FILES` | `20` | Max sources per run, uploaded files and links together → 400 |
-| `AUTHORAI_UPLOADS_DIR` | `data/uploads` | Where uploaded PDFs, web-page snapshots (JSON), and PDFs fetched from links are stored (server-generated names); the file endpoint resolve-checks every served path against this directory |
+| `AUTHORAI_UPLOADS_DIR` | `data/uploads` | Where uploaded PDFs, web-page snapshots (JSON), and PDFs fetched from links are stored (server-generated names); the file endpoint resolve-checks every served path against this directory, and deleting a run removes only upload files that lie inside it |
 
 ## Source links
 
@@ -39,8 +39,8 @@ How the ingest step fetches links added as sources (`backend/authorai/fetch.py`)
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_FETCH_TIMEOUT_SECONDS` | `30.0` | Wall-clock budget for one link's whole fetch, every redirect hop included. Checked between hops and after each body chunk, applied as each request's socket timeouts, and enforced by a watchdog that shuts the connection's socket; the OS DNS lookup is the one wait it cannot interrupt. A body the watchdog cut short fails as a timeout, never as a stored page |
-| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on the body of a response served as `text/html` or `application/xhtml+xml`, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it. Only a single coding layer is accepted: stacked codings (`gzip, gzip`, or a repeated `Content-Encoding` header) are refused before the body is read |
-| `AUTHORAI_EXTRACT_TIMEOUT_SECONDS` | `60.0` | Wall-clock budget for reading one fetched web page. The page is read in a separate process that is stopped at the deadline, and the run fails naming the link (`too large or complex`); nothing else could interrupt the single worker thread. A link that serves a PDF is not subject to it |
+| `AUTHORAI_FETCH_MAX_BYTES` | `10000000` | Cap on the body of a response served as `text/html` or `application/xhtml+xml`, counted in decoded bytes (after `Content-Encoding`), so a compressed response cannot slip past it. Only a single coding layer is accepted: more than one layer (`gzip, gzip`, in one header or across repeated `Content-Encoding` headers; `identity` does not count) is refused before the body is read |
+| `AUTHORAI_EXTRACT_TIMEOUT_SECONDS` | `60.0` | Wall-clock budget for reading one fetched web page, starting the reader included. The page is read in a separate process that is stopped at the deadline, and the run fails naming the link (`too large or complex`); nothing else could interrupt the single worker thread. The process also carries a CPU-time limit of this budget, rounded up, plus 5 seconds: a backstop that ends a reader whose server is gone and can no longer stop it. A link that serves a PDF is not subject to it |
 | `AUTHORAI_FETCH_MAX_REDIRECTS` | `5` | Redirect hops followed; each target is re-checked, re-resolved, and re-gated against private addresses |
 | `AUTHORAI_FETCH_USER_AGENT` | `AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)` | `User-Agent` sent with every fetch |
 
@@ -49,7 +49,7 @@ How the ingest step fetches links added as sources (`backend/authorai/fetch.py`)
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_DB_PATH` | `data/authorai.db` | SQLite database file (run-scoped schema; migrated in place on open) |
-| `AUTHORAI_FIGURES_DIR` | `data/figures` | Extracted figure PNGs, under `<figures_dir>/<run_id>/<doc_id>/` |
+| `AUTHORAI_FIGURES_DIR` | `data/figures` | Extracted figure PNGs, under `<figures_dir>/<run_id>/<doc_id>/`; deleting a run removes its `<figures_dir>/<run_id>/` |
 | `AUTHORAI_EMBEDDING_MODEL` | `text-embedding-3-large` | OpenAI embedding model for chunk vectors |
 | `AUTHORAI_EMBEDDING_DIM` | `3072` | Embedding dimension. Baked into the database at creation; opening an existing DB with a different value **fails loudly** rather than silently corrupting similarity search |
 
@@ -70,8 +70,8 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | Env var | Default | What it does |
 |---|---|---|
 | `AUTHORAI_VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity components. Parsed loudly: unknown names, duplicates, non-finite/negative weights, or a sum ≠ 1 raise instead of falling back |
-| `AUTHORAI_AUTHORITY_TIER1` | `FAO,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,WHO,World Health Organization,UNICEF,OECD,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow. A needle written entirely in capitals is an acronym and matches only in capitals (`WHO` matches `WHO` but not `Who What Wear`; `UN` not the article in `Un Mundo`); other needles ignore case. To accept another spelling of an acronym, add it as its own needle (`Unicef`). Known residual: a publisher styled entirely in capitals (`WHO WHAT WEAR`) still matches |
-| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,NDMC,International Water Management Institute,IWMI,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
+| `AUTHORAI_AUTHORITY_TIER1` | `FAO,Fao,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,WHO,World Health Organization,UNICEF,Unicef,OECD,Oecd,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow. A needle written entirely in capitals is an acronym and matches only in capitals (`WHO` matches `WHO` but not `Who What Wear`; `UN` not the article in `Un Mundo`); other needles ignore case. To accept another spelling of an acronym, add it as its own needle: the defaults carry the mixed-case spellings sites use for `FAO`, `UNICEF`, and `OECD` (`Fao`, `Unicef`, `Oecd`) and, in tier 2, `BBC` (`Bbc`), which ignore case like any needle not written in capitals. `Who` and `Un` are never added, since they would match the ordinary words. Known residual: a publisher styled entirely in capitals (`WHO WHAT WEAR`) still matches |
+| `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Bbc,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,NDMC,International Water Management Institute,IWMI,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
 | `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers) |
 
 ## Jobs

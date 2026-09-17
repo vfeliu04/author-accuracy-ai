@@ -45,7 +45,7 @@ A source can be a link to a web page instead of a file. Add it in the upload dia
 - The page's article text and tables are kept; navigation, cookie banners, and similar page furniture are left out. Pages that need JavaScript to show their content can't be read.
 - A link that serves a PDF is handled exactly like an uploaded PDF.
 - A link that can't be read stops the run, and the error names the link as you added it, along with the page it redirected to when there was a redirect. Retrying resumes where the run stopped; a kept copy that can no longer be opened is fetched again, unless the run already finished reading it.
-- Deleting a run removes the copies kept for its links, and never a file outside the app's uploads folder or one another run still uses.
+- Deleting a run removes the copies kept for its links and the run's figure images, and never a file of yours kept outside the app's uploads folder, or a copy another run still uses.
 - In the claims view, evidence from a web page opens as the stored text with the quoted passage highlighted, cited by its section heading, with a link to the original page.
 - Credibility uses what the page declares about itself: its authors, publisher, date, DOI, and title. When a page declares nothing beyond a title, its text is read for those details instead, the same way a PDF's is. The web address is never used.
 - YouTube links are not supported yet; the upload refuses them.
