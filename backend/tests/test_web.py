@@ -57,6 +57,12 @@ PROSE = (
     "average, and reservoir operators cut releases to the lower valley twice. "
 )
 
+# The linear-time tests bound CPU time, not wall clock: other work on the machine
+# stretches a test's wall time but not the CPU time its own process spends. Each
+# guarded page takes under half a second of CPU; the quadratic code each test
+# guards against spends 20 s of CPU and more on the same page.
+LINEAR_CPU_SECONDS = 5.0
+
 
 def _page(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
@@ -203,9 +209,9 @@ def test_large_jsonld_graph_is_ordered_in_linear_time():
     }
     graph["@graph"][0]["url"] = "https://example.org/catalog"  # the one node naming the page
     markup = _markup(_ld(graph))
-    started = time.perf_counter()
+    started = time.process_time()
     metadata = _page_metadata(markup, url="https://example.org/catalog")
-    assert time.perf_counter() - started < 2.0
+    assert time.process_time() - started < LINEAR_CPU_SECONDS
     assert metadata.title == "Item 0"
 
 
@@ -489,9 +495,9 @@ def test_a_page_of_many_small_inline_elements_is_read_in_linear_time():
         + "<sup>1</sup><sub>2</sub>" * 16_000
         + "</p></article></main></body></html>"
     )
-    started = time.perf_counter()
+    started = time.process_time()
     document, _ = extract_web(page, url="https://example.org/heavy")
-    assert time.perf_counter() - started < 2.0
+    assert time.process_time() - started < LINEAR_CPU_SECONDS
     assert "xy" * 16_000 + "^12" * 16_000 in _body(document)
 
 
@@ -507,18 +513,18 @@ def test_inline_runs_beside_a_kept_child_are_read_in_linear_time(before, after):
     # The page above leaves its paragraph with no element at all. One element
     # that stays (a link, a <br>) splits the joining of the text nodes the strip
     # leaves into the parent's text and each kept child's tail; a run left
-    # unjoined in either makes trafilatura's XPaths quadratic (over 10 s here).
+    # unjoined in either makes trafilatura's XPaths quadratic (over 40 s of CPU here).
     page = (
         "<!DOCTYPE html><html><head><title>Heavy</title></head><body><main><article>"
         f"<h1>Formatting</h1><p>{_prose(400)}</p><p>{before}"
-        + "<b>x</b><i>y</i>" * 8_000
-        + "<sup>1</sup><sub>2</sub>" * 8_000
+        + "<b>x</b><i>y</i>" * 16_000
+        + "<sup>1</sup><sub>2</sub>" * 16_000
         + f"{after}</p></article></main></body></html>"
     )
-    started = time.perf_counter()
+    started = time.process_time()
     document, _ = extract_web(page, url="https://example.org/heavy")
-    assert time.perf_counter() - started < 2.0
-    assert "xy" * 8_000 + "^12" * 8_000 in _body(document)
+    assert time.process_time() - started < LINEAR_CPU_SECONDS
+    assert "xy" * 16_000 + "^12" * 16_000 in _body(document)
 
 
 def _paragraph_of_bold(lead: str, count: int) -> str:
