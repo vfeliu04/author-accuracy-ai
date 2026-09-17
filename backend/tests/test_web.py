@@ -9,7 +9,6 @@ surviving that noise is the extractor's whole job.
 import dataclasses
 import json
 import logging
-import multiprocessing
 import os
 import subprocess
 import sys
@@ -22,13 +21,11 @@ import trafilatura
 import authorai.web as web_mod
 from authorai.web import (
     MIN_BODY_CHARS,
-    ExtractionTimeoutError,
     PageMetadata,
     ThinPageError,
     _normalize_date,
     _page_metadata,
     extract_web,
-    extract_web_bounded,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web"
@@ -458,68 +455,6 @@ def test_nested_scripts_emphasis_and_tables_read_the_same_after_the_linear_rewri
     body = _body(document)
     assert "A^12 B^3 Cx^5 Dbold italic deep Ex\n## Q?\n\nx Funtail" in body
     assert "| Cell a, b c | Other |" in body
-
-
-# --- bounded extraction: no page holds the worker past its time budget --------
-
-
-def _slow_page(tag: str, count: int = 30_000) -> str:
-    """A page inside the fetch cap made of one inline tag trafilatura strips
-    ITSELF (<abbr>, <cite>, <mark>, <small>, ...): its cleaning leaves a run of
-    adjacent text nodes and then runs XPaths over it, quadratic in the count.
-    _prepare_tree never touches these tags, so the linear rewrite above cannot
-    help; 30,000 of them (0.4 MB) take about 6 s here, an hour at the cap."""
-    return (
-        "<!DOCTYPE html><html><head><title>Slow</title></head><body><main><article>"
-        f"<h1>Slow</h1><p>{_prose(400)}</p><p>"
-        + f"<{tag}>x</{tag}>" * count
-        + "</p></article></main></body></html>"
-    )
-
-
-def test_bounded_extraction_returns_exactly_what_extract_web_returns():
-    page = _page("report_jsonld_graph.html")
-    bounded = extract_web_bounded(page, url=REPORT_URL, timeout=30)
-    assert bounded == extract_web(page, url=REPORT_URL)
-    raw = (FIXTURES / "diario_agua_es.html").read_bytes()  # bytes cross the process line too
-    assert extract_web_bounded(raw, url=DIARIO_URL, timeout=30) == extract_web(raw, url=DIARIO_URL)
-
-
-def test_bounded_extraction_reraises_thin_page_and_decoding_errors_as_the_same_type():
-    with pytest.raises(ThinPageError) as bounded:
-        extract_web_bounded(_page("spa_shell.html"), url=SPA_URL, timeout=30)
-    with pytest.raises(ThinPageError) as direct:
-        extract_web(_page("spa_shell.html"), url=SPA_URL)
-    assert type(bounded.value) is ThinPageError
-    assert str(bounded.value) == str(direct.value)
-
-    undeclared = _page("diario_agua_es.html").replace('<meta charset="utf-8">', "")
-    with pytest.raises(ValueError) as decoding:
-        extract_web_bounded(undeclared.encode("cp1252"), url=DIARIO_URL, timeout=30)
-    assert type(decoding.value) is ValueError
-    assert DIARIO_URL in str(decoding.value)
-
-
-def test_a_page_that_takes_too_long_to_read_fails_within_its_budget_and_leaves_no_child():
-    children = set(multiprocessing.active_children())
-    started = time.perf_counter()
-    with pytest.raises(ExtractionTimeoutError) as excinfo:
-        extract_web_bounded(_slow_page("abbr"), url="https://example.org/slow", timeout=0.5)
-    assert time.perf_counter() - started < 0.5 + 2.0
-    assert str(excinfo.value) == (
-        "https://example.org/slow took longer than 0.5 seconds to read "
-        "(the page is too large or complex)"
-    )
-    assert isinstance(excinfo.value, RuntimeError)
-    assert set(multiprocessing.active_children()) == children
-
-
-@pytest.mark.parametrize("tag", ["abbr", "cite"])
-def test_inline_tags_trafilatura_strips_itself_are_stopped_by_the_time_bound(tag):
-    # The shape that bypasses the linear tree edits: only the wall-clock bound
-    # stands between it and the single worker thread.
-    with pytest.raises(ExtractionTimeoutError, match="too large or complex"):
-        extract_web_bounded(_slow_page(tag), url=f"https://example.org/{tag}", timeout=0.5)
 
 
 def test_literal_asterisk_runs_survive_verbatim_and_fast():

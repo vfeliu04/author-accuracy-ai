@@ -29,14 +29,22 @@ treats both the same.
 import codecs
 import copy
 import json
+import math
 import multiprocessing
+import os
 import re
+import resource
+import signal
+import tempfile
+import threading
 import time
+import traceback
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from html import unescape
 from html.parser import HTMLParser
+from multiprocessing import connection, resource_tracker
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import trafilatura
@@ -116,51 +124,113 @@ def extract_web_bounded(
     (<abbr>x</abbr> repeated: 6 s at 0.4 MB, an hour at the 10 MB fetch cap),
     and nothing else can interrupt the single worker thread. A fresh
     interpreter (spawned, never forked: the caller is a thread) costs about
-    half a second per page.
+    half a second per page, inside the budget: the page reaches the child
+    through a private file (_page_file), so start() returns as soon as the
+    child is exec'd and the deadline covers its start-up too.
 
     Raises ExtractionTimeoutError at the deadline. The child's ThinPageError
     or ValueError is re-raised here as the same type with the same message;
-    any other failure of the child is a RuntimeError naming the URL.
+    any other failure of the child, or of handing it the page, is a
+    RuntimeError naming the URL, with the child's traceback or exit status in
+    the log.
     """
     context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=False)
-    child = context.Process(target=_extract_in_child, args=(sender, html, url), daemon=True)
     outcome = None
+    exitcode = None
+    page_path = _page_file(html, url)
     try:
-        deadline = time.monotonic() + timeout
-        child.start()
-        sender.close()  # the child holds the only writing end: its exit reads as EOF
-        if not receiver.poll(max(0.0, deadline - time.monotonic())):
-            raise ExtractionTimeoutError(
-                f"{url} took longer than {timeout:g} seconds to read "
-                "(the page is too large or complex)"
-            )
+        receiver, sender = context.Pipe(duplex=False)
+        child = context.Process(
+            target=_extract_in_child,
+            args=(sender, page_path, isinstance(html, str), url, _orphan_cpu_seconds(timeout)),
+            daemon=True,
+        )
         try:
-            outcome = receiver.recv()
-        except EOFError:  # the child died before reporting (killed, out of memory)
-            pass
+            deadline = time.monotonic() + timeout
+            _start(child)
+            sender.close()  # the child holds the only writing end: its exit reads as EOF
+            if not receiver.poll(max(0.0, deadline - time.monotonic())):
+                raise ExtractionTimeoutError(
+                    f"{url} took longer than {timeout:g} seconds to read "
+                    "(the page is too large or complex)"
+                )
+            try:
+                outcome = receiver.recv()
+            except (EOFError, OSError):  # the child died before reporting (EOF) or
+                pass  # while reporting (a frame cut short): killed, out of memory
+        finally:
+            sender.close()
+            receiver.close()
+            if child.pid is not None:
+                exitcode = _stop(child)
     finally:
-        sender.close()
-        receiver.close()
-        if child.pid is not None:
-            _stop(child)
+        os.unlink(page_path)
     if outcome is None:
+        logger.warning(
+            "the reader process for %s exited without a result (%s)", url, _exit_status(exitcode)
+        )
         raise RuntimeError(f"{url} could not be read: the reader process exited without a result")
     kind, payload = outcome
     if kind == "result":
         return payload
-    name, message = payload
+    name, message, child_traceback = payload
     if kind == "thin":
         raise ThinPageError(message)
+    logger.warning("reading %s failed in the reader process:\n%s", url, child_traceback)
     if kind == "value":
         raise ValueError(message)
     raise RuntimeError(f"{url} could not be read: {name}: {message}")
 
 
-def _extract_in_child(sender, html: bytes | str, url: str) -> None:
-    """The child's side of extract_web_bounded: the result, or the failure as
-    a (kind, (type name, message)) pair — exceptions themselves need not pickle."""
+def _page_file(html: bytes | str, url: str) -> str:
+    """Write the page to a private temporary file for the child to read back,
+    and return its path. The page never travels as a Process argument: the
+    spawn launcher writes the arguments to the child over a pipe while still
+    holding the child's end of it, so arguments past the pipe buffer (64 KiB)
+    block start() until the child reads them — forever when the child dies
+    first (an import that fails because a module was edited on disk under a
+    running server, a kill during start-up), before any deadline is in force.
+    A str is stored as UTF-8 with surrogates passed through, so it reads back
+    byte-exact whatever jobs._page_text decoded."""
     try:
+        handle, path = tempfile.mkstemp(prefix="authorai-page-")
+        try:
+            with os.fdopen(handle, "wb") as page_file:
+                page_file.write(
+                    html.encode("utf-8", "surrogatepass") if isinstance(html, str) else html
+                )
+        except BaseException:
+            os.unlink(path)
+            raise
+    except OSError as exc:
+        raise RuntimeError(f"{url} could not be read: {type(exc).__name__}: {exc}") from exc
+    return path
+
+
+def _start(child) -> None:
+    """Start the reader with SIGINT blocked for its whole life. A terminal
+    Ctrl-C signals the server's whole process group, the reader included; one
+    killed by it reports nothing, and the run would be recorded FAILED blaming
+    the link instead of staying RUNNING for startup recovery. The mask is per
+    thread and survives spawn's fork+exec. The resource tracker is started
+    first: its first launch UNBLOCKS these signals in the calling thread."""
+    resource_tracker.ensure_running()
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        child.start()
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _extract_in_child(sender, page_path: str, is_text: bool, url: str, cpu_seconds: int) -> None:
+    """The child's side of extract_web_bounded: the page read back from its
+    file, then the result, or the failure as a (kind, (type name, message,
+    traceback)) triple — exceptions themselves need not pickle."""
+    _end_with_parent(cpu_seconds)
+    try:
+        with open(page_path, "rb") as page_file:
+            raw = page_file.read()
+        html = raw.decode("utf-8", "surrogatepass") if is_text else raw
         outcome = ("result", extract_web(html, url=url))
     except Exception as exc:
         kind = "other"
@@ -168,20 +238,63 @@ def _extract_in_child(sender, html: bytes | str, url: str) -> None:
             kind = "thin"
         elif isinstance(exc, ValueError):
             kind = "value"
-        outcome = (kind, (type(exc).__name__, str(exc)))
+        outcome = (kind, (type(exc).__name__, str(exc), traceback.format_exc()))
     sender.send(outcome)
     sender.close()
 
 
-def _stop(child) -> None:
-    """Reap the reader process: one still running is terminated, then killed."""
+def _end_with_parent(cpu_seconds: int) -> None:
+    """Tie the reader's life to its parent's. Only the parent stops a reader
+    (_stop at the deadline, multiprocessing's exit hook for daemons), and a
+    server killed outright — SIGTERM's default action after uvicorn's graceful
+    stop, SIGKILL, a crash — runs neither: the orphan would read on for as long
+    as the page takes, and startup recovery would start another beside it. A
+    watcher exits the moment the parent is gone (its sentinel reads EOF), and
+    the kernel's CPU limit ends a reader the watcher cannot reach — one inside
+    a long C call holding the GIL — with neither the parent nor the GIL."""
+    parent = multiprocessing.parent_process()
+    threading.Thread(
+        target=lambda: (connection.wait([parent.sentinel]), os._exit(1)), daemon=True
+    ).start()
+    _limit_cpu(cpu_seconds)
+
+
+def _limit_cpu(cpu_seconds: int) -> None:
+    """End this process (SIGXCPU) after `cpu_seconds` of CPU time, never
+    loosening a stricter limit it inherited."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+    limits = (value for value in (cpu_seconds, soft, hard) if value != resource.RLIM_INFINITY)
+    resource.setrlimit(resource.RLIMIT_CPU, (min(limits), hard))
+
+
+def _orphan_cpu_seconds(timeout: float) -> int:
+    """The reader's CPU limit: its wall-clock budget plus a margin. Single-
+    threaded, its CPU time never exceeds its wall time, so a reader with a
+    live parent is always stopped by the deadline first."""
+    return math.ceil(timeout) + 5
+
+
+def _stop(child) -> int | None:
+    """Reap the reader process: one still running is terminated, then killed.
+    Returns its exit status (negative: the signal that ended it)."""
     if child.is_alive():
         child.terminate()
         child.join(1.0)
         if child.is_alive():
             child.kill()
     child.join()
+    exitcode = child.exitcode
     child.close()
+    return exitcode
+
+
+def _exit_status(exitcode: int | None) -> str:
+    if exitcode is not None and exitcode < 0:
+        try:
+            return f"killed by signal {signal.Signals(-exitcode).name}"
+        except ValueError:
+            return f"killed by signal {-exitcode}"
+    return f"exit code {exitcode}"
 
 
 # --- decoding ----------------------------------------------------------------
