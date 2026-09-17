@@ -11,6 +11,7 @@ from authorai.credibility import (
     _publisher_authority,
     _title_match,
     aggregate_credibility,
+    authority_needles,
     evidence_usage,
     merge_record,
     resolve_tier,
@@ -609,8 +610,8 @@ def test_default_authority_tiers_cover_live_run_publishers():
     from authorai.credibility import _publisher_authority
 
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
-    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
-    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+    tier1 = authority_needles(settings.authority_tier1)
+    tier2 = authority_needles(settings.authority_tier2)
 
     for publisher in (
         "WMO",
@@ -643,8 +644,8 @@ def test_acronym_needles_that_are_ordinary_words_match_only_in_capitals():
     from authorai.config import Settings
 
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
-    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
-    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+    tier1 = authority_needles(settings.authority_tier1)
+    tier2 = authority_needles(settings.authority_tier2)
 
     for publisher in (
         "Who What Wear",
@@ -680,8 +681,8 @@ def test_default_authority_tiers_accept_the_mixed_case_spellings_sites_use():
     from authorai.config import Settings
 
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
-    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
-    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+    tier1 = authority_needles(settings.authority_tier1)
+    tier2 = authority_needles(settings.authority_tier2)
 
     for publisher in ("Unicef", "Fao", "Oecd", "Unicef Office of Research", "Oecd Publishing"):
         assert _publisher_authority(publisher, tier1, tier2) == 30.0, publisher

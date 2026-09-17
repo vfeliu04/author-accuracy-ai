@@ -549,6 +549,12 @@ def _phrase_tokens(text: str, *, fold: bool = True) -> list[str]:
     return fused
 
 
+def authority_needles(csv: str) -> list[str]:
+    """A configured authority tier (AUTHORAI_AUTHORITY_TIER1/2) as its needles:
+    comma-separated, trimmed, blanks dropped."""
+    return [p.strip() for p in csv.split(",") if p.strip()]
+
+
 def _publisher_authority(publisher: str | None, tier1: list[str], tier2: list[str]) -> float:
     """Consecutive word-boundary phrase matching.
 

@@ -1588,11 +1588,11 @@ def test_the_module_docstrings_hostname_example_really_borrows_tier_one_authorit
     # example; once acronym needles matched only in capitals, "who-cares.com"
     # stopped being one. Pinned against the default tier lists.
     from authorai.config import Settings
-    from authorai.credibility import _publisher_authority
+    from authorai.credibility import _publisher_authority, authority_needles
 
     fields = Settings.model_fields
-    tier1 = [p.strip() for p in fields["authority_tier1"].default.split(",") if p.strip()]
-    tier2 = [p.strip() for p in fields["authority_tier2"].default.split(",") if p.strip()]
+    tier1 = authority_needles(fields["authority_tier1"].default)
+    tier2 = authority_needles(fields["authority_tier2"].default)
     doc = web_mod.__doc__
     assert doc is not None
     host = re.search(r'never from the hostname \(.*?"([^"]+)"', doc, re.S).group(1)

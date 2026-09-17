@@ -26,6 +26,7 @@ from authorai.credibility import (
     CrossrefClient,
     IsbnClient,
     aggregate_credibility,
+    authority_needles,
     evidence_usage,
     extract_metadata,
     merge_record,
@@ -398,8 +399,8 @@ def score_run(
     excluded = [
         {"doc_id": d["id"], "reason": "image"} for d in sources if d["source_type"] == "image"
     ]
-    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
-    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+    tier1 = authority_needles(settings.authority_tier1)
+    tier2 = authority_needles(settings.authority_tier2)
     current_year = datetime.now(UTC).year
 
     # Built only when sources exist, closed only if built here — a caller's
