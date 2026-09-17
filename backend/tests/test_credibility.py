@@ -671,6 +671,40 @@ def test_acronym_needles_that_are_ordinary_words_match_only_in_capitals():
     assert _publisher_authority("Unicef", ["UNICEF", "Unicef"], []) == 30.0
 
 
+def test_default_authority_tiers_accept_the_mixed_case_spellings_sites_use():
+    """Sites styling an acronym as a word ('Unicef', 'Bbc') lost authority once
+    acronym needles matched only in capitals, so the defaults carry those
+    spellings as needles of their own. Acronyms that are also ordinary words
+    ('Who', 'Un') are never added, and the eval sources' publishers keep their
+    scores."""
+    from authorai.config import Settings
+
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    tier1 = [p.strip() for p in settings.authority_tier1.split(",") if p.strip()]
+    tier2 = [p.strip() for p in settings.authority_tier2.split(",") if p.strip()]
+
+    for publisher in ("Unicef", "Fao", "Oecd", "Unicef Office of Research", "Oecd Publishing"):
+        assert _publisher_authority(publisher, tier1, tier2) == 30.0, publisher
+    for publisher in ("Bbc", "Bbc News"):
+        assert _publisher_authority(publisher, tier1, tier2) == 22.5, publisher
+    for publisher in ("who cares blog", "un mundo"):
+        assert _publisher_authority(publisher, tier1, tier2) == 15.0, publisher
+    # 'who' and 'un' are only ever acronym (all-caps) needles, never case-folded ones.
+    assert not {"who", "un"} & {needle.lower() for needle in tier1 + tier2 if not needle.isupper()}
+
+    # The eval and end-to-end source sets' publishers score as before.
+    for publisher, score in (
+        ("Welthungerhilfe", 30.0),  # the Global Hunger Index synopsis
+        ("Elsevier", 22.5),  # the Heliyon review
+        ("Food and Agriculture Organization of the United Nations", 30.0),
+        ("UNCCD", 30.0),
+        ("World Meteorological Organization", 30.0),
+        ("International Water Management Institute", 22.5),
+        ("NDMC", 22.5),
+    ):
+        assert _publisher_authority(publisher, tier1, tier2) == score, publisher
+
+
 def test_metadata_extraction_prompt_carries_opening_text():
     from authorai.credibility import extract_metadata
     from tests.conftest import FakeLLM

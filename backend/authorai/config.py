@@ -58,15 +58,17 @@ class Settings(BaseSettings):
     # Word-boundary matched against source publishers (see credibility.py).
     # Tier 1: intergovernmental bodies and their agencies (WMO/UNCCD added
     # 2026-08-21 — both published sources in live runs and are peers of
-    # WHO/FAO, which were already listed).
+    # WHO/FAO, which were already listed). An all-caps needle matches only in
+    # capitals, so the mixed-case spellings sites use are needles of their own
+    # (never 'Who' or 'Un': those are also ordinary words).
     authority_tier1: str = (
-        "FAO,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,"
-        "WHO,World Health Organization,UNICEF,OECD,Welthungerhilfe,"
+        "FAO,Fao,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,"
+        "WHO,World Health Organization,UNICEF,Unicef,OECD,Oecd,Welthungerhilfe,"
         "WMO,World Meteorological Organization,UNCCD"
     )
     # Tier 2: established research institutions and publishers.
     authority_tier2: str = (
-        "Reuters,Associated Press,BBC,Nature,Science,Lancet,Elsevier,"
+        "Reuters,Associated Press,BBC,Bbc,Nature,Science,Lancet,Elsevier,"
         "National Drought Mitigation Center,NDMC,International Water Management Institute,"
         "IWMI,CGIAR,World Climate Research Programme,WCRP"
     )
