@@ -13,6 +13,12 @@ describe("humanizeError", () => {
     expect(
       humanizeError("TimeoutError: Batch msgbatch_01 still 'in_progress' after 3600s")
     ).toMatch(/reattaches to it/);
+    // A batch stopped in any other state is the same wait.
+    expect(
+      humanizeError(
+        "TimeoutError: Batch msgbatch_01 still 'validating' after 86400s — it is still queued server-side; its id is retained, so a retry resumes it instead of paying twice"
+      )
+    ).toMatch(/reattaches to it/);
     expect(humanizeError("Your credit balance is too low to access the API")).toMatch(
       /out of credit/
     );
@@ -363,6 +369,41 @@ describe("humanizeError explains every way a link can fail to open", () => {
     ).toBeNull();
     expect(humanizeError("OSError: 'localhost' could not be resolved")).toBeNull();
   });
+});
+
+// The server quotes a site's Content-Type or Content-Encoding value in full, and
+// a site may send about 100 KiB of headers. "https://" then a long run of
+// closing brackets is a link whose every bracket the trimming looks at; the page
+// showing the failure reads the message several times while it renders.
+describe("reading a failure that quotes a huge header", () => {
+  const link = "http://enc.example:8080/page";
+  const run = 100 * 1024;
+  const cases: [string, string, string][] = [
+    [
+      "a Content-Encoding",
+      `FetchError: Fetching '${link}' failed: unsupported Content-Encoding 'x-https://a${")".repeat(run)}'`,
+      `${link} — The site sent that page in a form that can't be read.`
+    ],
+    [
+      "a content type",
+      `FetchError: Fetching '${link}' failed: unsupported content type 'x-https://a${"]".repeat(run)}' (a source must be an HTML page or a PDF)`,
+      `${link} — That link isn't a web page or PDF.`
+    ],
+    [
+      "a header repeating a word a hint looks for",
+      `FetchError: Fetching '${link}' failed: unsupported Content-Encoding '${"TimeoutError ".repeat(run / 13)}'`,
+      `${link} — The site sent that page in a form that can't be read.`
+    ]
+  ];
+
+  for (const [name, error, expected] of cases) {
+    it(`takes well under a second for ${name}`, () => {
+      const started = performance.now();
+      expect(humanizeError(error)).toBe(expected);
+      expect(linksNamedIn(error, [link, "https://example.org/other"])).toEqual([link]);
+      expect(performance.now() - started).toBeLessThan(500);
+    });
+  }
 });
 
 describe("namedLink", () => {

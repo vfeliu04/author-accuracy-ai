@@ -18,7 +18,9 @@ const ERROR_HINTS: ErrorHint[] = [
       "The server lost its network connection mid-run (laptop sleep or dropped Wi-Fi are the usual causes). Retrying resumes where it stopped."
   },
   {
-    match: /TimeoutError.*Batch|still 'in_progress'/i,
+    // The server's own wording, not "TimeoutError" anywhere before "Batch": that
+    // rescans the rest of the message from every "TimeoutError" a site repeats.
+    match: /TimeoutError: Batch\b|still 'in_progress'/i,
     hint: () =>
       "The verification batch was still queued on the provider's side when the app stopped waiting. The batch keeps its place — retrying reattaches to it at no extra cost."
   },
@@ -155,24 +157,33 @@ function count(text: string, char: string): number {
 
 // One matched link without what follows it in the sentence: punctuation, the
 // quote around it, a bracket closing text the link never opened, and a cut
-// mark come off the end until the last character belongs to the link.
+// mark come off the end until the last character belongs to the link. The
+// counts are taken once and kept current as characters come off, so a long
+// run of brackets a site sent costs one pass, not one pass per bracket.
 function trimLink(raw: string): NamedLink {
-  let link = raw;
+  let end = raw.length;
   let cut = false;
+  let quotes = count(raw, "'");
+  let unopenedParens = count(raw, ")") - count(raw, "(");
+  let unopenedBrackets = count(raw, "]") - count(raw, "[");
   for (;;) {
-    const last = link.slice(-1);
-    if (link.endsWith(CUT_MARK)) {
-      link = link.slice(0, -CUT_MARK.length);
+    const last = raw.charAt(end - 1);
+    if (end >= CUT_MARK.length && raw.startsWith(CUT_MARK, end - CUT_MARK.length)) {
+      end -= CUT_MARK.length;
       cut = true;
-    } else if (
-      /[.,;:!?]/.test(last) ||
-      (last === "'" && count(link, "'") % 2 === 1) ||
-      (last === ")" && count(link, "(") < count(link, ")")) ||
-      (last === "]" && count(link, "[") < count(link, "]"))
-    ) {
-      link = link.slice(0, -1);
+    } else if (/[.,;:!?]/.test(last)) {
+      end -= 1;
+    } else if (last === "'" && quotes % 2 === 1) {
+      quotes -= 1;
+      end -= 1;
+    } else if (last === ")" && unopenedParens > 0) {
+      unopenedParens -= 1;
+      end -= 1;
+    } else if (last === "]" && unopenedBrackets > 0) {
+      unopenedBrackets -= 1;
+      end -= 1;
     } else {
-      return { link, cut };
+      return { link: raw.slice(0, end), cut };
     }
   }
 }
@@ -199,9 +210,11 @@ function hostOf(link: string): string {
 // (".../billing", ".../batch-jobs", ".../deadlines") never pick a translation.
 // The server also repeats a link's host on its own, in quotes
 // ("'billing.example.org' could not be resolved"), so that copy goes too.
-function withoutLinks(error: string): string {
-  let words = error.replace(LINK, (raw) => ` ${raw.slice(trimLink(raw).link.length)}`);
-  for (const { link } of namedLinks(error)) {
+// `named` is namedLinks(error): replace visits the same matches in the same order.
+function withoutLinks(error: string, named: readonly NamedLink[]): string {
+  let index = 0;
+  let words = error.replace(LINK, (raw) => ` ${raw.slice(named[index++].link.length)}`);
+  for (const { link } of named) {
     const host = hostOf(link);
     if (host !== "") words = words.split(`'${host}'`).join(" ");
   }
@@ -233,9 +246,10 @@ export function linksNamedIn(error: string, links: readonly string[]): string[] 
 
 export function humanizeError(error: string | null): string | null {
   if (!error) return null;
-  const first = namedLinks(error)[0];
+  const named = namedLinks(error);
+  const first = named[0];
   const shown = first ? `${first.link}${first.cut ? "…" : ""}` : null;
-  const words = withoutLinks(error);
+  const words = withoutLinks(error, named);
   for (const { match, hint, aboutLink, needsLink } of ERROR_HINTS) {
     const found = match.exec(words);
     if (found === null || (needsLink && shown === null)) continue;
