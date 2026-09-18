@@ -426,6 +426,48 @@ def test_a_page_whose_address_carries_the_doi_keeps_the_top_tier(page_url):
 
 
 @respx.mock
+def test_an_address_carrying_the_records_own_doi_names_the_page_on_the_title_path():
+    """The identifiers a page's address may carry are the one its path matched
+    on AND the record's OWN DOI. That second term is the only one the title
+    path has: a page declaring no DOI, whose address is built from the DOI the
+    matched record carries, is that work's own page even when the record's
+    landing link points at a sibling domain. Without it, every DOI-less
+    scholarly page away from its registered landing URL loses the title tier."""
+    record = {
+        **PAPER_RECORD,
+        "DOI": DOI,
+        "resource": {"primary": {"URL": "https://elsewhere.test/x"}},
+    }
+    respx.get(f"{CROSSREF_BASE}/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": [record]}})
+    )
+    tier, _ = resolve_tier(
+        PAPER_META.model_copy(update={"doi": None}),
+        _client(),
+        title_search=True,
+        origin=Fetched(f"https://journals.example/article/{DOI}"),
+    )
+    assert tier == "VERIFIED_TITLE"
+
+
+@respx.mock
+def test_a_url_prefixed_doi_is_compared_with_the_address_in_its_bare_form():
+    """What a page prints as its DOI is often 'https://doi.org/10.…'. The gate
+    looks for the identifier INSIDE the address, so it must look for the DOI
+    itself: with the resolver prefix left on, the paper's own article page
+    would fail the gate it should pass. The record here carries neither a
+    landing link nor a DOI field, so only the cleaned identifier can name it."""
+    record = {k: v for k, v in PAPER_RECORD.items() if k != "resource"}
+    _crossref_doi(DOI, record)
+    tier, _ = resolve_tier(
+        PAPER_META.model_copy(update={"doi": f"https://doi.org/{DOI}"}),
+        _client(),
+        origin=Fetched(f"https://journals.example/article/{DOI}"),
+    )
+    assert tier == "VERIFIED_DOI"
+
+
+@respx.mock
 def test_a_record_without_a_primary_resource_falls_back_to_its_url():
     """Crossref's older records carry only the top-level URL — read, and
     compared as an address like any other landing link."""
