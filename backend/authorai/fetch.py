@@ -176,13 +176,24 @@ def _is_valid_host(host: str) -> bool:
     return _HOSTNAME.fullmatch(host) is not None
 
 
+def url_host(url: str) -> str | None:
+    """A URL's host as httpx spells it — lower case, IDNA-encoded, no trailing
+    dot — or None when the value is not a URL with a host.
+
+    The one URL→host read outside a fetch: comparing where a page lives is done
+    on this form, never on a hand-split string, so an international host and its
+    punycode spelling are one host and a credential or port cannot pass as one.
+    """
+    try:
+        host = httpx.URL(url.strip()).raw_host.decode("ascii")
+    except (httpx.InvalidURL, ValueError, UnicodeDecodeError):
+        return None
+    return host.lower().rstrip(".") or None
+
+
 def is_youtube_url(url: str) -> bool:
     """True when the URL's host is YouTube, including www./m./music. hosts."""
-    try:
-        host = httpx.URL(url.strip()).host
-    except (httpx.InvalidURL, ValueError):
-        return False
-    return host.lower().rstrip(".") in _YOUTUBE_HOSTS
+    return url_host(url) in _YOUTUBE_HOSTS
 
 
 def is_public_address(ip: str | IPAddress) -> bool:

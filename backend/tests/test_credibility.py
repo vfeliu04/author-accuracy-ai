@@ -9,6 +9,7 @@ from authorai.credibility import (
     CrossrefClient,
     SourceMetadata,
     _publisher_authority,
+    _same_site,
     _title_match,
     aggregate_credibility,
     authority_needles,
@@ -277,6 +278,130 @@ def test_an_uncorroborated_doi_falls_through_to_the_title_path():
     tier, record = resolve_tier(PAGE_META, _client())
     assert tier == "VERIFIED_TITLE"
     assert record["title"] == ["Ten Facts About Drinking Water"]
+
+
+# --- the DOI a PAGE declares: the record must point back at the page ---------
+
+DOI = "10.1016/j.heliyon.2024.e34730"
+# A page that declares a paper's DOI AND, in the same invisible tags, that
+# paper's title, authors and publisher: corroboration alone cannot tell it
+# from the paper's own landing page.
+PAPER_META = SourceMetadata(
+    title="Rainfall variability in the Ebro basin",
+    authors=["Lucía Fernández Ibáñez"],
+    publisher="Heliyon",
+    publication_date="2024",
+    doi=DOI,
+)
+PAPER_RECORD = {
+    "title": ["Rainfall variability in the Ebro basin"],
+    "publisher": "Elsevier BV",
+    "author": [{"family": "Fernández Ibáñez"}],
+    "published": {"date-parts": [[2024]]},
+    "resource": {"primary": {"URL": "https://www.sciencedirect.com/science/article/pii/S3407"}},
+}
+PAPER_PAGE = "https://www.sciencedirect.com/science/article/pii/S3407"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "page_url",
+    [
+        PAPER_PAGE,
+        "https://sciencedirect.com/science/article/pii/S3407",  # no www.
+        "https://secure.sciencedirect.com/science/article/pii/S3407",  # another subdomain
+    ],
+    ids=["same-host", "without-www", "subdomain"],
+)
+def test_a_scholarly_page_the_record_points_at_keeps_the_top_tier(page_url):
+    """The paper's own landing page: the record's resource.primary.URL shares
+    its registrable domain, so the declared DOI still earns VERIFIED_DOI."""
+    _crossref_doi(DOI, PAPER_RECORD)
+    tier, record = resolve_tier(PAPER_META, _client(), page_url=page_url)
+    assert tier == "VERIFIED_DOI"
+    assert record is not None
+
+
+@respx.mock
+def test_the_same_page_on_an_unrelated_domain_is_not_verified(credibility_log):
+    """The hole corroboration alone left: a page's title, authors and publisher
+    come from its own invisible tags, exactly like its DOI, so declaring the
+    paper's title beside the paper's DOI passes corroboration. The record must
+    also point at the page — and it must not come back, or merge_record would
+    import the paper's publisher and date onto the impostor."""
+    _crossref_doi(DOI, PAPER_RECORD)
+    _crossref_no_titles()
+    tier, record = resolve_tier(
+        PAPER_META, _client(), page_url="https://water-truths.example/ten-facts"
+    )
+    assert (tier, record) == ("METADATA_ONLY", None)
+    assert merge_record(PAPER_META, record).publisher == "Heliyon"
+    warnings = [r for r in credibility_log.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert DOI in warnings[0].getMessage()
+    assert "water-truths.example" in warnings[0].getMessage()
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "page_url",
+    [
+        f"https://doi.org/{DOI}",
+        f"https://onlinelibrary.example/doi/full/{DOI}",
+        f"https://journals.example/article?id={DOI.replace('/', '%2F')}",
+    ],
+    ids=["doi-resolver", "doi-in-path", "doi-percent-encoded"],
+)
+def test_a_page_whose_address_carries_the_doi_keeps_the_top_tier(page_url):
+    """The other half of the gate: many publishers put the DOI in the article's
+    address, and the record's landing page is often on a sibling corporate
+    domain (linkinghub.elsevier.com for a sciencedirect.com article)."""
+    _crossref_doi(DOI, {**PAPER_RECORD, "resource": {"primary": {"URL": "https://elsewhere.test"}}})
+    tier, _ = resolve_tier(PAPER_META, _client(), page_url=page_url)
+    assert tier == "VERIFIED_DOI"
+
+
+@respx.mock
+def test_a_record_without_a_primary_resource_falls_back_to_its_url():
+    """Crossref's older records carry only the top-level URL."""
+    record = {k: v for k, v in PAPER_RECORD.items() if k != "resource"}
+    _crossref_doi(DOI, {**record, "URL": f"https://doi.org/{DOI}"})
+    _crossref_no_titles()
+    assert resolve_tier(PAPER_META, _client(), page_url=PAPER_PAGE)[0] == "METADATA_ONLY"
+    assert (
+        resolve_tier(PAPER_META, _client(), page_url="https://doi.org/whatever")[0]
+        == "VERIFIED_DOI"
+    )
+
+
+@pytest.mark.parametrize(
+    ("landing", "page", "shared"),
+    [
+        ("https://www.nature.com/articles/x", "https://nature.com/articles/x", True),
+        ("https://nature.com/articles/x", "https://blogs.nature.com/post", True),
+        ("https://NATURE.com:443/articles/x", "https://www.nature.com/p", True),
+        # The two shapes a look-alike host takes.
+        ("https://www.nature.com/articles/x", "https://nature.com.attacker.example/p", False),
+        ("https://www.nature.com/articles/x", "https://attacker-nature.com/p", False),
+        ("https://www.nature.com/articles/x", "https://sciencedirect.com/p", False),
+        ("not a url", "https://nature.com/p", False),
+    ],
+)
+def test_same_site_compares_registrable_domains(landing, page, shared):
+    """The security predicate itself: a suffix must fall on a label boundary,
+    or every look-alike host would inherit the real site's records."""
+    assert _same_site(landing, page) is shared
+
+
+@respx.mock
+def test_a_pdf_with_the_same_metadata_is_unaffected(credibility_log):
+    """A PDF has no address to compare, and its metadata is read from its own
+    pages, not from tags only a machine sees: the gate must not touch it."""
+    _crossref_doi(DOI, PAPER_RECORD)
+    tier, record = resolve_tier(PAPER_META, _client())
+    assert tier == "VERIFIED_DOI"
+    assert record is not None
+    assert not [r for r in credibility_log.records if r.levelname == "WARNING"]
 
 
 def test_year_bearing_title_cannot_corroborate_by_year_alone():

@@ -415,18 +415,26 @@ def score_run(
     source_years: list[int] = []
     try:
         for document in scorable:
-            metadata, title_search = None, True
+            metadata, title_search, page_url = None, True, None
             if document["source_type"] in dbmod.LINK_SOURCE_TYPES:
                 # The page declared its own metadata at ingest; a model call is the
                 # fallback only when it declared nothing beyond a title.
                 provenance = json.loads(document["metadata"]).get("provenance") or {}
                 metadata = metadata_from_provenance(provenance)
                 title_search = bool(provenance.get("scholarly"))
+                # Where the metadata was read from, which resolve_tier needs to
+                # ask whether a DOI's record points back at this page. The page
+                # as FETCHED (after redirects) — the address its declarations
+                # were served at. Both readings of a page are the page owner's
+                # words, so the fallback extraction below is gated the same way.
+                page_url = provenance.get("final_url") or provenance.get("url") or None
             if metadata is None:
                 metadata = extract_metadata(
                     llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
                 )
-            tier, record = resolve_tier(metadata, crossref, isbn_lookup, title_search=title_search)
+            tier, record = resolve_tier(
+                metadata, crossref, isbn_lookup, title_search=title_search, page_url=page_url
+            )
             merged = merge_record(metadata, record)
             scored = score_source(
                 merged,

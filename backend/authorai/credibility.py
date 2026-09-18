@@ -7,7 +7,11 @@ arithmetic. Verification tiers, strongest first:
   VERIFIED_DOI    the extracted DOI resolves at Crossref AND the record
                   corroborates the document (title, an author family name, or
                   publisher) — a DOI is printable text, so resolving one only
-                  proves it exists, never that the work it names is ours
+                  proves it exists, never that the work it names is ours. For a
+                  fetched PAGE the record must also point back at the page
+                  (its landing page shares the page's registrable domain, or
+                  the page's address carries the DOI): a page writes the
+                  corroborating fields in the same invisible tags as the DOI
   VERIFIED_TITLE  no DOI, but a Crossref title search returns a record whose
                   title matches ours exactly (normalized) AND a second field
                   corroborates (year ±1, or first-author family name) — a
@@ -30,11 +34,12 @@ import re
 import sqlite3
 import time
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 from pydantic import BaseModel, Field
 
+from authorai.fetch import url_host
 from authorai.llm import LLM
 from authorai.log import setup_logger
 
@@ -465,6 +470,22 @@ def _authors_intersect(metadata: SourceMetadata, record: dict) -> bool:
     return bool(families & _family_names(metadata))
 
 
+# What the two halves of the DOI gate cost, stated rather than left implicit
+# (docs/metrics.md repeats it for the reader of a score). Each class below is a
+# LEGITIMATE source that lands on METADATA_ONLY, 5 points instead of 20:
+#
+# - An institutional report printing its publisher as an acronym ("FAO") against
+#   a record holding the expanded name: _publishers_agree compares adjacent word
+#   phrases, such reports print no personal authors, and their registered title
+#   often carries a subtitle the cover does not — nothing left to corroborate.
+# - A publisher's own article page whose record names a sibling domain
+#   (sciencedirect.com articles resolve to linkinghub.elsevier.com, and their
+#   address carries the PII, not the DOI), and a repository or mirror copy of a
+#   paper published elsewhere (PMC, an institutional repository).
+#
+# Every one of them loses points it deserves; none gains points it does not. The
+# alternative is 20 of the 30 verification points, plus the real paper's
+# publisher and date through merge_record, for one invisible tag.
 def _doi_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
     """A resolved DOI proves the DOI exists, never that the record describes
     THIS document — and a web page's DOI is read from its own citation_doi tag
@@ -487,6 +508,64 @@ def _doi_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
     return _publishers_agree(metadata.publisher, record.get("publisher"))
 
 
+def _same_site(one: str, other: str) -> bool:
+    """True when two URLs' hosts share a registrable domain.
+
+    Approximated as equality once a leading `www.` is dropped, or one host being
+    a label-boundary suffix of the other, so `nature.com`, `www.nature.com` and
+    `blogs.nature.com` are one site while `nature.com.attacker.example` and
+    `attacker-nature.com` are not. Deliberately not a public-suffix list (a new
+    dependency and a table that dates): confusing two hosts under one public
+    suffix would need one of them to BE the suffix (`co.uk` beside `x.co.uk`),
+    and no Crossref landing page is a bare public suffix.
+    """
+    host, their_host = url_host(one), url_host(other)
+    if host is None or their_host is None:
+        return False
+    host, their_host = host.removeprefix("www."), their_host.removeprefix("www.")
+    return host == their_host or host.endswith(f".{their_host}") or their_host.endswith(f".{host}")
+
+
+def _record_points_at_page(record: dict, doi: str, page_url: str) -> bool:
+    """Does the Crossref record point back at the page that declared the DOI?
+
+    Corroboration alone cannot gate a PAGE: its title, authors and publisher come
+    from the same invisible tags as its DOI, so a hostile page that declares a
+    real paper's DOI AND that paper's title corroborates itself. What a page
+    cannot write is the registry's own answer, so the record must name the page —
+    its landing page (`resource.primary.URL`, or the older top-level `URL`)
+    shares the page's registrable domain, or the page's address carries the DOI.
+
+    Residual, accepted deliberately: a page served at an address its owner chose
+    (`evil.example/10.1016/...`) satisfies the second half. Unlike a citation_doi
+    tag, that address is the link the user pasted and is shown in the source
+    list — the gate lifts the lie from invisible to legible, it does not make it
+    impossible.
+    """
+    resource = record.get("resource") or {}
+    landing = (resource.get("primary") or {}).get("URL") or record.get("URL")
+    if isinstance(landing, str) and _same_site(landing, page_url):
+        return True
+    cleaned = clean_doi(doi)
+    # unquote: a DOI in a query string is percent-encoded ("?id=10.1371%2F...").
+    return cleaned is not None and cleaned.lower() in unquote(page_url).lower()
+
+
+def _doi_rejection(
+    doi: str, metadata: SourceMetadata, record: dict, page_url: str | None
+) -> str | None:
+    """Why a resolved DOI's record is not this document's — the one place the
+    DOI path can say no, phrased for the log — or None when it is ours."""
+    if not _doi_record_corroborates(metadata, record):
+        return "resolved but neither title, authors nor publisher corroborates"
+    if page_url is not None and not _record_points_at_page(record, doi, page_url):
+        return (
+            "resolved and corroborates, but the record does not point at the page "
+            f"that declared it ({page_url})"
+        )
+    return None
+
+
 def _isbn_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
     """An ISBN resolves to exactly one work, but the ISBN itself came from an
     LLM extraction — corroboration guards against a foreign ISBN (a cited
@@ -504,23 +583,29 @@ def resolve_tier(
     isbn_lookup: "IsbnClient | None" = None,
     *,
     title_search: bool = True,
+    page_url: str | None = None,
 ) -> tuple[Tier, dict | None]:
     """`title_search=False` skips the Crossref title path (the DOI and ISBN
     paths still run). Web pages pass False unless they carry scholarly
     citation_* tags: a news headline that merely shares a year with some
-    registered work is a false positive the PDF path does not face."""
+    registered work is a false positive the PDF path does not face.
+
+    `page_url` is the address the metadata was READ FROM, set only for a fetched
+    page; a DOI it declares must additionally resolve to a record that points
+    back at that page (_record_points_at_page). A document read from its own
+    pages — a PDF — passes None and is gated by corroboration alone: it has no
+    address to compare, and what it states about itself is printed where a
+    reader sees it, not in tags written for machines.
+    """
     if metadata.doi:
         record = crossref.by_doi(metadata.doi)
-        if record and _doi_record_corroborates(metadata, record):
-            return "VERIFIED_DOI", record
         if record:
+            rejection = _doi_rejection(metadata.doi, metadata, record, page_url)
+            if rejection is None:
+                return "VERIFIED_DOI", record
             # Fall through rather than return the record: merge_record would
             # otherwise fill our gaps from a work that is not ours.
-            logger.warning(
-                "DOI %r resolved but neither title, authors nor publisher corroborates — "
-                "treating as unverified",
-                metadata.doi,
-            )
+            logger.warning("DOI %r %s — treating as unverified", metadata.doi, rejection)
     if title_search and metadata.title:
         for record in crossref.by_title(metadata.title):
             if _title_match(metadata, record):

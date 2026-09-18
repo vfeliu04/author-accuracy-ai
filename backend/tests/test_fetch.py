@@ -34,6 +34,7 @@ from authorai.fetch import (
     fetch_url,
     is_public_address,
     is_youtube_url,
+    url_host,
     validate_source_url,
 )
 
@@ -216,6 +217,27 @@ def test_an_overlong_url_is_quoted_truncated_not_whole():
 )
 def test_is_youtube_url(url, expected):
     assert is_youtube_url(url) is expected
+
+
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("https://Example.ORG/a", "example.org"),
+        # One host, one spelling: an international host and its punycode agree.
+        ("https://exämple.org/a", "xn--exmple-cua.org"),
+        ("https://xn--exmple-cua.org/a", "xn--exmple-cua.org"),
+        ("https://user:pw@example.org:8443/a", "example.org"),
+        ("https://example.org./a", "example.org"),
+        ("/just/a/path", None),
+        ("not a url", None),
+        ("", None),
+    ],
+)
+def test_url_host(url, host):
+    """The one URL→host read: credibility compares a Crossref landing page with
+    a source page on this form, so a case, port, credential or IDNA difference
+    must not read as a different site."""
+    assert url_host(url) == host
 
 
 # --- the address gate -------------------------------------------------------

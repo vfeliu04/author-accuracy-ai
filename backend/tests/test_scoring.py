@@ -545,6 +545,67 @@ def test_scholarly_web_page_keeps_crossref_title_search(conn, scored_run):
     assert "A Scholarly Landing Page" in crossref.titles
 
 
+PAPER_DOI = "10.1016/j.heliyon.2024.e34730"
+PAPER_RECORD = {
+    "title": ["Rainfall variability in the Ebro basin"],
+    "publisher": "Elsevier BV",
+    "resource": {"primary": {"URL": "https://www.sciencedirect.com/science/article/pii/S3407"}},
+}
+
+
+class _DoiCrossref(_NoNetworkCrossref):
+    """Crossref stub resolving one DOI to the paper's record."""
+
+    def by_doi(self, doi):
+        return PAPER_RECORD if doi == PAPER_DOI else None
+
+
+@pytest.mark.parametrize(
+    ("page", "expected"),
+    [
+        ("https://www.sciencedirect.com/science/article/pii/S3407", "VERIFIED_DOI"),
+        ("https://water-truths.example/ten-facts", "METADATA_ONLY"),
+    ],
+    ids=["the-papers-own-page", "an-impostor-page"],
+)
+def test_a_pages_declared_doi_is_verified_only_where_the_record_points(
+    conn, scored_run, page, expected
+):
+    """The page's address reaches resolve_tier from its provenance: two pages
+    declaring the SAME DOI, title and publisher score differently, because only
+    one of them is the page the Crossref record names."""
+    run_id = scored_run["run"]
+    provenance = {
+        **WHO_PROVENANCE,
+        "url": page,
+        "final_url": page,
+        "title": "Rainfall variability in the Ebro basin",
+        "publisher": "Heliyon",
+        "doi": PAPER_DOI,
+    }
+    web_doc, _ = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Rainfall",
+        metadata={"sections": [], "provenance": provenance},
+        text="Rainfall in the basin fell by a fifth.",
+        url=page,
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
+    rows = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}
+    assert rows[web_doc]["tier"] == expected
+    # The rejected record is never merged: the page keeps its own publisher.
+    assert rows[web_doc]["metadata"]["publisher"] == "Heliyon"
+
+
 def test_web_page_declaring_only_a_title_falls_back_to_the_metadata_call(conn, scored_run):
     run_id = scored_run["run"]
     bare = {"url": "https://example.org/a", "final_url": "https://example.org/a", "title": "A"}
