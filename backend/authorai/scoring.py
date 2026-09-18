@@ -423,10 +423,11 @@ def score_run(
                 metadata = metadata_from_provenance(provenance)
                 title_search = bool(provenance.get("scholarly"))
                 # Where the metadata was read from, which resolve_tier needs to
-                # ask whether a DOI's record points back at this page. The page
-                # as FETCHED (after redirects) — the address its declarations
-                # were served at. Both readings of a page are the page owner's
-                # words, so the fallback extraction below is gated the same way.
+                # ask whether the record behind ANY verified tier names this
+                # page. The page as FETCHED (after redirects) — the address its
+                # declarations were served at. Both readings of a page are the
+                # page owner's words, so the fallback extraction below is gated
+                # the same way.
                 page_url = provenance.get("final_url") or provenance.get("url") or None
             if metadata is None:
                 metadata = extract_metadata(

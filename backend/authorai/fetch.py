@@ -196,6 +196,25 @@ def url_host(url: str) -> str | None:
     return host.lower().rstrip(".") or None
 
 
+def url_address(url: str) -> tuple[str, str] | None:
+    """A URL's host AND path, in the form two links are compared on — the host
+    as url_host spells it without a leading `www.`, and the path lower-cased
+    with any trailing slash dropped — or None when the value is not a URL with
+    a host.
+
+    WHICH PAGE a link names is this pair, never the host alone: multi-tenant
+    hosts (zenodo.org, osf.io, every blog and university-pages host) serve
+    strangers' documents from one host, so host equality says nothing about the
+    document. Scheme, port, credentials, query and fragment stay out: two links
+    to one page differ on those, and on a path they do not.
+    """
+    host = url_host(url)
+    if host is None:
+        return None
+    # url_host already parsed this string, so parsing it again cannot raise.
+    return host.removeprefix("www."), httpx.URL(url.strip()).path.rstrip("/").lower()
+
+
 def is_youtube_url(url: str) -> bool:
     """True when the URL's host is YouTube, including www./m./music. hosts."""
     return url_host(url) in _YOUTUBE_HOSTS

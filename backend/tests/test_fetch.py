@@ -34,6 +34,7 @@ from authorai.fetch import (
     fetch_url,
     is_public_address,
     is_youtube_url,
+    url_address,
     url_host,
     validate_source_url,
 )
@@ -238,6 +239,25 @@ def test_url_host(url, host):
     a source page on this form, so a case, port, credential or IDNA difference
     must not read as a different site."""
     assert url_host(url) == host
+
+
+@pytest.mark.parametrize(
+    ("url", "address"),
+    [
+        ("https://www.Example.ORG/Papers/A", ("example.org", "/papers/a")),
+        ("http://example.org/papers/a/", ("example.org", "/papers/a")),
+        ("https://example.org:8443/papers/a?id=7#top", ("example.org", "/papers/a")),
+        ("https://example.org", ("example.org", "")),
+        # Two documents on one multi-tenant host are two addresses.
+        ("https://zenodo.org/records/1", ("zenodo.org", "/records/1")),
+        ("not a url", None),
+    ],
+)
+def test_url_address(url, address):
+    """WHICH PAGE a link names: host AND path, because a shared host says
+    nothing about a document on it. Scheme, port, case, a leading www., a
+    trailing slash, the query and the fragment are all noise on one page."""
+    assert url_address(url) == address
 
 
 # --- the address gate -------------------------------------------------------
