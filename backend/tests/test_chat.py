@@ -190,6 +190,52 @@ def test_context_lists_image_and_unscored_sources_honestly(conn):
     assert "- 'Unscored Source': not scored" in context
 
 
+def test_context_says_which_pages_were_read_only_in_part(conn):
+    """Chat reads the same source list the report's panel does, and that panel
+    marks a capped page 'Read in part'. Told nothing, the model answers from the
+    head of a page as though it had the whole page, next to a panel saying it
+    did not — so the two numbers travel into the context too."""
+    import json
+
+    run_id = _scored_run(conn)
+    web = dbmod.add_upload(
+        conn, "SOURCE", "who.int", "/tmp/page.json", source_type="web", url="https://who.int/facts"
+    )
+    dbmod.add_document(
+        conn,
+        run_id,
+        "SOURCE",
+        upload_id=web,
+        title="Drinking-water",
+        metadata=json.dumps(
+            {
+                "sections": [],
+                "provenance": {"truncated": {"kept_chars": 200_000, "dropped_chars": 51_234}},
+            }
+        ),
+    )
+    whole = dbmod.add_upload(
+        conn, "SOURCE", "un.org", "/tmp/whole.json", source_type="web", url="https://un.org/facts"
+    )
+    dbmod.add_document(
+        conn,
+        run_id,
+        "SOURCE",
+        upload_id=whole,
+        title="Water report",
+        metadata=json.dumps({"sections": [], "provenance": {"url": "https://un.org/facts"}}),
+    )
+    context = chatmod.build_context(conn, run_id)
+    assert (
+        "- 'Drinking-water': not scored — READ IN PART: only the first 200,000 of 251,234 "
+        "characters of this page were analysed, so nothing later in it is covered"
+    ) in context
+    # A page read whole says nothing new, and neither does a PDF.
+    assert context.splitlines()[-1] == "- 'Water report': not scored"
+    assert "READ IN PART" not in context.split("- 'Drinking-water'")[0]
+    assert "READ IN PART" in chatmod.CHAT_SYSTEM  # the model is told what it means
+
+
 def test_context_phrases_each_evidence_locator_by_source_type(conn):
     run_id = _scored_run(conn)
     report = dbmod.get_report_doc_id(conn, run_id)

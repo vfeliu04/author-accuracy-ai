@@ -966,6 +966,67 @@ def test_an_enormous_page_is_capped_before_it_is_stored_and_the_run_still_succee
     assert provenance["truncated"] == {"kept_chars": 3000, "dropped_chars": 47000}
 
 
+def test_a_capped_pages_two_numbers_reach_the_report_source_row(conn, tmp_path, monkeypatch):
+    """The cap's disclosure, end to end, with nothing between the cut and the
+    report stubbed out: a real over-cap page is read by the real reader, capped,
+    stored, ingested by the real ingest_snapshot, and read back by the query the
+    /report endpoint uses.
+
+    The cap test above stubs ingest_snapshot away and the API test seeds
+    documents.metadata by hand, so the provenance → documents.metadata →
+    json_extract chain was covered nowhere: every link could be right on its own
+    and a capped page still tell the user it was read whole."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import load_snapshot
+    from authorai.web import extract_web
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/enormous"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+    # Distinct text per section: trafilatura drops repeated paragraphs.
+    body = "".join(
+        f"<h2>Section {n}</h2><p>In region {n}, safely managed drinking water "
+        f"reached {70 + n} percent of households, up from {60 + n} percent a "
+        f"decade earlier, according to the {2000 + n} household survey.</p>"
+        for n in range(8)
+    )
+    page = f"<html><head><title>Enormous</title></head><body>{body}</body></html>".encode()
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, settings, **kw: _fetched(u, body=page))
+    # The real reader, in this process: the subprocess wrapper is not what this
+    # test is about, and everything downstream of the reader stays real.
+    monkeypatch.setattr(
+        jobsmod, "extract_web_bounded", lambda html, *, url, timeout: extract_web(html, url=url)
+    )
+    settings = Settings(
+        anthropic_api_key="x",
+        openai_api_key="x",
+        figures_dir=tmp_path / "figures",
+        web_max_chars=400,
+    )
+    context = PipelineContext(conn, settings)
+    context._embedder = FakeEmbedder(dim=DIM)  # the one stub left: no OpenAI call
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(context, run_id, payload) == "Read 2 documents (1 link opened)"
+
+    parsed, provenance = load_snapshot(planned)
+    kept = sum(len(section.text) for section in parsed.sections)
+    dropped = provenance["truncated"]["dropped_chars"]
+    assert 0 < kept <= 400 < kept + dropped
+    [row] = dbmod.list_run_sources(conn, run_id)
+    # The numbers the user reads are the numbers the cap took.
+    assert row["source_type"] == "web"
+    assert row["truncated"] == {"kept_chars": kept, "dropped_chars": dropped}
+    assert row["truncated"] == provenance["truncated"]
+    # And they describe what was really ingested: the tail is in no chunk.
+    text = " ".join(
+        chunk["text"]
+        for chunk in conn.execute("SELECT text FROM chunks WHERE doc_id = ?", (row["doc_id"],))
+    )
+    assert "region 0" in text and "region 7" not in text
+
+
 def test_retry_with_an_existing_snapshot_never_fetches_again(conn, tmp_path, monkeypatch):
     from authorai import jobs as jobsmod
     from authorai.ingest import ParsedDocument, ParsedSection, write_snapshot

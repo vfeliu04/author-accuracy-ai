@@ -21,6 +21,9 @@ pipeline extracted the report's claims, verified each against ingested source
 documents, and scored the report. Everything you know about this run is in the
 ANALYSIS block below. Answer ONLY from it — do not invent claims, verdicts, or
 sources, and when the analysis does not cover something, say so plainly.
+A source marked READ IN PART is a web page the pipeline read only the
+beginning of — treat the rest of that page as never seen, and say so rather
+than implying the whole page was checked.
 Verdicts mean: SUPPORTED / CONTRADICTED / UNVERIFIABLE *relative to the
 ingested sources only*. A claim marked "disavowed by the report" is one the
 report ITSELF calls false — a CONTRADICTED verdict there means the report was
@@ -120,8 +123,26 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
             standing = "not scored"
         else:
             standing = f"tier {source['tier']}, credibility {source['total']}/100"
-        lines.append(f"- {source['doc_title']!r}: {standing}")
+        lines.append(f"- {source['doc_title']!r}: {standing}{_partial_note(source)}")
     return "\n".join(lines)
+
+
+def _partial_note(source: dict) -> str:
+    """What the page cap left out of a web source, read from the same row the
+    source list beside the chat marks 'Read in part'.
+
+    Without it the model answers from the head of a page as though it had the
+    page, while the panel next to it says the page was read in part. The
+    analysis never saw the rest, so a question about the rest has no answer
+    here, and saying so is the only honest one."""
+    truncated = source.get("truncated")
+    if not truncated:
+        return ""
+    kept, dropped = truncated["kept_chars"], truncated["dropped_chars"]
+    return (
+        f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of this "
+        "page were analysed, so nothing later in it is covered"
+    )
 
 
 def answer(
