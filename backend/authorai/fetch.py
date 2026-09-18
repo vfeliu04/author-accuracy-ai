@@ -68,7 +68,7 @@ _YOUTUBE_HOSTS = frozenset(
 # Applied to httpx's raw_host, which is already IDNA-encoded to ASCII.
 _HOSTNAME = re.compile(r"[A-Za-z0-9._-]+")
 _URL_CREDENTIALS = re.compile(r"^([^:/?#]*:)?//[^/?#]*@")
-_SHOWN_URL_CHARS = 200
+_SHOWN_CHARS = 200  # quoted characters of any server-controlled text before "..."
 
 _NAT64_PREFIXES = (
     ipaddress.ip_network("64:ff9b::/96"),  # well-known prefix (RFC 6052)
@@ -110,12 +110,20 @@ class FetchedResponse:
     is_pdf: bool
 
 
+def _shown_text(text: str) -> str:
+    """Server-controlled text as quoted in an error message: length bounded.
+
+    Every error here is stored with the run and shown to the operator, and the
+    server chooses how long its URLs, headers and protocol errors are — 100 kB
+    of its own prose ("your API key expired, call ...") in a stored run error
+    is operator deception, not a page defect. The stacked-coding refusal below
+    bounds its own quoting the same way, by layers."""
+    return text if len(text) <= _SHOWN_CHARS else text[:_SHOWN_CHARS] + "..."
+
+
 def _shown(url: str) -> str:
     """A URL as quoted in an error message: credentials cut, length bounded."""
-    text = _URL_CREDENTIALS.sub(r"\1//", url)
-    if len(text) > _SHOWN_URL_CHARS:
-        text = text[:_SHOWN_URL_CHARS] + "..."
-    return repr(text)
+    return repr(_shown_text(_URL_CREDENTIALS.sub(r"\1//", url)))
 
 
 def validate_source_url(url: str) -> str:
@@ -353,13 +361,16 @@ def _fetch(
         except httpx.HTTPError as exc:
             if watchdog.fired:  # the watchdog shut the socket: a timeout, not a network fault
                 raise _timed_out(where, budget) from exc
-            raise FetchError(f"Fetching {where} failed: {type(exc).__name__}: {exc}") from exc
+            raise FetchError(
+                f"Fetching {where} failed: {type(exc).__name__}: {_shown_text(str(exc))}"
+            ) from exc
         except httpx.InvalidURL as exc:
             # Even with follow_redirects=False, httpx parses a redirect's
             # Location to build response.next_request, and a malformed one
             # ("javascript:alert(1)") raises InvalidURL — not an HTTPError.
             raise FetchError(
-                f"Fetching {where} failed: the server sent an invalid redirect Location ({exc})"
+                f"Fetching {where} failed: the server sent an invalid redirect Location "
+                f"({_shown_text(str(exc))})"
             ) from exc
         finally:
             watchdog.cancel()
@@ -461,7 +472,7 @@ def _read(
     else:
         declared_type = content_type or "(none)"
         raise FetchError(
-            f"Fetching {where} failed: unsupported content type {declared_type!r} "
+            f"Fetching {where} failed: unsupported content type {_shown_text(declared_type)!r} "
             "(a source must be an HTML page or a PDF)"
         )
     codings = [c.strip().lower() for c in response.headers.get("Content-Encoding", "").split(",")]
@@ -469,7 +480,8 @@ def _read(
     undecodable = [c for c in applied if c not in DECODABLE_ENCODINGS]
     if undecodable:
         raise FetchError(
-            f"Fetching {where} failed: unsupported Content-Encoding {', '.join(undecodable)!r}"
+            f"Fetching {where} failed: "
+            f"unsupported Content-Encoding {_shown_text(', '.join(undecodable))!r}"
         )
     if len(applied) > 1:
         # httpx inflates EVERY layer of one socket read before iter_bytes yields
@@ -486,7 +498,9 @@ def _read(
     declared = response.headers.get("Content-Length")
     if declared is not None:
         if not declared.strip().isdigit():
-            raise FetchError(f"Fetching {where} failed: malformed Content-Length {declared!r}")
+            raise FetchError(
+                f"Fetching {where} failed: malformed Content-Length {_shown_text(declared)!r}"
+            )
         if int(declared) > limit:
             raise _too_large(where, limit)
     body = bytearray()

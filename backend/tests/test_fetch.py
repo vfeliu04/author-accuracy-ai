@@ -981,6 +981,61 @@ def test_corrupt_gzip_surfaces_as_a_fetch_error():
     assert isinstance(info.value.__cause__, httpx.DecodingError)
 
 
+# --- server-controlled text quoted into errors -------------------------------
+
+
+def _refusal(name: str, **headers) -> str:
+    """The FetchError message from one response, as it is stored with the run."""
+    with respx.mock:
+        respx.get(f"https://{PUBLIC_V4}/{name}").mock(
+            return_value=httpx.Response(
+                200, headers={"Content-Type": "text/html", **headers}, content=b"<html></html>"
+            )
+        )
+        with pytest.raises(FetchError) as info:
+            fetch_url(f"https://example.org/{name}", _settings(), resolve=_example())
+    return str(info.value)
+
+
+def test_an_enormous_content_type_is_quoted_but_bounded():
+    """A refusal quoting a server's header verbatim is stored with the run and
+    shown to the operator: a hostile server could otherwise seat 100 kB of its
+    own prose ("your API key expired, call ...") beside our own words. Same
+    rule as the stacked-coding refusal, which already quotes at most four."""
+    message = _refusal("type", **{"Content-Type": "image/" + "a" * 100_000})
+    assert "unsupported content type" in message
+    assert "https://example.org/type" in message
+    assert message.endswith("(a source must be an HTML page or a PDF)")
+    assert len(message) < 500
+
+
+def test_an_enormous_content_encoding_is_quoted_but_bounded():
+    message = _refusal("enc", **{"Content-Encoding": "x" * 100_000})
+    assert "unsupported Content-Encoding" in message
+    assert "https://example.org/enc" in message
+    assert len(message) < 500
+
+
+def test_an_enormous_malformed_content_length_is_quoted_but_bounded():
+    message = _refusal("len", **{"Content-Length": "12abc" * 20_000})
+    assert "malformed Content-Length" in message
+    assert "https://example.org/len" in message
+    assert len(message) < 500
+
+
+@respx.mock
+def test_an_enormous_transport_error_message_is_quoted_but_bounded():
+    """httpx quotes what the server sent into its own message (an illegal
+    response line, a bad header), and that message is quoted into ours."""
+    respx.get(f"https://{PUBLIC_V4}/boom").mock(side_effect=httpx.ReadError("x" * 100_000))
+    with pytest.raises(FetchError) as info:
+        fetch_url("https://example.org/boom", _settings(), resolve=_example())
+    message = str(info.value)
+    assert "ReadError" in message
+    assert "https://example.org/boom" in message
+    assert len(message) < 500
+
+
 # --- transport and DNS failures ---------------------------------------------
 
 
