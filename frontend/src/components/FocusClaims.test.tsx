@@ -120,7 +120,8 @@ const report: Report = {
       total: 80,
       tier: "VERIFIED_DOI",
       components: {},
-      metadata: {}
+      metadata: {},
+      truncated: null
     }
   ]
 };

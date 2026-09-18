@@ -1060,7 +1060,20 @@ def test_report_sources_list_every_source_document_with_type_and_scorability(tmp
         url="https://www.who.int/facts",
     )
     web_doc = dbmod.add_document(
-        conn, run_id, "SOURCE", upload_id=web_upload, title="Drinking-water"
+        conn,
+        run_id,
+        "SOURCE",
+        upload_id=web_upload,
+        title="Drinking-water",
+        metadata=json.dumps(
+            {
+                "sections": [],
+                "provenance": {
+                    "url": "https://www.who.int/facts",
+                    "truncated": {"kept_chars": 200_000, "dropped_chars": 51_234},
+                },
+            }
+        ),
     )
     stored = conn.execute("SELECT credibility FROM run_scores WHERE run_id = ?", (run_id,))
     credibility = json.loads(stored.fetchone()["credibility"])
@@ -1091,6 +1104,7 @@ def test_report_sources_list_every_source_document_with_type_and_scorability(tmp
         "tier": None,
         "components": None,
         "metadata": None,
+        "truncated": None,
     }
     web = by_id[web_doc]
     assert (web["source_type"], web["url"], web["scorable"], web["total"]) == (
@@ -1099,6 +1113,10 @@ def test_report_sources_list_every_source_document_with_type_and_scorability(tmp
         True,
         None,
     )
+    # A page read only in part says so where the user reads its standing, not
+    # only in the server log.
+    assert web["truncated"] == {"kept_chars": 200_000, "dropped_chars": 51_234}
+    assert pdf["truncated"] is None  # a PDF is never capped
     assert report["credibility_detail"]["excluded"] == credibility["excluded"]
 
 

@@ -214,6 +214,7 @@ Each entry in `sources` — every source document of the run, scored sources fir
 | `tier` | Verification tier: `VERIFIED_DOI` \| `VERIFIED_TITLE` \| `VERIFIED_ISBN` \| `METADATA_ONLY` \| `NONE`; `null` when unscored |
 | `components` | `{"metadata_completeness", "authority", "recency", "verification"}` point breakdown; `null` when unscored |
 | `metadata` | The bibliographic fields the points were computed from (`title`, `authors`, `publisher`, `publication_date`, `doi`, `isbn`); `null` when unscored |
+| `truncated` | `{"kept_chars", "dropped_chars"}` when the page cap (`AUTHORAI_WEB_MAX_CHARS`) read only part of a web page — what the run was scored against, and what it never saw; `null` for a page read whole and for every PDF or image |
 
 ## Document files
 

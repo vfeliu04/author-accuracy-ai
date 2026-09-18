@@ -107,6 +107,10 @@ export type ReportSource = {
   tier: string | null;
   components: Record<string, number> | null;
   metadata: SourceBiblio | null;
+  // Set only for a web page the page cap read in part: how much of its text the
+  // run was scored against, and how much it never saw. Null for a page read
+  // whole, and for every PDF and image.
+  truncated: { kept_chars: number; dropped_chars: number } | null;
 };
 
 // All 0–1 fractions, or null before the run is scored. Credibility stays null

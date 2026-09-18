@@ -363,15 +363,19 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
         if fetched.final_url == upload["url"]:
             raise  # the reader's message already names the link as added
         raise _redirected(exc, fetched.final_url, upload["url"]) from exc
-    # Before the page is stored, so what a retry re-ingests is bounded too.
-    parsed.sections = cap_sections(
+    # Before the page is stored, so what a retry re-ingests is bounded too, and
+    # a cut is recorded WITH the page: a report scored against the head of a page
+    # must not look like one scored against the whole page.
+    capped = cap_sections(
         parsed.sections, limit=context.settings.web_max_chars, url=fetched.final_url
     )
+    parsed.sections = capped.sections
     provenance = {
         "url": upload["url"],
         "final_url": fetched.final_url,
         "fetched_at": dbmod.now_iso(),
         "content_type": fetched.content_type,
+        **({"truncated": capped.truncated} if capped.truncated else {}),
         **asdict(page),
     }
     write_snapshot(planned, parsed, provenance)

@@ -913,6 +913,7 @@ def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_pat
     assert provenance["publisher"] == "World Health Organization"
     assert provenance["content_type"] == "text/html"
     assert provenance["fetched_at"]
+    assert "truncated" not in provenance  # the page was read whole
     row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
     # A page snapshot is never hashed: link sources do not dedup this round.
     assert (row["source_type"], row["content_hash"], row["path"]) == ("web", None, str(planned))
@@ -953,12 +954,16 @@ def test_an_enormous_page_is_capped_before_it_is_stored_and_the_run_still_succee
     assert step_ingest(PipelineContext(conn, settings), run_id, payload) == (
         "Read 2 documents (1 link opened)"
     )
-    parsed, _ = load_snapshot(planned)
+    parsed, provenance = load_snapshot(planned)
     # Whole sections, up to the cap: 3 of 50 (1000 characters each).
     assert [s.title for s in parsed.sections] == ["Section 0", "Section 1", "Section 2"]
     assert sum(len(s.text) for s in parsed.sections) <= 3000
     warning = " ".join(r.getMessage() for r in web_log.records if r.levelno == logging.WARNING)
     assert url in warning and "3000" in warning
+    # In the STORED page, not only in the log: a report scored against the head
+    # of a page must not read as one scored against the whole page, and the
+    # record has to survive the retry that re-ingests this snapshot.
+    assert provenance["truncated"] == {"kept_chars": 3000, "dropped_chars": 47000}
 
 
 def test_retry_with_an_existing_snapshot_never_fetches_again(conn, tmp_path, monkeypatch):

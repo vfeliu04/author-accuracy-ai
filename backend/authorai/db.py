@@ -1433,10 +1433,17 @@ def list_run_sources(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     before scoring has no rows, and neither may silently vanish from the
     product. Scored sources come first by total, then the rest in ingest
     order. Documents with no upload row (CLI and hand-seeded runs) are PDFs.
+
+    `truncated` is the page cap's record from the stored page's provenance
+    ({kept_chars, dropped_chars}, or None for a page read whole and for every
+    PDF), read with json_extract rather than by loading documents.metadata: that
+    column holds the document's whole section text, which this listing has no
+    use for and a capped page keeps 200,000 characters of.
     """
     rows = conn.execute(
         """
         SELECT d.id AS doc_id, d.title AS doc_title, u.source_type, u.url,
+               json_extract(d.metadata, '$.provenance.truncated') AS truncated,
                s.metadata, s.components, s.total, s.tier
         FROM documents d
         LEFT JOIN source_credibility s ON s.doc_id = d.id
@@ -1450,7 +1457,7 @@ def list_run_sources(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     for row in rows:
         record = dict(row)
         record["source_type"] = record["source_type"] or "pdf"
-        for key in ("metadata", "components"):
+        for key in ("metadata", "components", "truncated"):
             record[key] = None if record[key] is None else json.loads(record[key])
         out.append(record)
     return out

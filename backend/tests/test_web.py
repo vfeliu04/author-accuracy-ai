@@ -1471,15 +1471,21 @@ def _warnings(web_log) -> str:
 
 def test_a_page_within_the_cap_is_returned_untouched(web_log):
     sections = _cap_sections(100, 100)
+    capped = cap_sections(sections, limit=250, url=NEWS_URL)
     # The same list, not a copy: nothing about a normal page is rewritten.
-    assert cap_sections(sections, limit=250, url=NEWS_URL) is sections
+    assert capped.sections is sections
+    # No record: a page read whole says nothing, so every stored snapshot of one
+    # keeps the shape (and the bytes) it always had.
+    assert capped.truncated is None
     assert _warnings(web_log) == ""
 
 
 def test_a_page_over_the_cap_keeps_whole_sections_and_says_what_it_dropped(web_log):
-    kept = cap_sections(_cap_sections(100, 100, 100, 100), limit=250, url=NEWS_URL)
+    capped = cap_sections(_cap_sections(100, 100, 100, 100), limit=250, url=NEWS_URL)
     # Whole sections only: no chunk ends mid-sentence.
-    assert [(s.title, len(s.text)) for s in kept] == [("H1", 100), ("H2", 100)]
+    assert [(s.title, len(s.text)) for s in capped.sections] == [("H1", 100), ("H2", 100)]
+    # The numbers, not a bare flag: "read in part" cannot tell 2% from 95%.
+    assert capped.truncated == {"kept_chars": 200, "dropped_chars": 200}
     warning = _warnings(web_log)
     assert NEWS_URL in warning
     assert "250" in warning  # the limit
@@ -1490,19 +1496,27 @@ def test_a_single_section_over_the_cap_is_cut_at_a_line_boundary(web_log):
     """A page with no headings is ONE section: dropping it whole would lose the
     page, and keeping it whole would leave the cap unenforced."""
     text = "\n\n".join(f"Paragraph {number}. " + "word " * 20 for number in range(40))
-    [kept] = cap_sections([ParsedSection(title="H", page=None, text=text)], limit=500, url=NEWS_URL)
+    capped = cap_sections([ParsedSection(title="H", page=None, text=text)], limit=500, url=NEWS_URL)
+    [kept] = capped.sections
     assert len(kept.text) <= 500
     # A prefix of the page's own text, cut where a line ended.
     assert text.startswith(kept.text)
     assert text[len(kept.text)] == "\n"
     assert "500" in _warnings(web_log)
+    # The record counts the characters of the page, not of what a section held.
+    assert capped.truncated == {
+        "kept_chars": len(kept.text),
+        "dropped_chars": len(text) - len(kept.text),
+    }
 
 
 def test_a_section_with_no_line_break_at_all_is_cut_at_the_limit(web_log):
-    [kept] = cap_sections(
+    capped = cap_sections(
         [ParsedSection(title="H", page=None, text="x" * 900)], limit=500, url=NEWS_URL
     )
+    [kept] = capped.sections
     assert kept.text == "x" * 500
+    assert capped.truncated == {"kept_chars": 500, "dropped_chars": 400}
     assert _warnings(web_log)
 
 

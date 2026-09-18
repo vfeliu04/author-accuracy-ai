@@ -126,7 +126,23 @@ def extract_web(html: bytes | str, *, url: str) -> tuple[ParsedDocument, PageMet
     return document, metadata
 
 
-def cap_sections(sections: list[ParsedSection], *, limit: int, url: str) -> list[ParsedSection]:
+@dataclass(frozen=True)
+class CappedText:
+    """What the page cap left, and what it took.
+
+    `truncated` is the record the caller keeps in the stored page's provenance,
+    so a page read in part says so wherever the page is read back — a retry, the
+    report, the source list — and not only in the server log. It holds the two
+    numbers rather than a bare flag: "read in part" alone cannot tell 2% of a
+    page from 95% of it. It is None when the whole page was kept, so a snapshot
+    of a whole page carries nothing new and reads exactly as it always did.
+    """
+
+    sections: list[ParsedSection]
+    truncated: dict | None = None
+
+
+def cap_sections(sections: list[ParsedSection], *, limit: int, url: str) -> CappedText:
     """The page's sections, cut to at most `limit` characters of text (the
     caller's AUTHORAI_WEB_MAX_CHARS). Applied by the ingest step, so a stored
     page is already bounded; PDFs keep their own path.
@@ -137,17 +153,17 @@ def cap_sections(sections: list[ParsedSection], *, limit: int, url: str) -> list
     of chunks and about a gigabyte of live Python floats, times the links a
     run may hold.
 
-    Whole sections are kept, so no chunk ends mid-sentence, and the cut is
-    logged naming the page — a report scored against a page we quietly
-    truncated would misstate what was checked. A FIRST section that alone
-    exceeds the limit is cut at its last line break instead (a page with no
-    headings is one section: dropping it whole would lose the page, keeping it
-    whole would leave the limit unenforced), and one with no line break at all
-    at the limit itself.
+    Whole sections are kept, so no chunk ends mid-sentence, and the cut is both
+    logged naming the page and reported back for the page's provenance — a
+    report scored against a page we quietly truncated would misstate what was
+    checked. A FIRST section that alone exceeds the limit is cut at its last
+    line break instead (a page with no headings is one section: dropping it
+    whole would lose the page, keeping it whole would leave the limit
+    unenforced), and one with no line break at all at the limit itself.
     """
     total = sum(len(section.text) for section in sections)
     if total <= limit:
-        return sections
+        return CappedText(sections)
     kept: list[ParsedSection] = []
     used = 0
     for section in sections:
@@ -171,7 +187,7 @@ def cap_sections(sections: list[ParsedSection], *, limit: int, url: str) -> list
         limit,
         total - used,
     )
-    return kept
+    return CappedText(kept, {"kept_chars": used, "dropped_chars": total - used})
 
 
 def extract_web_bounded(

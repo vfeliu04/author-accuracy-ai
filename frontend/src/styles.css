@@ -669,6 +669,11 @@ a {
   font-family: var(--font-mono);
 }
 
+/* A page read only in part: the same sub-line, marked as a caution. */
+.src-row__sub--partial {
+  color: var(--color-warning);
+}
+
 .src-row__name--link {
   font-size: 0.78rem;
 }

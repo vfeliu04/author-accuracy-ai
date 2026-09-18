@@ -523,6 +523,10 @@ def get_report(run_id: str, conn: Conn) -> dict:
             # The extracted bibliographic fields — what the completeness /
             # authority / recency points were actually computed from.
             "metadata": row["metadata"],
+            # {kept_chars, dropped_chars} when the page cap read only part of a
+            # web page, else null: what a run was scored against is the user's
+            # to see, not the server log's to keep.
+            "truncated": row["truncated"],
         }
         for row in source_rows
     ]

@@ -36,7 +36,8 @@ const sources: ReportSource[] = [
     total: 82,
     tier: "VERIFIED_DOI",
     components: { authority: 30 },
-    metadata: {}
+    metadata: {},
+    truncated: null
   },
   {
     doc_id: "b",
@@ -47,7 +48,8 @@ const sources: ReportSource[] = [
     total: null,
     tier: null,
     components: null,
-    metadata: null
+    metadata: null,
+    truncated: null
   },
   {
     doc_id: "c",
@@ -58,7 +60,8 @@ const sources: ReportSource[] = [
     total: null,
     tier: null,
     components: null,
-    metadata: null
+    metadata: null,
+    truncated: null
   },
   {
     doc_id: "e",
@@ -69,7 +72,8 @@ const sources: ReportSource[] = [
     total: 41,
     tier: "METADATA_ONLY",
     components: {},
-    metadata: {}
+    metadata: {},
+    truncated: null
   }
 ];
 
@@ -308,7 +312,8 @@ describe("SourcesPanel", () => {
       total: 40,
       tier: "METADATA_ONLY",
       components: {},
-      metadata: {}
+      metadata: {},
+      truncated: null
     };
     render(
       <SourcesPanel
@@ -320,6 +325,31 @@ describe("SourcesPanel", () => {
     expect(screen.getAllByText("example.org/water/report 2024")).toHaveLength(1);
     expect(screen.queryByText(link)).not.toBeInTheDocument();
     expect(screen.getByText("metadata only")).toBeInTheDocument();
+  });
+
+  it("says when a page was read only in part, with the numbers on hover", () => {
+    // The page cap (AUTHORAI_WEB_MAX_CHARS) kept the head of a long page. A
+    // report scored against that head must not read like one scored against the
+    // whole page — the server log is not somewhere the user looks.
+    const partial: ReportSource = {
+      ...sources[1],
+      truncated: { kept_chars: 200000, dropped_chars: 51234 }
+    };
+    render(
+      <SourcesPanel
+        uploads={uploads}
+        report={{ ...doneReport, sources: [sources[0], partial] }}
+        ingestStatus="done"
+      />
+    );
+    const note = screen.getByText("Read in part");
+    expect(note).toHaveAttribute(
+      "title",
+      `Read ${(200000).toLocaleString()} of ${(251234).toLocaleString()} characters. The rest of this page was not analysed.`
+    );
+    expect(note.closest(".src-row")).toContainElement(screen.getByText("Water report 2024"));
+    // Only the page that was cut says so.
+    expect(screen.getAllByText("Read in part")).toHaveLength(1);
   });
 
   it("opens any source, including one that can't be scored", () => {

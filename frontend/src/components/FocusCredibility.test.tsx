@@ -19,7 +19,8 @@ const scored: ReportSource = {
     publisher: "IPCC",
     publication_date: "2022",
     doi: "10.1017/9781009325844.005"
-  }
+  },
+  truncated: null
 };
 
 const unscored: ReportSource = {
@@ -31,7 +32,8 @@ const unscored: ReportSource = {
   total: null,
   tier: null,
   components: null,
-  metadata: null
+  metadata: null,
+  truncated: null
 };
 
 const image: ReportSource = {
@@ -43,7 +45,8 @@ const image: ReportSource = {
   total: null,
   tier: null,
   components: null,
-  metadata: null
+  metadata: null,
+  truncated: null
 };
 
 function reportWith(overrides: Partial<Report>): Report {

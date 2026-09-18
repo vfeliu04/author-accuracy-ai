@@ -81,6 +81,25 @@ export function standing(source: ReportSource): string {
   return tierLabel(source.tier);
 }
 
+// A page the reader cap cut: the run was scored against its head only, so the
+// row says so in plain words and keeps the numbers for the hover. Without this
+// a partly-read page looks exactly like a whole one.
+function PartialNote({ truncated }: { truncated: ReportSource["truncated"] }) {
+  if (!truncated) return null;
+  const whole = truncated.kept_chars + truncated.dropped_chars;
+  return (
+    <div
+      className="src-row__sub src-row__sub--partial"
+      title={
+        `Read ${truncated.kept_chars.toLocaleString()} of ${whole.toLocaleString()} characters. ` +
+        "The rest of this page was not analysed."
+      }
+    >
+      Read in part
+    </div>
+  );
+}
+
 // Left panel: the report pinned on top, sources below. Before the run is
 // DONE the rows are the uploads (files and links); once it is DONE they are
 // every source document, with a credibility badge on each scored one.
@@ -157,6 +176,7 @@ export default function SourcesPanel({
                     </div>
                   ) : null}
                   <div className="src-row__sub">{standing(source)}</div>
+                  <PartialNote truncated={source.truncated} />
                 </div>
                 {isScored(source) ? (
                   <span className={`cred-badge cred-badge--${scoreBand(source.total)}`}>
