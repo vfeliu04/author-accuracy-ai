@@ -6,7 +6,9 @@ import respx
 
 from authorai.credibility import (
     CROSSREF_BASE,
+    UPLOADED,
     CrossrefClient,
+    Fetched,
     SourceMetadata,
     _publisher_authority,
     _same_address,
@@ -44,7 +46,7 @@ def test_doi_resolution_wins_tier_verified_doi():
         )
     )
     metadata = META.model_copy(update={"doi": "10.1000/xyz"})
-    tier, record = resolve_tier(metadata, _client())
+    tier, record = resolve_tier(metadata, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_DOI"
     assert record["publisher"] == "X"
 
@@ -71,7 +73,7 @@ def test_unresolvable_doi_falls_through_to_title_search():
         )
     )
     metadata = META.model_copy(update={"doi": "10.1000/nope"})
-    tier, _ = resolve_tier(metadata, _client())
+    tier, _ = resolve_tier(metadata, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_TITLE"
 
 
@@ -94,7 +96,7 @@ def test_title_match_requires_corroboration():
             },
         )
     )
-    tier, _ = resolve_tier(META, _client())
+    tier, _ = resolve_tier(META, _client(), origin=UPLOADED)
     assert tier == "METADATA_ONLY"
 
 
@@ -115,7 +117,7 @@ def test_crossref_timeout_retries_then_raises_loudly(monkeypatch):
     route.side_effect = httpx.ConnectTimeout("slow")
     metadata = SourceMetadata(doi="10.1000/slow", title=None)
     with pytest.raises(RuntimeError, match="no answer after 3 attempts"):
-        resolve_tier(metadata, _client())
+        resolve_tier(metadata, _client(), origin=UPLOADED)
     assert route.call_count == 3  # initial + 2 retries
 
 
@@ -130,7 +132,7 @@ def test_crossref_throttling_retries_then_succeeds(monkeypatch):
     # Title matching the record's, so the DOI corroborates and the test measures
     # the retry alone.
     metadata = SourceMetadata(doi="10.1000/busy", title="Anything")
-    tier, record = resolve_tier(metadata, _client())
+    tier, record = resolve_tier(metadata, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_DOI"
     assert route.call_count == 2
 
@@ -141,7 +143,7 @@ def test_crossref_server_errors_raise_after_retries(monkeypatch):
     route = respx.get(f"{CROSSREF_BASE}/works/10.1000/down")
     route.mock(return_value=httpx.Response(503))
     with pytest.raises(RuntimeError, match="HTTP 503"):
-        resolve_tier(SourceMetadata(doi="10.1000/down", title=None), _client())
+        resolve_tier(SourceMetadata(doi="10.1000/down", title=None), _client(), origin=UPLOADED)
     assert route.call_count == 3
 
 
@@ -160,7 +162,7 @@ def test_malformed_doi_is_skipped_without_a_request():
     # No route mocked: any HTTP call would make respx raise. The URL-prefixed
     # and shapeless forms both fall through to METADATA_ONLY with a warning.
     for bad in ("https://doi.org/nope", "not-a-doi", "10.1/x"):
-        tier, record = resolve_tier(SourceMetadata(doi=bad, title=None), _client())
+        tier, record = resolve_tier(SourceMetadata(doi=bad, title=None), _client(), origin=UPLOADED)
         assert (tier, record) == ("METADATA_ONLY", None)
 
 
@@ -172,7 +174,7 @@ def test_url_prefixed_doi_is_cleaned_before_lookup():
     # Title matching the record's, so the DOI corroborates and the test measures
     # the cleaning alone.
     metadata = SourceMetadata(doi="https://doi.org/10.1000/xyz", title="Anything")
-    tier, _ = resolve_tier(metadata, _client())
+    tier, _ = resolve_tier(metadata, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_DOI"
     assert route.call_count == 1
 
@@ -214,7 +216,7 @@ def test_a_doi_resolving_to_another_work_is_not_verified(credibility_log):
     the stranger's publisher, date and title onto the page."""
     _crossref_doi("10.1038/famous", STRANGER_RECORD)
     _crossref_no_titles()
-    tier, record = resolve_tier(PAGE_META, _client())
+    tier, record = resolve_tier(PAGE_META, _client(), origin=UPLOADED)
     assert (tier, record) == ("METADATA_ONLY", None)
     merged = merge_record(PAGE_META, record)
     assert (merged.publisher, merged.publication_date) == ("Daily Water Blog", "2026-01")
@@ -237,7 +239,7 @@ def test_a_corroborated_doi_still_earns_the_top_tier(corroborating):
     own title, publisher or author matches the record it resolves to keeps
     VERIFIED_DOI, and keeps the record for gap-merging."""
     _crossref_doi("10.1038/famous", {**STRANGER_RECORD, **corroborating})
-    tier, record = resolve_tier(PAGE_META, _client())
+    tier, record = resolve_tier(PAGE_META, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_DOI"
     assert record is not None
 
@@ -250,7 +252,9 @@ def test_a_document_stating_nothing_but_a_doi_cannot_corroborate_it(credibility_
     extraction all but always returns a title), while accepting it would leave
     a page one invisible tag away from the top tier."""
     _crossref_doi("10.1000/bare", {"title": ["Anything"], "publisher": "Elsevier"})
-    tier, record = resolve_tier(SourceMetadata(doi="10.1000/bare", title=None), _client())
+    tier, record = resolve_tier(
+        SourceMetadata(doi="10.1000/bare", title=None), _client(), origin=UPLOADED
+    )
     assert (tier, record) == ("METADATA_ONLY", None)
     assert "10.1000/bare" in credibility_log.text
 
@@ -275,7 +279,7 @@ def test_an_uncorroborated_doi_falls_through_to_the_title_path():
             },
         )
     )
-    tier, record = resolve_tier(PAGE_META, _client())
+    tier, record = resolve_tier(PAGE_META, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_TITLE"
     assert record["title"] == ["Ten Facts About Drinking Water"]
 
@@ -318,7 +322,7 @@ def test_a_scholarly_page_the_record_names_keeps_the_top_tier(page_url):
     """The paper's own landing page: the record's resource.primary.URL IS this
     address, so the declared DOI still earns VERIFIED_DOI."""
     _crossref_doi(DOI, PAPER_RECORD)
-    tier, record = resolve_tier(PAPER_META, _client(), page_url=page_url)
+    tier, record = resolve_tier(PAPER_META, _client(), origin=Fetched(page_url))
     assert tier == "VERIFIED_DOI"
     assert record is not None
 
@@ -333,7 +337,7 @@ def test_the_same_page_on_an_unrelated_domain_is_not_verified(credibility_log):
     _crossref_doi(DOI, PAPER_RECORD)
     _crossref_no_titles()
     tier, record = resolve_tier(
-        PAPER_META, _client(), page_url="https://water-truths.example/ten-facts"
+        PAPER_META, _client(), origin=Fetched("https://water-truths.example/ten-facts")
     )
     assert (tier, record) == ("METADATA_ONLY", None)
     assert merge_record(PAPER_META, record).publisher == "Heliyon"
@@ -355,7 +359,10 @@ def test_an_impostor_page_cannot_reach_a_verified_tier_through_the_title_search(
         return_value=httpx.Response(200, json={"message": {"items": [PAPER_RECORD]}})
     )
     tier, record = resolve_tier(
-        PAPER_META, _client(), title_search=True, page_url="https://water-truths.example/ten-facts"
+        PAPER_META,
+        _client(),
+        title_search=True,
+        origin=Fetched("https://water-truths.example/ten-facts"),
     )
     assert (tier, record) == ("METADATA_ONLY", None)
     assert merge_record(PAPER_META, record).publisher == "Heliyon"  # not "Elsevier BV"
@@ -374,7 +381,7 @@ def test_a_scholarly_page_the_title_record_names_still_earns_the_title_tier():
         PAPER_META.model_copy(update={"doi": None}),
         _client(),
         title_search=True,
-        page_url=PAPER_PAGE,
+        origin=Fetched(PAPER_PAGE),
     )
     assert tier == "VERIFIED_TITLE"
     assert record is not None
@@ -395,8 +402,8 @@ def test_a_record_on_a_shared_host_does_not_name_another_document_there(landing,
     beside a real record and claim its DOI. The record must name the ADDRESS."""
     _crossref_doi(DOI, {**PAPER_RECORD, "resource": {"primary": {"URL": landing}}})
     _crossref_no_titles()
-    assert resolve_tier(PAPER_META, _client(), page_url=page)[0] == "METADATA_ONLY"
-    assert resolve_tier(PAPER_META, _client(), page_url=landing)[0] == "VERIFIED_DOI"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(page))[0] == "METADATA_ONLY"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(landing))[0] == "VERIFIED_DOI"
 
 
 @respx.mock
@@ -414,7 +421,7 @@ def test_a_page_whose_address_carries_the_doi_keeps_the_top_tier(page_url):
     address, and the record's landing page is often on a sibling corporate
     domain (linkinghub.elsevier.com for a sciencedirect.com article)."""
     _crossref_doi(DOI, {**PAPER_RECORD, "resource": {"primary": {"URL": "https://elsewhere.test"}}})
-    tier, _ = resolve_tier(PAPER_META, _client(), page_url=page_url)
+    tier, _ = resolve_tier(PAPER_META, _client(), origin=Fetched(page_url))
     assert tier == "VERIFIED_DOI"
 
 
@@ -425,9 +432,11 @@ def test_a_record_without_a_primary_resource_falls_back_to_its_url():
     record = {k: v for k, v in PAPER_RECORD.items() if k != "resource"}
     _crossref_doi(DOI, {**record, "URL": "https://archive.example/papers/ebro"})
     _crossref_no_titles()
-    assert resolve_tier(PAPER_META, _client(), page_url=PAPER_PAGE)[0] == "METADATA_ONLY"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(PAPER_PAGE))[0] == "METADATA_ONLY"
     assert (
-        resolve_tier(PAPER_META, _client(), page_url="https://archive.example/papers/ebro")[0]
+        resolve_tier(PAPER_META, _client(), origin=Fetched("https://archive.example/papers/ebro"))[
+            0
+        ]
         == "VERIFIED_DOI"
     )
 
@@ -441,11 +450,12 @@ def test_a_doi_resolver_landing_page_names_one_document_not_the_host():
     _crossref_doi(DOI, {**record, "URL": f"https://doi.org/{DOI}"})
     _crossref_no_titles()
     assert (
-        resolve_tier(PAPER_META, _client(), page_url="https://doi.org/10.9999/other")[0]
+        resolve_tier(PAPER_META, _client(), origin=Fetched("https://doi.org/10.9999/other"))[0]
         == "METADATA_ONLY"
     )
     assert (
-        resolve_tier(PAPER_META, _client(), page_url=f"https://doi.org/{DOI}")[0] == "VERIFIED_DOI"
+        resolve_tier(PAPER_META, _client(), origin=Fetched(f"https://doi.org/{DOI}"))[0]
+        == "VERIFIED_DOI"
     )
 
 
@@ -478,10 +488,41 @@ def test_a_pdf_with_the_same_metadata_is_unaffected(credibility_log):
     """A PDF has no address to compare, and its metadata is read from its own
     pages, not from tags only a machine sees: the gate must not touch it."""
     _crossref_doi(DOI, PAPER_RECORD)
-    tier, record = resolve_tier(PAPER_META, _client())
+    tier, record = resolve_tier(PAPER_META, _client(), origin=UPLOADED)
     assert tier == "VERIFIED_DOI"
     assert record is not None
     assert not [r for r in credibility_log.records if r.levelname == "WARNING"]
+
+
+@respx.mock
+@pytest.mark.parametrize("address", ["", None], ids=["empty-string", "missing"])
+def test_a_fetched_source_without_a_usable_address_fails_closed(address, credibility_log):
+    """The gate is decided by what the source IS, never by whether some string
+    is truthy: an empty or missing address used to take the UNGATED path, the
+    one shape a security rule must never default to. A fetched source we cannot
+    place is exactly the one no record should be able to claim, so it earns no
+    tier — and the record stays out of merge_record."""
+    _crossref_doi(DOI, PAPER_RECORD)
+    _crossref_no_titles()
+    tier, record = resolve_tier(PAPER_META, _client(), origin=Fetched(address))
+    assert (tier, record) == ("METADATA_ONLY", None)
+    assert merge_record(PAPER_META, record).publisher == "Heliyon"
+    assert "no usable address" in credibility_log.text
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "address",
+    ["not a url", "mailto:editor@journals.example", f"/science/article/pii/{DOI}"],
+    ids=["not-a-url", "no-host", "path-only"],
+)
+def test_a_fetched_source_whose_address_is_not_a_url_fails_closed(address):
+    """Unusable, not just absent: a value with no host names no page, so it
+    cannot be compared with a landing link — and it must not be scanned for the
+    identifier either, or a bare path carrying the DOI would verify itself."""
+    _crossref_doi(DOI, PAPER_RECORD)
+    _crossref_no_titles()
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(address))[0] == "METADATA_ONLY"
 
 
 def test_year_bearing_title_cannot_corroborate_by_year_alone():
@@ -721,8 +762,8 @@ class _MatchingTitleCrossref:
 
 def test_resolve_tier_title_search_defaults_on_and_can_be_disabled():
     crossref = _MatchingTitleCrossref()
-    assert resolve_tier(META, crossref)[0] == "VERIFIED_TITLE"
-    assert resolve_tier(META, crossref, title_search=False)[0] == "METADATA_ONLY"
+    assert resolve_tier(META, crossref, origin=UPLOADED)[0] == "VERIFIED_TITLE"
+    assert resolve_tier(META, crossref, title_search=False, origin=UPLOADED)[0] == "METADATA_ONLY"
     assert crossref.title_calls == 1  # the disabled call never queried
 
 
@@ -881,7 +922,7 @@ def test_resolve_tier_isbn_path_requires_corroboration():
     )
     metadata = META.model_copy(update={"isbn": "978-1-9191958-0-3"})
     # Resolves, but neither title nor publisher corroborates -> unverified.
-    tier, _ = resolve_tier(metadata, _client(), _isbn_client())
+    tier, _ = resolve_tier(metadata, _client(), _isbn_client(), origin=UPLOADED)
     assert tier == "METADATA_ONLY"
 
     # Same lookup with an agreeing publisher -> VERIFIED_ISBN, record merged.
@@ -897,7 +938,7 @@ def test_resolve_tier_isbn_path_requires_corroboration():
             },
         )
     )
-    tier, record = resolve_tier(metadata, _client(), _isbn_client())
+    tier, record = resolve_tier(metadata, _client(), _isbn_client(), origin=UPLOADED)
     assert tier == "VERIFIED_ISBN"
     assert record["publisher"] == "Welthungerhilfe e.V."
 
@@ -922,12 +963,12 @@ def test_the_page_gate_covers_the_isbn_tier_too(credibility_log):
     )
     metadata = META.model_copy(update={"isbn": "978-1-9191958-0-3"})
     impostor = "https://hunger-truths.example/the-index"
-    assert resolve_tier(metadata, _client(), _isbn_client(), page_url=impostor)[0] == (
+    assert resolve_tier(metadata, _client(), _isbn_client(), origin=Fetched(impostor))[0] == (
         "METADATA_ONLY"
     )
     assert "VERIFIED_ISBN" in credibility_log.text
     catalogue = "https://openlibrary.org/isbn/9781919195803"
-    assert resolve_tier(metadata, _client(), _isbn_client(), page_url=catalogue)[0] == (
+    assert resolve_tier(metadata, _client(), _isbn_client(), origin=Fetched(catalogue))[0] == (
         "VERIFIED_ISBN"
     )
 

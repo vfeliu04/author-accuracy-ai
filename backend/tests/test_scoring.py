@@ -606,6 +606,41 @@ def test_a_pages_declared_doi_is_verified_only_where_the_record_points(
     assert rows[web_doc]["metadata"]["publisher"] == "Heliyon"
 
 
+def test_a_page_whose_stored_address_is_empty_is_not_verified(conn, scored_run):
+    """Fail closed, through the real scoring path: a stored page whose
+    provenance recorded no address at all. The gate used to be decided by
+    whether that string was truthy, so an empty one scored as though nothing
+    needed gating and the declared DOI took the top tier."""
+    run_id = scored_run["run"]
+    provenance = {
+        "url": "",
+        "final_url": "",
+        "title": "Rainfall variability in the Ebro basin",
+        "publisher": "Heliyon",
+        "doi": PAPER_DOI,
+    }
+    web_doc, _ = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Rainfall",
+        metadata={"sections": [], "provenance": provenance},
+        text="Rainfall in the basin fell by a fifth.",
+        url="",
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
+    assert row["tier"] == "METADATA_ONLY"
+    assert row["metadata"]["publisher"] == "Heliyon"
+
+
 def test_an_impostor_page_with_citation_tags_is_not_verified_by_any_path(conn, scored_run):
     """The measured attack: one citation_* tag makes a page 'scholarly', which
     opens the Crossref TITLE search — so a page declaring a real paper's DOI,

@@ -521,10 +521,10 @@ def _isbn_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
 
 # --- the page gate ---------------------------------------------------------
 #
-# Everything below exists so one rule holds for every verified tier: a FETCHED
-# PAGE is never verified by what it says about itself. Each path proposes a
-# _Verified candidate; resolve_tier alone decides whether that candidate may be
-# returned for a page. A path added later gets the gate by construction.
+# Everything below exists so one rule holds for every verified tier: content the
+# app FETCHED is never verified by what it says about itself. Each path proposes
+# a _Verified candidate; resolve_tier alone decides whether that candidate may be
+# returned for it. A path added later gets the gate by construction.
 
 
 @dataclass(frozen=True)
@@ -539,6 +539,52 @@ class _Verified:
     subject: str
     links: tuple[str, ...]
     identifiers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """Where a source came FROM: the app fetched it from an address the operator
+    pasted. Its bibliographic fields are whatever that address served — invisible
+    tags on a page, or a PDF's own pages — so no record verifies it unless the
+    record also names that address.
+
+    `address` is the address it was fetched from (the final one, after
+    redirects, when the fetch recorded one). It may be missing or unusable: an
+    address we cannot place names nothing, and a source we cannot place is
+    exactly the one no record should be able to claim, so that FAILS CLOSED — no
+    candidate is accepted and the source stays unverified.
+    """
+
+    address: str | None
+
+    def accepts(self, candidate: _Verified) -> bool:
+        address = self.address
+        if address is None or url_address(address) is None:
+            return False
+        return _record_names_page(candidate, address)
+
+    def __str__(self) -> str:
+        return self.address or "no usable address"
+
+
+@dataclass(frozen=True)
+class Uploaded:
+    """Where a source came FROM: the operator handed the app this file. It is
+    the file they meant, so there is no address to compare and corroboration
+    alone gates it — every candidate that got this far is accepted."""
+
+    def accepts(self, candidate: _Verified) -> bool:
+        return True
+
+    def __str__(self) -> str:
+        return "an uploaded file"
+
+
+# What a source IS decides the gate — never the truthiness of some string that
+# happens to be at hand. There are exactly two kinds, and only one of them has
+# an address at all.
+Origin = Fetched | Uploaded
+UPLOADED = Uploaded()
 
 
 def _record_doi(record: dict) -> str | None:
@@ -656,7 +702,7 @@ def resolve_tier(
     isbn_lookup: "IsbnClient | None" = None,
     *,
     title_search: bool = True,
-    page_url: str | None = None,
+    origin: Origin,
 ) -> tuple[Tier, dict | None]:
     """The document's verification tier and the record that earned it.
 
@@ -665,31 +711,30 @@ def resolve_tier(
     citation_* tags: a news headline that merely shares a year with some
     registered work is a false positive the PDF path does not face.
 
-    `page_url` is the address the metadata was READ FROM, set only for a fetched
-    page. Then NO record earns ANY verified tier unless it also names that page
-    (_record_names_page) — every field a page declares is a tag it writes about
-    itself, so no declaration of its own can verify another. This single loop is
-    where that holds, for every candidate every path produces: gating the paths
-    one at a time is what let a rejected DOI reach the same record's tier
-    through the title search.
+    `origin` says what the source IS, and is required: there is no tier without
+    it. Content the app FETCHED (Fetched) earns NO verified tier from ANY
+    candidate unless the record also names the address it was fetched from —
+    every field it declares was served by that address, so no declaration of its
+    own can verify another. This single loop is where that holds, for every
+    candidate every path produces: gating the paths one at a time is what let a
+    rejected DOI reach the same record's tier through the title search.
 
-    A document read from its own pages — a PDF — passes None and is gated by
-    corroboration alone: it has no address to compare, and what it states about
-    itself is printed where a reader sees it, not in tags written for machines.
+    A file the operator UPLOADED (UPLOADED) is the file they meant and is gated
+    by corroboration alone: there is no address it came from to compare.
     """
     for candidate in _verified_candidates(
         metadata, crossref, isbn_lookup, title_search=title_search
     ):
-        if page_url is None or _record_names_page(candidate, page_url):
+        if origin.accepts(candidate):
             return candidate.tier, candidate.record
         # Falling through rather than returning the record: merge_record would
         # otherwise fill our gaps from a work that is not ours.
         logger.warning(
-            "%s: %r matched a record that does not name the page it was read from (%s) — "
+            "%s: %r matched a record that does not name where it was fetched from (%s) — "
             "treating as unverified",
             candidate.tier,
             candidate.subject,
-            page_url,
+            origin,
         )
     if metadata.model_dump(exclude_defaults=True):
         return "METADATA_ONLY", None
