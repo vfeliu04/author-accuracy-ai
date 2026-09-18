@@ -14,6 +14,9 @@ import sqlite3
 from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.llm import LLM
+from authorai.log import setup_logger
+
+logger = setup_logger(__name__)
 
 CHAT_SYSTEM = """\
 You help a user understand a completed fact-checking analysis of a report. A
@@ -134,11 +137,26 @@ def _partial_note(source: dict) -> str:
     Without it the model answers from the head of a page as though it had the
     page, while the panel next to it says the page was read in part. The
     analysis never saw the rest, so a question about the rest has no answer
-    here, and saying so is the only honest one."""
+    here, and saying so is the only honest one.
+
+    Degrades rather than raises: this is a footnote on one line of the context,
+    and the two numbers come from a stored provenance. A shape cap_sections
+    never writes (a hand-edited row, a future schema) must not take the whole
+    chat endpoint down — the line keeps the standing it always had, and the log
+    names the source nobody could describe."""
     truncated = source.get("truncated")
-    if not truncated:
+    if truncated is None:  # the normal case: the page was read whole
         return ""
-    kept, dropped = truncated["kept_chars"], truncated["dropped_chars"]
+    kept = truncated.get("kept_chars") if isinstance(truncated, dict) else None
+    dropped = truncated.get("dropped_chars") if isinstance(truncated, dict) else None
+    if not isinstance(kept, int) or not isinstance(dropped, int):
+        logger.warning(
+            "source %r has a malformed page-cap record (%s) — the chat context cannot say how "
+            "much of the page was read",
+            source.get("doc_title"),
+            type(truncated).__name__,
+        )
+        return ""
     return (
         f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of this "
         "page were analysed, so nothing later in it is covered"

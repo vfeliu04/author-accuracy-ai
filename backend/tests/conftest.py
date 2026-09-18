@@ -42,6 +42,14 @@ def jobs_log(caplog):
 
 
 @pytest.fixture()
+def chat_log(caplog):
+    """caplog, capturing authorai.chat's records."""
+    from authorai import chat as chat_mod
+
+    yield from _attached_to(chat_mod.logger, caplog)
+
+
+@pytest.fixture()
 def credibility_log(caplog):
     """caplog, capturing authorai.credibility's records."""
     from authorai import credibility as credibility_mod

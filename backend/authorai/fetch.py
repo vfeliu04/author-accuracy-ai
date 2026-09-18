@@ -181,6 +181,22 @@ def _is_valid_host(host: str) -> bool:
     return _HOSTNAME.fullmatch(host) is not None
 
 
+_PERCENT_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
+
+
+def upper_escapes(path: str) -> str:
+    """A path's percent-escapes spelled in upper case — the one form in which
+    two addresses are compared.
+
+    RFC 3986 makes an escape's hex case insignificant (`%7e` IS `%7E`), while
+    what it encodes stays encoded: `%2F` is a character inside a segment, never
+    the separator `/`. Public because it is the module-crossing rule, not a
+    fetch detail: web.py compares a page's address with the URLs the page
+    declares about itself, and must spell an escape the same way this does.
+    """
+    return _PERCENT_ESCAPE.sub(lambda escape: escape[0].upper(), path)
+
+
 def url_host(url: str) -> str | None:
     """A URL's host as httpx spells it — lower case, IDNA-encoded, no trailing
     dot — or None when the value is not a URL with a host.
@@ -198,7 +214,7 @@ def url_host(url: str) -> str | None:
 
 def url_address(url: str) -> tuple[str, str] | None:
     """A URL's host AND path, in the form two links are compared on — the host
-    as url_host spells it without a leading `www.`, and the path lower-cased
+    as url_host spells it without a leading `www.`, and the path AS WRITTEN
     with any trailing slash dropped — or None when the value is not a URL with
     a host.
 
@@ -207,12 +223,21 @@ def url_address(url: str) -> tuple[str, str] | None:
     strangers' documents from one host, so host equality says nothing about the
     document. Scheme, port, credentials, query and fragment stay out: two links
     to one page differ on those, and on a path they do not.
+
+    The host is case-insensitive because DNS says so; the PATH is not, and is
+    compared as the request writes it (`raw_path`, up to the query), with only
+    what RFC 3986 calls insignificant normalized away: a trailing slash and the
+    case of an escape's hex digits. Folding the rest would merge documents a
+    host tells apart — `/Report` from `/report` on a case-sensitive server, and
+    `/a%2Fb`, one segment containing a slash, from `/a/b`, two segments.
     """
     host = url_host(url)
     if host is None:
         return None
     # url_host already parsed this string, so parsing it again cannot raise.
-    return host.removeprefix("www."), httpx.URL(url.strip()).path.rstrip("/").lower()
+    # raw_path carries the query, and is ASCII: httpx percent-encodes the rest.
+    path = httpx.URL(url.strip()).raw_path.split(b"?", 1)[0].decode()
+    return host.removeprefix("www."), upper_escapes(path).rstrip("/")
 
 
 def is_youtube_url(url: str) -> bool:

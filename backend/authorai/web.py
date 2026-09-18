@@ -57,7 +57,7 @@ from lxml import etree
 from trafilatura.xml import xmltotxt
 
 from authorai.credibility import clean_doi
-from authorai.fetch import shown_text
+from authorai.fetch import shown_text, upper_escapes
 from authorai.ingest import ParsedDocument, ParsedSection
 from authorai.log import setup_logger
 
@@ -1025,7 +1025,6 @@ def _named_urls(node: dict) -> set[str]:
 # Query parameters that record how a reader arrived, not which page; any other
 # query is part of the address (?id=2 is not the page ?id=1 describes).
 _TRACKING_PARAMS = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid")
-_PERCENT_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
 # What a path keeps as written. "%" is kept too: an existing escape is never
 # decoded, so an escaped "%2F" stays distinct from the separator "/".
 _PATH_SAFE = "/%:@!$&'()*+,;=-._~"
@@ -1043,9 +1042,7 @@ def _comparable_url(value: str) -> str:
         host = (parts.hostname or "").removeprefix("www.")
         if not host.isascii():
             host = httpx.URL(scheme="https", host=host).raw_host.decode("ascii")
-        path = _PERCENT_ESCAPE.sub(
-            lambda escape: escape[0].upper(), quote(parts.path, safe=_PATH_SAFE)
-        )
+        path = upper_escapes(quote(parts.path, safe=_PATH_SAFE))
         query = urlencode(
             [
                 (key, item)

@@ -236,6 +236,44 @@ def test_context_says_which_pages_were_read_only_in_part(conn):
     assert "READ IN PART" in chatmod.CHAT_SYSTEM  # the model is told what it means
 
 
+@pytest.mark.parametrize(
+    "truncated",
+    [
+        {"kept_chars": 200_000},
+        {"kept_chars": "many", "dropped_chars": "some"},
+        {},
+        [200_000, 51_234],
+    ],
+    ids=["missing-key", "not-numbers", "empty-object", "not-an-object"],
+)
+def test_a_malformed_page_cap_record_degrades_instead_of_failing_the_chat(
+    conn, chat_log, truncated
+):
+    """The two numbers come out of a stored provenance, and the note quoting
+    them is a footnote on one line of the context. A shape the writer never
+    produces — a hand-edited row, a future schema — must not take the whole chat
+    endpoint down with a KeyError: the line degrades to the standing it always
+    had, and the log says which source could not be described."""
+    import json
+
+    run_id = _scored_run(conn)
+    upload = dbmod.add_upload(
+        conn, "SOURCE", "who.int", "/tmp/page.json", source_type="web", url="https://who.int/facts"
+    )
+    dbmod.add_document(
+        conn,
+        run_id,
+        "SOURCE",
+        upload_id=upload,
+        title="Drinking-water",
+        metadata=json.dumps({"sections": [], "provenance": {"truncated": truncated}}),
+    )
+    context = chatmod.build_context(conn, run_id)
+    assert context.splitlines()[-1] == "- 'Drinking-water': not scored"
+    assert "READ IN PART" not in context
+    assert "Drinking-water" in chat_log.text
+
+
 def test_context_phrases_each_evidence_locator_by_source_type(conn):
     run_id = _scored_run(conn)
     report = dbmod.get_report_doc_id(conn, run_id)

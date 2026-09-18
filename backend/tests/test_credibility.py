@@ -505,8 +505,13 @@ def test_a_doi_resolver_landing_page_names_one_document_not_the_host():
     ("landing", "page", "same"),
     [
         ("https://www.nature.com/articles/x", "https://nature.com/articles/x", True),
-        ("https://NATURE.com:443/Articles/X", "https://www.nature.com/articles/x/", True),
+        # Host case and port: noise. A trailing slash, on its own: noise too.
+        ("https://NATURE.com:443/Articles/X", "https://www.nature.com/Articles/X", True),
+        ("https://nature.com/articles/x/", "https://nature.com/articles/x", True),
         ("https://nature.com/articles/x", "http://nature.com/articles/x?utm_source=n", True),
+        # The PATH is not noise: a host may serve these as two documents.
+        ("https://nature.com/Articles/X", "https://nature.com/articles/x", False),
+        ("https://nature.com/articles%2Fx", "https://nature.com/articles/x", False),
         # What the host-only comparison used to accept.
         ("https://nature.com/articles/x", "https://blogs.nature.com/articles/x", False),
         ("https://nature.com/articles/x", "https://nature.com/articles/y", False),
@@ -519,9 +524,10 @@ def test_a_doi_resolver_landing_page_names_one_document_not_the_host():
 )
 def test_same_address_compares_host_and_path(landing, page, same):
     """The security predicate itself: two links name ONE page only when host
-    and path agree. Scheme, port, case, a leading www., a trailing slash and a
-    query string are noise on the same page; a different path is a different
-    document, and on a multi-tenant host that is the whole difference."""
+    and path agree. Scheme, port, host case, a leading www., a trailing slash
+    and a query string are noise on the same page; the path as written is not,
+    and a different path is a different document — on a multi-tenant host that
+    is the whole difference."""
     assert _same_address(landing, page) is same
 
 

@@ -244,10 +244,16 @@ def test_url_host(url, host):
 @pytest.mark.parametrize(
     ("url", "address"),
     [
-        ("https://www.Example.ORG/Papers/A", ("example.org", "/papers/a")),
+        # The HOST is case-insensitive (DNS says so); the path is not.
+        ("https://www.Example.ORG/Papers/A", ("example.org", "/Papers/A")),
         ("http://example.org/papers/a/", ("example.org", "/papers/a")),
         ("https://example.org:8443/papers/a?id=7#top", ("example.org", "/papers/a")),
         ("https://example.org", ("example.org", "")),
+        # An escape is kept as the request sends it: %2F is a character inside
+        # one segment, not a separator, so it must not read as "/".
+        ("https://example.org/papers%2Fa", ("example.org", "/papers%2Fa")),
+        # Two spellings of one escape are one path (httpx upper-cases them).
+        ("https://example.org/%7euser/p", ("example.org", "/%7Euser/p")),
         # Two documents on one multi-tenant host are two addresses.
         ("https://zenodo.org/records/1", ("zenodo.org", "/records/1")),
         ("not a url", None),
@@ -255,9 +261,26 @@ def test_url_host(url, host):
 )
 def test_url_address(url, address):
     """WHICH PAGE a link names: host AND path, because a shared host says
-    nothing about a document on it. Scheme, port, case, a leading www., a
-    trailing slash, the query and the fragment are all noise on one page."""
+    nothing about a document on it. Scheme, port, host case, a leading www., a
+    trailing slash, the query and the fragment are all noise on one page — the
+    path itself is not, and is compared as the request writes it."""
     assert url_address(url) == address
+
+
+@pytest.mark.parametrize(
+    ("one", "other"),
+    [
+        ("https://example.org/Report", "https://example.org/report"),
+        ("https://example.org/papers%2Fa", "https://example.org/papers/a"),
+    ],
+    ids=["path-case", "encoded-slash"],
+)
+def test_url_address_separates_paths_a_host_may_tell_apart(one, other):
+    """Two documents a case-sensitive host (or one routing on an encoded slash)
+    serves separately must not compare equal: this pair is what decides whether
+    a registry's landing link names the page a source was fetched from, so
+    folding them would hand a sibling document the record's tier."""
+    assert url_address(one) != url_address(other)
 
 
 # --- the address gate -------------------------------------------------------

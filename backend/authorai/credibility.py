@@ -621,9 +621,9 @@ def _record_names_page(candidate: _Verified, page_url: str) -> bool:
     real paper's identifier AND that paper's title corroborates itself — on
     whichever path it reaches. What a page cannot write is the registry's own
     answer, so the record must name the page: its landing page IS the page's
-    address (host and path, ignoring scheme, a leading `www.`, case and a
-    trailing slash — _same_address), or the page's address carries the
-    identifier.
+    address (host and path, ignoring scheme, the host's case, a leading `www.`
+    and a trailing slash, with the path compared as written — _same_address), or
+    the page's address carries the identifier.
 
     The address, not the host: zenodo.org, osf.io, figshare and every blog or
     university-pages host let a stranger publish beside the real record, so a
