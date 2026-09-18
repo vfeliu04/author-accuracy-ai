@@ -1194,9 +1194,16 @@ def test_prefixed_schema_org_types_are_recognized(declared):
 
 
 def test_jsonld_nested_past_the_recursion_limit_is_skipped_with_a_warning(web_log):
+    # Deeper than the interpreter's WHOLE limit, read now rather than assumed:
+    # no stack has more allowance than the limit, so both blocks raise wherever
+    # in the stack the parse happens and whatever raised the limit first (torch
+    # lifts it to 2000 when it compiles). The array bomb used to be nested
+    # exactly 1000 deep — the default limit — and one full-suite ordering saw it
+    # parse cleanly: one warning instead of two.
+    depth = sys.getrecursionlimit() * 2
     url = "https://attacker.example/page"
-    array_bomb = "[" * 1000 + "]" * 1000
-    object_bomb = '{"@type":"Article","headline":"H","x":' + "[" * 3000 + "]" * 3000 + "}"
+    array_bomb = "[" * depth + "]" * depth
+    object_bomb = '{"@type":"Article","headline":"H","x":' + "[" * depth + "]" * depth + "}"
     page = _page("diario_agua_es.html").replace(
         "</head>",
         f'<script type="application/ld+json">{array_bomb}</script>'
