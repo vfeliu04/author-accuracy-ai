@@ -483,9 +483,9 @@ def _authors_intersect(metadata: SourceMetadata, record: dict) -> bool:
 # lands on METADATA_ONLY — _publishers_agree compares adjacent word phrases,
 # such reports print no personal authors, and their registered title often
 # carries a subtitle the cover does not, so nothing is left to corroborate. It
-# loses points it deserves; it gains none it does not. The alternative is 20 of
-# the 30 verification points, plus the real work's publisher and date through
-# merge_record, for one printed line.
+# loses points it deserves; it gains none it does not. The alternative is the
+# verification component's full 20 points instead of METADATA_ONLY's 5, plus the
+# real work's publisher and date through merge_record, for one printed line.
 def _doi_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
     """A resolved DOI proves the DOI exists, never that the record describes
     THIS document — a DOI is printable text, and a web page's is read from its
