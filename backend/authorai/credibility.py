@@ -546,8 +546,9 @@ def _record_doi(record: dict) -> str | None:
     genuinely serving this work carries in its address. Shape-checked rather
     than passed through clean_doi: a registry's own field is not the extractor's
     guess, and a malformed one here is nothing to warn a reader about."""
-    doi = (record.get("DOI") or "").strip() if isinstance(record.get("DOI"), str) else ""
-    return doi if doi and _DOI_SHAPE.match(doi) else None
+    doi = record.get("DOI")
+    doi = doi.strip() if isinstance(doi, str) else ""
+    return doi if _DOI_SHAPE.match(doi) else None
 
 
 def _verified(tier: Tier, record: dict, subject: str, identifier: str | None = None) -> _Verified:
