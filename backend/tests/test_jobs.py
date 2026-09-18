@@ -919,6 +919,48 @@ def test_web_link_is_fetched_into_a_snapshot_then_ingested_from_it(conn, tmp_pat
     assert ingested == [(str(planned), "SOURCE", upload_id, url)]
 
 
+def test_an_enormous_page_is_capped_before_it_is_stored_and_the_run_still_succeeds(
+    conn, tmp_path, monkeypatch, web_log
+):
+    """A hostile or merely enormous page is capped where it becomes a document:
+    the fetch bounds the MARKUP (fetch_max_bytes), nothing bounds what the
+    reader gets out of it, and ingest chunks and embeds a document's sections
+    in one list. The run still succeeds with the head of the page."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection, load_snapshot
+    from authorai.web import PageMetadata
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    url = "https://www.who.int/enormous"
+    upload_id, planned = _link_upload(conn, tmp_path, url)
+
+    def fake_extract(html, *, url, timeout):
+        sections = [
+            ParsedSection(title=f"Section {number}", page=None, text="word " * 200)
+            for number in range(50)
+        ]
+        return ParsedDocument(title="Enormous", sections=sections, tables=[], figures=[]), (
+            PageMetadata(title="Enormous")
+        )
+
+    monkeypatch.setattr(jobsmod, "fetch_url", lambda u, settings, **kw: _fetched(u))
+    monkeypatch.setattr(jobsmod, "extract_web_bounded", fake_extract)
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", web_max_chars=3000)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(PipelineContext(conn, settings), run_id, payload) == (
+        "Read 2 documents (1 link opened)"
+    )
+    parsed, _ = load_snapshot(planned)
+    # Whole sections, up to the cap: 3 of 50 (1000 characters each).
+    assert [s.title for s in parsed.sections] == ["Section 0", "Section 1", "Section 2"]
+    assert sum(len(s.text) for s in parsed.sections) <= 3000
+    warning = " ".join(r.getMessage() for r in web_log.records if r.levelno == logging.WARNING)
+    assert url in warning and "3000" in warning
+
+
 def test_retry_with_an_existing_snapshot_never_fetches_again(conn, tmp_path, monkeypatch):
     from authorai import jobs as jobsmod
     from authorai.ingest import ParsedDocument, ParsedSection, write_snapshot

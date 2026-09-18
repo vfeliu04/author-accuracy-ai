@@ -96,6 +96,16 @@ class Settings(BaseSettings):
     # trafilatura's cleaning can go quadratic on markup inside the byte cap, and
     # nothing else can interrupt the single worker thread.
     extract_timeout_seconds: float = 60.0
+    # How much article text ONE fetched page may contribute, in characters.
+    # fetch_max_bytes caps a page's MARKUP; nothing caps what the reader gets
+    # out of it, and ingest chunks and embeds a document's sections in ONE list:
+    # a page at the byte cap measured ~1 GB of live Python floats, and a run may
+    # hold max_source_files of them. 200,000 characters is several times the
+    # longest real article (a 10,000-word feature is ~60,000 characters) and
+    # costs at most ~200 chunks and ~50,000 embedding tokens for the page.
+    # Sections past it are dropped with a warning naming the page
+    # (web.cap_sections); PDFs are not subject to it.
+    web_max_chars: int = 200_000
     # Identifies the fetcher to the sites it reads.
     fetch_user_agent: str = "AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)"
     cors_origins: str = "http://localhost:5173"

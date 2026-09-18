@@ -40,7 +40,7 @@ import threading
 import time
 import traceback
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from html import unescape
 from html.parser import HTMLParser
@@ -115,6 +115,54 @@ def extract_web(html: bytes | str, *, url: str) -> tuple[ParsedDocument, PageMet
         title=metadata.title or first_heading, sections=sections, tables=[], figures=[]
     )
     return document, metadata
+
+
+def cap_sections(sections: list[ParsedSection], *, limit: int, url: str) -> list[ParsedSection]:
+    """The page's sections, cut to at most `limit` characters of text (the
+    caller's AUTHORAI_WEB_MAX_CHARS). Applied by the ingest step, so a stored
+    page is already bounded; PDFs keep their own path.
+
+    The fetch bounds a page's MARKUP (fetch_max_bytes, 10 MB) and nothing
+    bounds what the reader gets out of it, while ingest chunks and embeds a
+    document's sections in ONE list: a page at the byte cap becomes thousands
+    of chunks and about a gigabyte of live Python floats, times the links a
+    run may hold.
+
+    Whole sections are kept, so no chunk ends mid-sentence, and the cut is
+    logged naming the page — a report scored against a page we quietly
+    truncated would misstate what was checked. A FIRST section that alone
+    exceeds the limit is cut at its last line break instead (a page with no
+    headings is one section: dropping it whole would lose the page, keeping it
+    whole would leave the limit unenforced), and one with no line break at all
+    at the limit itself.
+    """
+    total = sum(len(section.text) for section in sections)
+    if total <= limit:
+        return sections
+    kept: list[ParsedSection] = []
+    used = 0
+    for section in sections:
+        if used + len(section.text) <= limit:
+            kept.append(section)
+            used += len(section.text)
+            continue
+        if not kept:
+            head = section.text[:limit]
+            break_at = head.rfind("\n")
+            text = head[:break_at].rstrip("\n") if break_at > 0 else head
+            kept.append(replace(section, text=text))
+            used += len(text)
+        break
+    logger.warning(
+        "%s: page text truncated to %d of %d characters (AUTHORAI_WEB_MAX_CHARS is %d) "
+        "— %d characters dropped",
+        url,
+        used,
+        total,
+        limit,
+        total - used,
+    )
+    return kept
 
 
 def extract_web_bounded(

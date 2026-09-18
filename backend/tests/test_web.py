@@ -20,6 +20,7 @@ import pytest
 import trafilatura
 
 import authorai.web as web_mod
+from authorai.ingest import ParsedSection
 from authorai.web import (
     MIN_BODY_CHARS,
     PageMetadata,
@@ -27,6 +28,7 @@ from authorai.web import (
     _normalize_date,
     _page_metadata,
     _prepare_tree,
+    cap_sections,
     extract_web,
 )
 
@@ -1449,6 +1451,57 @@ def test_nothing_extractable_is_a_thin_page():
     for page in ("", "<html></html>", "<html><body><div id='app'></div></body></html>"):
         with pytest.raises(ThinPageError, match="https://example.org/empty"):
             extract_web(page, url="https://example.org/empty")
+
+
+# --- the page text cap -----------------------------------------------------
+
+
+def _cap_sections(*lengths: int) -> list[ParsedSection]:
+    return [
+        ParsedSection(title=f"H{number}", page=None, text="x" * length)
+        for number, length in enumerate(lengths, start=1)
+    ]
+
+
+def _warnings(web_log) -> str:
+    return " ".join(r.getMessage() for r in web_log.records if r.levelno == logging.WARNING)
+
+
+def test_a_page_within_the_cap_is_returned_untouched(web_log):
+    sections = _cap_sections(100, 100)
+    # The same list, not a copy: nothing about a normal page is rewritten.
+    assert cap_sections(sections, limit=250, url=NEWS_URL) is sections
+    assert _warnings(web_log) == ""
+
+
+def test_a_page_over_the_cap_keeps_whole_sections_and_says_what_it_dropped(web_log):
+    kept = cap_sections(_cap_sections(100, 100, 100, 100), limit=250, url=NEWS_URL)
+    # Whole sections only: no chunk ends mid-sentence.
+    assert [(s.title, len(s.text)) for s in kept] == [("H1", 100), ("H2", 100)]
+    warning = _warnings(web_log)
+    assert NEWS_URL in warning
+    assert "250" in warning  # the limit
+    assert "200" in warning  # the characters dropped
+
+
+def test_a_single_section_over_the_cap_is_cut_at_a_line_boundary(web_log):
+    """A page with no headings is ONE section: dropping it whole would lose the
+    page, and keeping it whole would leave the cap unenforced."""
+    text = "\n\n".join(f"Paragraph {number}. " + "word " * 20 for number in range(40))
+    [kept] = cap_sections([ParsedSection(title="H", page=None, text=text)], limit=500, url=NEWS_URL)
+    assert len(kept.text) <= 500
+    # A prefix of the page's own text, cut where a line ended.
+    assert text.startswith(kept.text)
+    assert text[len(kept.text)] == "\n"
+    assert "500" in _warnings(web_log)
+
+
+def test_a_section_with_no_line_break_at_all_is_cut_at_the_limit(web_log):
+    [kept] = cap_sections(
+        [ParsedSection(title="H", page=None, text="x" * 900)], limit=500, url=NEWS_URL
+    )
+    assert kept.text == "x" * 500
+    assert _warnings(web_log)
 
 
 # --- (e) encodings -------------------------------------------------------------

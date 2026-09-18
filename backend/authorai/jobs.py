@@ -51,6 +51,7 @@ from authorai.web import (
     ThinPageError,
     _decode_as,
     browser_codec,
+    cap_sections,
     extract_web_bounded,
 )
 
@@ -362,6 +363,10 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
         if fetched.final_url == upload["url"]:
             raise  # the reader's message already names the link as added
         raise _redirected(exc, fetched.final_url, upload["url"]) from exc
+    # Before the page is stored, so what a retry re-ingests is bounded too.
+    parsed.sections = cap_sections(
+        parsed.sections, limit=context.settings.web_max_chars, url=fetched.final_url
+    )
     provenance = {
         "url": upload["url"],
         "final_url": fetched.final_url,
