@@ -722,6 +722,62 @@ def test_a_stored_page_is_fetched_content_whatever_its_upload_row_says(conn, sco
     assert row["tier"] == "METADATA_ONLY"
 
 
+@pytest.mark.parametrize(
+    ("pasted", "landed_on", "expected"),
+    [
+        (
+            "https://links.example/go?to=paper",
+            "https://www.sciencedirect.com/science/article/pii/S3407",
+            "VERIFIED_DOI",
+        ),
+        (
+            "https://www.sciencedirect.com/science/article/pii/S3407",
+            "https://water-truths.example/ten-facts",
+            "METADATA_ONLY",
+        ),
+    ],
+    ids=["a-redirector-to-the-paper", "a-redirect-away-from-it"],
+)
+def test_a_page_is_gated_by_where_it_LANDED_not_where_it_was_pasted(
+    conn, scored_run, pasted, landed_on, expected
+):
+    """A page's declarations were served by whatever answered LAST, so the
+    address after redirects is the one the record must name. Reading the pasted
+    address instead breaks both ways: a shortener or resolver link to the
+    paper's own page would be refused, and a trusted-looking address that
+    redirects to an impostor would be verified on the strength of where the
+    operator thought they were going."""
+    run_id = scored_run["run"]
+    web_doc, _ = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Rainfall",
+        metadata={
+            "sections": [],
+            "provenance": {
+                "url": pasted,
+                "final_url": landed_on,
+                "title": "Rainfall variability in the Ebro basin",
+                "publisher": "Heliyon",
+                "doi": PAPER_DOI,
+            },
+        },
+        text="Rainfall in the basin fell by a fifth.",
+        url=pasted,
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
+    assert row["tier"] == expected
+
+
 def test_an_impostor_page_with_citation_tags_is_not_verified_by_any_path(conn, scored_run):
     """The measured attack: one citation_* tag makes a page 'scholarly', which
     opens the Crossref TITLE search — so a page declaring a real paper's DOI,
