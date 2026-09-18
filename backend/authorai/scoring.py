@@ -388,7 +388,7 @@ def score_run(
 
     sources = conn.execute(
         """
-        SELECT d.*, u.source_type
+        SELECT d.*, u.source_type, u.url AS fetched_from
         FROM documents d LEFT JOIN uploads u ON u.id = d.upload_id
         WHERE d.run_id = ? AND d.kind = 'SOURCE'
         ORDER BY d.rowid
@@ -419,21 +419,28 @@ def score_run(
     try:
         for document in scorable:
             metadata, title_search = None, True
-            origin: Origin = UPLOADED
+            # The ADDRESS the app fetched this from, and nothing else, decides
+            # whether the gate applies: an upload row carries one exactly when
+            # the operator pasted a link. Not the media type — a link serving
+            # application/pdf is recorded as source_type='pdf', and reading the
+            # type would leave that route (a hostile PDF at a pasted address,
+            # printing a stranger's DOI) the one way past the rule. What the app
+            # fetched is named by the record whatever it served; what the
+            # operator uploaded is the file they meant.
+            address = document["fetched_from"]
             if document["source_type"] in dbmod.LINK_SOURCE_TYPES:
                 # The page declared its own metadata at ingest; a model call is the
                 # fallback only when it declared nothing beyond a title.
                 provenance = json.loads(document["metadata"]).get("provenance") or {}
                 metadata = metadata_from_provenance(provenance)
                 title_search = bool(provenance.get("scholarly"))
-                # Fetched, so resolve_tier asks whether the record behind ANY
-                # verified tier names the address this came from: the page as
-                # FETCHED (after redirects) — the address its declarations were
-                # served at — else the link the operator pasted. Both readings of
-                # a page are the page owner's words, so the fallback extraction
-                # below is gated the same way. No usable address: Fetched decides
-                # that, and decides it closed.
-                origin = Fetched(provenance.get("final_url") or provenance.get("url"))
+                # Prefer the page as FETCHED (after redirects) — the address its
+                # declarations were served at. Both readings of a page are the
+                # page owner's words, so the fallback extraction below is gated
+                # the same way.
+                address = provenance.get("final_url") or address
+            # No usable address: Fetched decides that, and decides it closed.
+            origin: Origin = UPLOADED if document["fetched_from"] is None else Fetched(address)
             if metadata is None:
                 metadata = extract_metadata(
                     llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])

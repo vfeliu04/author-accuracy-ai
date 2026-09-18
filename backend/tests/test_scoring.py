@@ -561,6 +561,50 @@ class _DoiCrossref(_NoNetworkCrossref):
 
 
 @pytest.mark.parametrize(
+    ("link", "expected"),
+    [
+        (None, "VERIFIED_DOI"),
+        ("https://water-truths.example/rainfall.pdf", "METADATA_ONLY"),
+    ],
+    ids=["uploaded", "fetched-from-a-link"],
+)
+def test_a_pdf_is_gated_by_where_it_came_from_not_by_its_media_type(
+    conn, scored_run, link, expected
+):
+    """A link that serves application/pdf is recorded as source_type='pdf', so
+    the gate used to skip it entirely: a hostile PDF at a pasted address could
+    print a stranger's DOI and take the top tier, the very hole the page rule
+    closed for HTML. What the app FETCHED is named by the record, whatever the
+    address served; what the operator UPLOADED is the file they meant.
+
+    Same bytes, same declared DOI, same Crossref record — only the origin
+    differs, and only the fetched one is refused."""
+    run_id = scored_run["run"]
+    pdf_doc, _ = _add_source(
+        conn,
+        run_id,
+        source_type="pdf",
+        title="Rainfall",
+        metadata={"sections": []},
+        text="Rainfall in the basin fell by a fifth.",
+        url=link,
+    )
+    llm = FakeLLM(
+        parse_results={
+            # What the extractor reads off the PDF's own pages.
+            SourceMetadata: SourceMetadata(
+                title="Rainfall variability in the Ebro basin", doi=PAPER_DOI
+            ),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[pdf_doc]
+    assert row["tier"] == expected
+
+
+@pytest.mark.parametrize(
     ("page", "expected"),
     [
         ("https://www.sciencedirect.com/science/article/pii/S3407", "VERIFIED_DOI"),
