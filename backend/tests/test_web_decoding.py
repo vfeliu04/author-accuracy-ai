@@ -73,6 +73,24 @@ def test_a_meta_charset_holding_a_nul_byte_fails_like_an_unknown_one(label):
     assert not isinstance(excinfo.value, ThinPageError)
 
 
+def test_an_enormous_meta_charset_label_is_quoted_but_bounded():
+    """The label is text the PAGE writes, quoted into a ValueError that becomes
+    the stored run error and is shown to the operator beside our own words — so
+    it is cut like every other value a failure quotes. Its only other bound is
+    the 4096-byte <meta> prescan, which is 4 kB of the page's prose."""
+    label = "x-bogus-" + "a" * 3000
+    page = _diario(f'<meta charset="{label}">')
+
+    with pytest.raises(ValueError, match="declares an unknown charset") as excinfo:
+        extract_web(page.encode("cp1252"), url=DIARIO_URL)
+
+    message = str(excinfo.value)
+    assert message.startswith(DIARIO_URL)
+    assert "x-bogus-aaa" in message  # enough of the label to recognize it
+    assert message.endswith("...'")
+    assert len(message) < len(DIARIO_URL) + 300
+
+
 @pytest.mark.parametrize("label", ["us-ascii", "ascii", "ansi_x3.4-1968"])
 def test_an_ascii_meta_charset_reads_as_windows_1252(web_log, label):
     """WHATWG maps the ascii labels to windows-1252, as it does iso-8859-1: read with

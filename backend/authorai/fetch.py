@@ -110,20 +110,25 @@ class FetchedResponse:
     is_pdf: bool
 
 
-def _shown_text(text: str) -> str:
-    """Server-controlled text as quoted in an error message: length bounded.
+def shown_text(text: str) -> str:
+    """Text a SERVER chose, as quoted in an error message: length bounded.
 
-    Every error here is stored with the run and shown to the operator, and the
+    Every such error is stored with the run and shown to the operator, and the
     server chooses how long its URLs, headers and protocol errors are — 100 kB
     of its own prose ("your API key expired, call ...") in a stored run error
     is operator deception, not a page defect. The stacked-coding refusal below
-    bounds its own quoting the same way, by layers."""
+    bounds its own quoting the same way, by layers.
+
+    Public because it is the module-crossing rule, not a fetch detail: web.py
+    quotes a page's own charset declaration into a failure that becomes the
+    same stored run error, and bounds it here rather than inventing a second
+    length."""
     return text if len(text) <= _SHOWN_CHARS else text[:_SHOWN_CHARS] + "..."
 
 
 def _shown(url: str) -> str:
     """A URL as quoted in an error message: credentials cut, length bounded."""
-    return repr(_shown_text(_URL_CREDENTIALS.sub(r"\1//", url)))
+    return repr(shown_text(_URL_CREDENTIALS.sub(r"\1//", url)))
 
 
 def validate_source_url(url: str) -> str:
@@ -373,7 +378,7 @@ def _fetch(
             if watchdog.fired:  # the watchdog shut the socket: a timeout, not a network fault
                 raise _timed_out(where, budget) from exc
             raise FetchError(
-                f"Fetching {where} failed: {type(exc).__name__}: {_shown_text(str(exc))}"
+                f"Fetching {where} failed: {type(exc).__name__}: {shown_text(str(exc))}"
             ) from exc
         except httpx.InvalidURL as exc:
             # Even with follow_redirects=False, httpx parses a redirect's
@@ -381,7 +386,7 @@ def _fetch(
             # ("javascript:alert(1)") raises InvalidURL — not an HTTPError.
             raise FetchError(
                 f"Fetching {where} failed: the server sent an invalid redirect Location "
-                f"({_shown_text(str(exc))})"
+                f"({shown_text(str(exc))})"
             ) from exc
         finally:
             watchdog.cancel()
@@ -483,7 +488,7 @@ def _read(
     else:
         declared_type = content_type or "(none)"
         raise FetchError(
-            f"Fetching {where} failed: unsupported content type {_shown_text(declared_type)!r} "
+            f"Fetching {where} failed: unsupported content type {shown_text(declared_type)!r} "
             "(a source must be an HTML page or a PDF)"
         )
     codings = [c.strip().lower() for c in response.headers.get("Content-Encoding", "").split(",")]
@@ -492,7 +497,7 @@ def _read(
     if undecodable:
         raise FetchError(
             f"Fetching {where} failed: "
-            f"unsupported Content-Encoding {_shown_text(', '.join(undecodable))!r}"
+            f"unsupported Content-Encoding {shown_text(', '.join(undecodable))!r}"
         )
     if len(applied) > 1:
         # httpx inflates EVERY layer of one socket read before iter_bytes yields
@@ -510,7 +515,7 @@ def _read(
     if declared is not None:
         if not declared.strip().isdigit():
             raise FetchError(
-                f"Fetching {where} failed: malformed Content-Length {_shown_text(declared)!r}"
+                f"Fetching {where} failed: malformed Content-Length {shown_text(declared)!r}"
             )
         if int(declared) > limit:
             raise _too_large(where, limit)

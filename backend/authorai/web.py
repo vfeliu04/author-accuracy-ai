@@ -57,6 +57,7 @@ from lxml import etree
 from trafilatura.xml import xmltotxt
 
 from authorai.credibility import clean_doi
+from authorai.fetch import shown_text
 from authorai.ingest import ParsedDocument, ParsedSection
 from authorai.log import setup_logger
 
@@ -436,7 +437,10 @@ def browser_codec(info: codecs.CodecInfo) -> str | None:
 
 
 def _unknown_charset(url: str, label: str) -> ValueError:
-    return ValueError(f"{url} declares an unknown charset {label!r}")
+    """The label is the PAGE's own text, and this failure becomes the stored run
+    error the operator reads — so it is bounded by the same rule the fetch's
+    refusals use. Its only other bound is the 4096-byte <meta> prescan."""
+    return ValueError(f"{url} declares an unknown charset {shown_text(label)!r}")
 
 
 def _decode_as(raw: bytes, codec: str, source: str, url: str) -> str:
