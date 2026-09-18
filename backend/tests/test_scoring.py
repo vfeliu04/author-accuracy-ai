@@ -685,6 +685,43 @@ def test_a_page_whose_stored_address_is_empty_is_not_verified(conn, scored_run):
     assert row["metadata"]["publisher"] == "Heliyon"
 
 
+def test_a_stored_page_is_fetched_content_whatever_its_upload_row_says(conn, scored_run):
+    """A stored page IS content the app fetched, so it is gated even if its
+    upload row carries no address — otherwise one NULL url column (a repair, a
+    migration, a hand-seeded row) would be enough to take the ungated path with
+    the page's own declarations intact."""
+    run_id = scored_run["run"]
+    page = "https://water-truths.example/ten-facts"
+    web_doc, _ = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Rainfall",
+        metadata={
+            "sections": [],
+            "provenance": {
+                "url": page,
+                "final_url": page,
+                "title": "Rainfall variability in the Ebro basin",
+                "publisher": "Heliyon",
+                "doi": PAPER_DOI,
+            },
+        },
+        text="Rainfall in the basin fell by a fifth.",
+        url=None,  # the column a link normally fills
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
+    assert row["tier"] == "METADATA_ONLY"
+
+
 def test_an_impostor_page_with_citation_tags_is_not_verified_by_any_path(conn, scored_run):
     """The measured attack: one citation_* tag makes a page 'scholarly', which
     opens the Crossref TITLE search — so a page declaring a real paper's DOI,

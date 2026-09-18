@@ -428,19 +428,22 @@ def score_run(
             # fetched is named by the record whatever it served; what the
             # operator uploaded is the file they meant.
             address = document["fetched_from"]
+            fetched = address is not None
             if document["source_type"] in dbmod.LINK_SOURCE_TYPES:
                 # The page declared its own metadata at ingest; a model call is the
                 # fallback only when it declared nothing beyond a title.
                 provenance = json.loads(document["metadata"]).get("provenance") or {}
                 metadata = metadata_from_provenance(provenance)
                 title_search = bool(provenance.get("scholarly"))
+                # A stored page is content we fetched, whatever its row says.
+                fetched = True
                 # Prefer the page as FETCHED (after redirects) — the address its
                 # declarations were served at. Both readings of a page are the
                 # page owner's words, so the fallback extraction below is gated
                 # the same way.
                 address = provenance.get("final_url") or address
             # No usable address: Fetched decides that, and decides it closed.
-            origin: Origin = UPLOADED if document["fetched_from"] is None else Fetched(address)
+            origin: Origin = Fetched(address) if fetched else UPLOADED
             if metadata is None:
                 metadata = extract_metadata(
                     llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
