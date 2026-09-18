@@ -41,6 +41,14 @@ def jobs_log(caplog):
     yield from _attached_to(jobsmod.logger, caplog)
 
 
+@pytest.fixture()
+def credibility_log(caplog):
+    """caplog, capturing authorai.credibility's records."""
+    from authorai import credibility as credibility_mod
+
+    yield from _attached_to(credibility_mod.logger, caplog)
+
+
 def poison_providers(monkeypatch):
     """Make any provider work during an ingest reuse a test failure — not just
     calls: CONSTRUCTING a client already means the dedup path leaked. The one

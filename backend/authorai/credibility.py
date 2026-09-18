@@ -4,7 +4,10 @@ The LLM reads a source's opening pages and extracts bibliographic metadata
 (the language judgment); code verifies it against Crossref and does all the
 arithmetic. Verification tiers, strongest first:
 
-  VERIFIED_DOI    the extracted DOI resolves at Crossref
+  VERIFIED_DOI    the extracted DOI resolves at Crossref AND the record
+                  corroborates the document (title, an author family name, or
+                  publisher) — a DOI is printable text, so resolving one only
+                  proves it exists, never that the work it names is ours
   VERIFIED_TITLE  no DOI, but a Crossref title search returns a record whose
                   title matches ours exactly (normalized) AND a second field
                   corroborates (year ±1, or first-author family name) — a
@@ -448,10 +451,38 @@ def _title_match(metadata: SourceMetadata, record: dict) -> bool:
         and abs(our_year - record_year) <= 1
     ):
         return True
-    record_families = {
+    if _authors_intersect(metadata, record):
+        return True
+    return _publishers_agree(metadata.publisher, record.get("publisher"))
+
+
+def _authors_intersect(metadata: SourceMetadata, record: dict) -> bool:
+    """A family name the document prints is also one the record lists — the
+    single author comparison every corroboration path shares."""
+    families = {
         (a.get("family") or "").lower() for a in record.get("author") or [] if a.get("family")
     }
-    if record_families & _family_names(metadata):
+    return bool(families & _family_names(metadata))
+
+
+def _doi_record_corroborates(metadata: SourceMetadata, record: dict) -> bool:
+    """A resolved DOI proves the DOI exists, never that the record describes
+    THIS document — and a web page's DOI is read from its own citation_doi tag
+    or JSON-LD, invisible text the page owner writes. Ungated, a page could
+    paste a famous paper's DOI to take the top tier AND inherit that paper's
+    publisher, date and title through merge_record. So, as on the ISBN path,
+    one field of our own must agree: the title (normalized-exact), an author
+    family name, or the publisher.
+
+    A document that states nothing but a DOI has nothing that could agree and
+    stays unverified. That case is degenerate here (a page's declaration is
+    scored only when it carries a structured field, and its <title> is all but
+    always present; the model extraction all but always returns a title),
+    while accepting it would leave a page one invisible tag from 20 points.
+    """
+    if _matched_title(metadata, record):
+        return True
+    if _authors_intersect(metadata, record):
         return True
     return _publishers_agree(metadata.publisher, record.get("publisher"))
 
@@ -480,8 +511,16 @@ def resolve_tier(
     registered work is a false positive the PDF path does not face."""
     if metadata.doi:
         record = crossref.by_doi(metadata.doi)
-        if record:
+        if record and _doi_record_corroborates(metadata, record):
             return "VERIFIED_DOI", record
+        if record:
+            # Fall through rather than return the record: merge_record would
+            # otherwise fill our gaps from a work that is not ours.
+            logger.warning(
+                "DOI %r resolved but neither title, authors nor publisher corroborates — "
+                "treating as unverified",
+                metadata.doi,
+            )
     if title_search and metadata.title:
         for record in crossref.by_title(metadata.title):
             if _title_match(metadata, record):

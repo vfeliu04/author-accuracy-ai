@@ -36,9 +36,10 @@ def _client():
 
 @respx.mock
 def test_doi_resolution_wins_tier_verified_doi():
+    # The record is the document's OWN: its title corroborates the DOI.
     respx.get(f"{CROSSREF_BASE}/works/10.1000/xyz").mock(
         return_value=httpx.Response(
-            200, json={"message": {"title": ["Anything"], "publisher": "X"}}
+            200, json={"message": {"title": [META.title], "publisher": "X"}}
         )
     )
     metadata = META.model_copy(update={"doi": "10.1000/xyz"})
@@ -125,7 +126,9 @@ def test_crossref_throttling_retries_then_succeeds(monkeypatch):
         httpx.Response(429),
         httpx.Response(200, json={"message": {"title": ["Anything"]}}),
     ]
-    metadata = SourceMetadata(doi="10.1000/busy", title=None)
+    # Title matching the record's, so the DOI corroborates and the test measures
+    # the retry alone.
+    metadata = SourceMetadata(doi="10.1000/busy", title="Anything")
     tier, record = resolve_tier(metadata, _client())
     assert tier == "VERIFIED_DOI"
     assert route.call_count == 2
@@ -165,10 +168,115 @@ def test_url_prefixed_doi_is_cleaned_before_lookup():
     route = respx.get(f"{CROSSREF_BASE}/works/10.1000/xyz").mock(
         return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
     )
-    metadata = SourceMetadata(doi="https://doi.org/10.1000/xyz", title=None)
+    # Title matching the record's, so the DOI corroborates and the test measures
+    # the cleaning alone.
+    metadata = SourceMetadata(doi="https://doi.org/10.1000/xyz", title="Anything")
     tier, _ = resolve_tier(metadata, _client())
     assert tier == "VERIFIED_DOI"
     assert route.call_count == 1
+
+
+PAGE_META = SourceMetadata(
+    title="Ten Facts About Drinking Water",
+    authors=["Anon Blogger"],
+    publisher="Daily Water Blog",
+    publication_date="2026-01",
+    doi="10.1038/famous",
+)
+# The record of a well-known paper the page does not describe.
+STRANGER_RECORD = {
+    "title": ["Can Quantum-Mechanical Description of Reality Be Considered Complete?"],
+    "publisher": "American Physical Society",
+    "author": [{"family": "Einstein"}, {"family": "Podolsky"}],
+    "published": {"date-parts": [[1935]]},
+}
+
+
+def _crossref_doi(doi: str, record: dict) -> None:
+    respx.get(f"{CROSSREF_BASE}/works/{doi}").mock(
+        return_value=httpx.Response(200, json={"message": record})
+    )
+
+
+def _crossref_no_titles() -> None:
+    respx.get(f"{CROSSREF_BASE}/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": []}})
+    )
+
+
+@respx.mock
+def test_a_doi_resolving_to_another_work_is_not_verified(credibility_log):
+    """A web page's DOI is read from its own citation_doi tag — invisible text
+    the page owner writes. A resolved record that shares no field with the
+    document is not the document's own record: it must earn no tier, and the
+    record must not come back from resolve_tier, or merge_record would import
+    the stranger's publisher, date and title onto the page."""
+    _crossref_doi("10.1038/famous", STRANGER_RECORD)
+    _crossref_no_titles()
+    tier, record = resolve_tier(PAGE_META, _client())
+    assert (tier, record) == ("METADATA_ONLY", None)
+    merged = merge_record(PAGE_META, record)
+    assert (merged.publisher, merged.publication_date) == ("Daily Water Blog", "2026-01")
+    assert "10.1038/famous" in credibility_log.text
+    assert "corroborat" in credibility_log.text
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "corroborating",
+    [
+        {"title": ["Ten Facts About <i>Drinking</i> Water"]},
+        {"publisher": "Daily Water Blog"},
+        {"author": [{"family": "Blogger"}, {"family": "Someone"}]},
+    ],
+    ids=["title", "publisher", "author-family-name"],
+)
+def test_a_corroborated_doi_still_earns_the_top_tier(corroborating):
+    """One agreeing field of our own is enough — a scholarly page or PDF whose
+    own title, publisher or author matches the record it resolves to keeps
+    VERIFIED_DOI, and keeps the record for gap-merging."""
+    _crossref_doi("10.1038/famous", {**STRANGER_RECORD, **corroborating})
+    tier, record = resolve_tier(PAGE_META, _client())
+    assert tier == "VERIFIED_DOI"
+    assert record is not None
+
+
+@respx.mock
+def test_a_document_stating_nothing_but_a_doi_cannot_corroborate_it(credibility_log):
+    """Nothing of ours can agree with the record, so the DOI stays unverified.
+    Degenerate in this app (a page's declaration reaches scoring only with a
+    structured field, and its <title> is all but always present; the model
+    extraction all but always returns a title), while accepting it would leave
+    a page one invisible tag away from the top tier."""
+    _crossref_doi("10.1000/bare", {"title": ["Anything"], "publisher": "Elsevier"})
+    tier, record = resolve_tier(SourceMetadata(doi="10.1000/bare", title=None), _client())
+    assert (tier, record) == ("METADATA_ONLY", None)
+    assert "10.1000/bare" in credibility_log.text
+
+
+@respx.mock
+def test_an_uncorroborated_doi_falls_through_to_the_title_path():
+    """Falling through, not returning: a document whose own title is registered
+    still reaches VERIFIED_TITLE after its DOI is rejected."""
+    _crossref_doi("10.1038/famous", STRANGER_RECORD)
+    respx.get(f"{CROSSREF_BASE}/works").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "message": {
+                    "items": [
+                        {
+                            "title": ["Ten Facts About Drinking Water"],
+                            "published": {"date-parts": [[2026]]},
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    tier, record = resolve_tier(PAGE_META, _client())
+    assert tier == "VERIFIED_TITLE"
+    assert record["title"] == ["Ten Facts About Drinking Water"]
 
 
 def test_year_bearing_title_cannot_corroborate_by_year_alone():
