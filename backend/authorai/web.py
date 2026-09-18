@@ -73,6 +73,15 @@ logger = setup_logger(__name__)
 # it is trafilatura's recall path for markup its main extractor misreads.)
 MIN_BODY_CHARS = 250
 
+# Bounds on what a page declares about itself: every declared string (its
+# title, publisher, date, author names, and each heading, which becomes a
+# chunk's section name) and how many authors are kept. The page writes these
+# values and decides their length; they are stored with the run and shown in
+# the UI. Real ones are far below: a long title is ~200 characters, and the
+# corroboration a long author list feeds needs one matching family name.
+MAX_METADATA_CHARS = 500
+MAX_AUTHORS = 100
+
 
 class ThinPageError(ValueError):
     """The page yielded no readable article text — typically a JavaScript-rendered shell."""
@@ -680,7 +689,7 @@ def _split_sections(body) -> tuple[list[ParsedSection], str | None]:
             continue
         _add_section(sections, title, blocks)
         tail, child.tail = child.tail, None  # loose text after a heading opens its section
-        title = " ".join(_HEADING_PREFIX.sub("", _markdown(child)).split())
+        title = _cut(" ".join(_HEADING_PREFIX.sub("", _markdown(child)).split())) or ""
         if first_heading is None and title:
             first_heading = title
         blocks = body.makeelement(body.tag, {})
@@ -863,14 +872,38 @@ def _page_metadata(text: str, url: str) -> PageMetadata:
         or first("article:published_time")
     )
     declared_doi = first("citation_doi") or next(iter(_doi_candidates(work)), None)
-    return PageMetadata(
-        title=title,
-        authors=_dedupe(authors),
-        publisher=publisher,
-        publication_date=_normalize_date(published) if published else None,
-        doi=clean_doi(declared_doi) if declared_doi else None,
-        scholarly=any(key.startswith("citation_") for key, _ in parser.meta),
+    return _bounded(
+        PageMetadata(
+            title=title,
+            authors=_dedupe(authors),
+            publisher=publisher,
+            publication_date=_normalize_date(published) if published else None,
+            doi=clean_doi(declared_doi) if declared_doi else None,
+            scholarly=any(key.startswith("citation_") for key, _ in parser.meta),
+        )
     )
+
+
+def _bounded(page: PageMetadata) -> PageMetadata:
+    """What the page declares about itself, bounded — the ONE place a declared
+    value is cut. A page writes its own metadata and chooses how long it is,
+    and every field here is stored with the run and shown in the UI; real
+    values are orders of magnitude below these bounds.
+
+    The DOI is an identifier, not free text: one past the bound is dropped, not
+    cut, because a cut DOI names a DIFFERENT work (and would be looked up)."""
+    return replace(
+        page,
+        title=_cut(page.title),
+        authors=[_cut(name) or "" for name in page.authors[:MAX_AUTHORS]],
+        publisher=_cut(page.publisher),
+        publication_date=_cut(page.publication_date),
+        doi=page.doi if page.doi is None or len(page.doi) <= MAX_METADATA_CHARS else None,
+    )
+
+
+def _cut(value: str | None) -> str | None:
+    return value[:MAX_METADATA_CHARS] if value else value
 
 
 # strict=False: CMSes emit raw newlines inside JSON-LD strings.

@@ -22,6 +22,8 @@ import trafilatura
 import authorai.web as web_mod
 from authorai.ingest import ParsedSection
 from authorai.web import (
+    MAX_AUTHORS,
+    MAX_METADATA_CHARS,
     MIN_BODY_CHARS,
     PageMetadata,
     ThinPageError,
@@ -1767,3 +1769,50 @@ def test_webpage_subtypes_describe_the_page(page_type):
     )
     metadata = _page_metadata(markup, url="https://example.org/g")
     assert (metadata.title, metadata.publisher) == ("Groundwater levels", "Basin Authority")
+
+
+# --- bounds on what a page declares about itself --------------------------------
+
+
+def test_a_page_cannot_declare_unbounded_metadata():
+    """A page decides how long its own declarations are, and they are stored
+    with the run and shown in the UI."""
+    markup = _markup(
+        f'<meta name="citation_title" content="{"T" * 1_000_000}">',
+        f'<meta name="citation_publisher" content="{"P" * 1_000_000}">',
+        f'<meta name="citation_publication_date" content="{"9" * 1_000_000}">',
+        f'<meta name="citation_doi" content="10.1234/{"x" * 1_000_000}">',
+        *[f'<meta name="citation_author" content="Author {number}">' for number in range(10_000)],
+    )
+
+    metadata = _page_metadata(markup, url=NEWS_URL)
+
+    assert len(metadata.title) == MAX_METADATA_CHARS
+    assert len(metadata.publisher) == MAX_METADATA_CHARS
+    assert len(metadata.publication_date) == MAX_METADATA_CHARS
+    # An identifier, never cut: a cut DOI names a different work.
+    assert metadata.doi is None
+    assert len(metadata.authors) == MAX_AUTHORS
+    assert metadata.authors[0] == "Author 0"  # the first are kept, in page order
+
+
+def test_an_ordinary_pages_metadata_is_left_alone():
+    markup = _markup(
+        '<meta name="citation_title" content="Drought and water scarcity">',
+        '<meta name="citation_publisher" content="Global Water Monitor">',
+        '<meta name="citation_author" content="Jane Roe">',
+        '<meta name="citation_doi" content="10.1234/jhs.2024.0173">',
+    )
+    assert _page_metadata(markup, url=NEWS_URL) == PageMetadata(
+        title="Drought and water scarcity",
+        authors=["Jane Roe"],
+        publisher="Global Water Monitor",
+        doi="10.1234/jhs.2024.0173",
+        scholarly=True,
+    )
+
+
+def test_a_page_cannot_declare_an_unbounded_heading():
+    """A heading becomes every chunk's section name in the database."""
+    document, _ = extract_web(_short_article(_prose(400), "H" * 1_000_000), url=NEWS_URL)
+    assert [len(section.title) for section in document.sections] == [MAX_METADATA_CHARS]
