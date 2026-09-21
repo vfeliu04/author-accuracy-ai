@@ -121,6 +121,41 @@ describe("FocusCredibility", () => {
     expect(badges[2]).toHaveAttribute("title", "Not scorable");
   });
 
+  it("says what a matched registry record did and did not confirm", () => {
+    // A publisher's own article page: the record corroborates it, but the page
+    // is not the address that record names, so it is neither verified nor a
+    // source nothing matched.
+    const matched: ReportSource = {
+      ...scored,
+      doc_id: "a",
+      tier: "MATCHED_RECORD",
+      components: { metadata_completeness: 30, authority: 30, recency: 20, verification: 10 }
+    };
+    renderAt(reportWith({ sources: [matched] }), "a");
+    expect(screen.getByText("10/20")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "A registry record matches this document's details, but it doesn't name the address this was fetched from — so this page could not be confirmed to be that work."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText(/registry match only/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("MATCHED_RECORD");
+  });
+
+  it("keeps the unverified sentence for a source no registry record matched", () => {
+    const floor: ReportSource = {
+      ...scored,
+      tier: "METADATA_ONLY",
+      components: { metadata_completeness: 30, authority: 30, recency: 20, verification: 5 }
+    };
+    renderAt(reportWith({ sources: [floor] }), "a");
+    expect(
+      screen.getByText(
+        "Metadata was extracted from the document, but no external registry confirmed it."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("renders a missing run credibility as a dash with a short reason, never a number", () => {
     renderAt(
       reportWith({

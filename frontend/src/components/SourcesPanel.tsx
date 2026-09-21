@@ -7,6 +7,9 @@ export const TIER_LABELS: Record<string, string> = {
   VERIFIED_DOI: "verified DOI",
   VERIFIED_TITLE: "verified title",
   VERIFIED_ISBN: "verified ISBN",
+  // A registry record matched this source's details, but not the address it
+  // was fetched from: real evidence, short of confirming this IS that work.
+  MATCHED_RECORD: "registry match only",
   METADATA_ONLY: "metadata only",
   NONE: "unverified"
 };

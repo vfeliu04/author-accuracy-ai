@@ -300,6 +300,30 @@ describe("SourcesPanel", () => {
     expect(document.body.textContent).not.toMatch(/NaN|undefined|null/);
   });
 
+  it("labels a source whose registry record does not name it, plainly", () => {
+    const matched: ReportSource = {
+      doc_id: "f",
+      title: "Rainfall variability in the Ebro basin",
+      source_type: "web",
+      url: "https://www.sciencedirect.com/science/article/pii/S3407",
+      scorable: true,
+      total: 75,
+      tier: "MATCHED_RECORD",
+      components: {},
+      metadata: {},
+      truncated: null
+    };
+    render(
+      <SourcesPanel
+        uploads={[linkUpload("u3", matched.url as string)]}
+        report={{ ...doneReport, sources: [matched] }}
+        ingestStatus="done"
+      />
+    );
+    expect(screen.getByText("registry match only")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("MATCHED_RECORD");
+  });
+
   it("names an untitled link page by host and path, once", () => {
     // A page with no title of its own is stored under its link.
     const link = "https://example.org/water/report%202024?id=7";

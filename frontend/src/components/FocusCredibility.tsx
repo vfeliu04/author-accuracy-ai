@@ -28,6 +28,8 @@ const TIER_EXPLANATIONS: Record<string, string> = {
     "A Crossref record matched the title exactly, with a second field corroborating it.",
   VERIFIED_ISBN:
     "The ISBN resolved at a book registry and its record corroborates the title or publisher.",
+  MATCHED_RECORD:
+    "A registry record matches this document's details, but it doesn't name the address this was fetched from — so this page could not be confirmed to be that work.",
   METADATA_ONLY:
     "Metadata was extracted from the document, but no external registry confirmed it.",
   NONE: "Nothing extractable, so nothing could be verified."
