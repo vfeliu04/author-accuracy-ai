@@ -211,7 +211,7 @@ Each entry in `sources` — every source document of the run, scored sources fir
 | `source_type`, `url` | What the source is (`pdf` or `web` for anything uploaded or linked; `pdf` for documents with no upload row) and its link (`null` for uploaded files) |
 | `scorable` | `false` for an `image` source, which has no bibliographic identity to score; `true` otherwise |
 | `total` | Credibility score 0–100 (no floors — unknown metadata earns nothing); `null` when the source was not scored in this run |
-| `tier` | Verification tier: `VERIFIED_DOI` \| `VERIFIED_TITLE` \| `VERIFIED_ISBN` \| `METADATA_ONLY` \| `NONE`; `null` when unscored |
+| `tier` | Verification tier: `VERIFIED_DOI` \| `VERIFIED_TITLE` \| `VERIFIED_ISBN` \| `MATCHED_RECORD` \| `METADATA_ONLY` \| `NONE`; `null` when unscored |
 | `components` | `{"metadata_completeness", "authority", "recency", "verification"}` point breakdown; `null` when unscored |
 | `metadata` | The bibliographic fields the points were computed from (`title`, `authors`, `publisher`, `publication_date`, `doi`, `isbn`); `null` when unscored |
 | `truncated` | `{"kept_chars", "dropped_chars"}` when the page cap (`AUTHORAI_WEB_MAX_CHARS`) read only part of a web page — what the run was scored against, and what it never saw; `null` for a page read whole and for every PDF or image |
