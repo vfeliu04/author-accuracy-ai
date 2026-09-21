@@ -51,6 +51,17 @@ MODE_INSTRUCTIONS = {
 CHAT_MODES = tuple(MODE_INSTRUCTIONS)
 
 
+# A tier name the model would otherwise have to guess at. VERIFIED_* and
+# METADATA_ONLY say what they mean; MATCHED_RECORD does not, and the guess it
+# invites ("a record matched, so this is verified") is exactly what it denies.
+_TIER_GLOSS = {
+    "MATCHED_RECORD": (
+        " (a registry record matches this source's details, but does not name the address it"
+        " was fetched from, so it is NOT verified)"
+    )
+}
+
+
 def _fmt_score(scores: dict | None) -> str:
     if scores is None:
         return "The report has not been scored yet."
@@ -125,7 +136,10 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
         elif source["total"] is None:
             standing = "not scored"
         else:
-            standing = f"tier {source['tier']}, credibility {source['total']}/100"
+            standing = (
+                f"tier {source['tier']}{_TIER_GLOSS.get(source['tier'], '')}, "
+                f"credibility {source['total']}/100"
+            )
         lines.append(f"- {source['doc_title']!r}: {standing}{_partial_note(source)}")
     return "\n".join(lines)
 

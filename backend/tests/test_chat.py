@@ -190,6 +190,36 @@ def test_context_lists_image_and_unscored_sources_honestly(conn):
     assert "- 'Unscored Source': not scored" in context
 
 
+def test_context_spells_out_the_tier_a_name_alone_would_overstate(conn):
+    """The chat answers a user in prose, so a bare MATCHED_RECORD in its
+    context is a tier name the model can only guess at — and the likeliest
+    guess, 'a record matched, so it is verified', is the very claim this tier
+    exists to deny. VERIFIED_DOI says what it means on its own; this one is
+    given the clause that makes it true."""
+    run_id = _scored_run(conn)
+    dbmod.save_source_credibility(
+        conn,
+        run_id,
+        [
+            {
+                "doc_id": conn.execute(
+                    "SELECT id FROM documents WHERE run_id = ? AND kind = 'SOURCE'", (run_id,)
+                ).fetchone()["id"],
+                "metadata": {"title": "World Hunger 2025"},
+                "components": {},
+                "total": 75.0,
+                "tier": "MATCHED_RECORD",
+            }
+        ],
+    )
+    context = chatmod.build_context(conn, run_id)
+    assert (
+        "- 'World Hunger 2025': tier MATCHED_RECORD (a registry record matches this source's "
+        "details, but does not name the address it was fetched from, so it is NOT verified), "
+        "credibility 75.0/100"
+    ) in context
+
+
 def test_context_says_which_pages_were_read_only_in_part(conn):
     """Chat reads the same source list the report's panel does, and that panel
     marks a capped page 'Read in part'. Told nothing, the model answers from the
