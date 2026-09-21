@@ -5,6 +5,7 @@ import pytest
 import respx
 
 from authorai.credibility import (
+    _TIER_POINTS,
     CROSSREF_BASE,
     UPLOADED,
     CrossrefClient,
@@ -333,13 +334,15 @@ def test_the_same_page_on_an_unrelated_domain_is_not_verified(credibility_log):
     come from its own invisible tags, exactly like its DOI, so declaring the
     paper's title beside the paper's DOI passes corroboration. The record must
     also name the page — and it must not come back, or merge_record would
-    import the paper's publisher and date onto the impostor."""
+    import the paper's publisher and date onto the impostor. It keeps the
+    MATCHED_RECORD outcome the refusal earns — a real record matched, at an
+    address that is not this one — which is never a verified tier."""
     _crossref_doi(DOI, PAPER_RECORD)
     _crossref_no_titles()
     tier, record = resolve_tier(
         PAPER_META, _client(), origin=Fetched("https://water-truths.example/ten-facts")
     )
-    assert (tier, record) == ("METADATA_ONLY", None)
+    assert (tier, record) == ("MATCHED_RECORD", None)
     assert merge_record(PAPER_META, record).publisher == "Heliyon"
     warnings = [r for r in credibility_log.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
@@ -352,8 +355,14 @@ def test_an_impostor_page_cannot_reach_a_verified_tier_through_the_title_search(
     """The routing attack the DOI gate alone did not stop: one citation_* tag
     makes a page 'scholarly', so a page rejected on the DOI path reached the
     SAME paper's record through the Crossref title search and took
-    VERIFIED_TITLE — with the paper's publisher merged in behind it. No tier may
-    be earned by a page's own declarations, whichever path carries them."""
+    VERIFIED_TITLE — with the paper's publisher merged in behind it. No verified
+    tier may be earned by a page's own declarations, whichever path carries
+    them: both paths are refused, and both refusals land on MATCHED_RECORD.
+
+    What that costs, measured: this impostor scores 75.0 rather than the 70.0 it
+    scored when a refusal fell to the floor, against the 85.0 a verified tier
+    would have given it. It buys the honest distinction from a page no registry
+    matched at all, which still scores 70.0."""
     _crossref_doi(DOI, PAPER_RECORD)
     respx.get(f"{CROSSREF_BASE}/works").mock(
         return_value=httpx.Response(200, json={"message": {"items": [PAPER_RECORD]}})
@@ -364,10 +373,21 @@ def test_an_impostor_page_cannot_reach_a_verified_tier_through_the_title_search(
         title_search=True,
         origin=Fetched("https://water-truths.example/ten-facts"),
     )
-    assert (tier, record) == ("METADATA_ONLY", None)
+    assert (tier, record) == ("MATCHED_RECORD", None)
     assert merge_record(PAPER_META, record).publisher == "Heliyon"  # not "Elsevier BV"
     rejected = [r.getMessage() for r in credibility_log.records if r.levelname == "WARNING"]
     assert [m.split(":")[0] for m in rejected] == ["VERIFIED_DOI", "VERIFIED_TITLE"]
+    points = {
+        tier: score_source(
+            PAPER_META,
+            tier,
+            tier1_publishers=[],
+            tier2_publishers=[],
+            current_year=2026,
+        )["total"]
+        for tier in ("METADATA_ONLY", "MATCHED_RECORD", "VERIFIED_DOI")
+    }
+    assert points == {"METADATA_ONLY": 70.0, "MATCHED_RECORD": 75.0, "VERIFIED_DOI": 85.0}
 
 
 @respx.mock
@@ -402,7 +422,7 @@ def test_a_record_on_a_shared_host_does_not_name_another_document_there(landing,
     beside a real record and claim its DOI. The record must name the ADDRESS."""
     _crossref_doi(DOI, {**PAPER_RECORD, "resource": {"primary": {"URL": landing}}})
     _crossref_no_titles()
-    assert resolve_tier(PAPER_META, _client(), origin=Fetched(page))[0] == "METADATA_ONLY"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(page))[0] == "MATCHED_RECORD"
     assert resolve_tier(PAPER_META, _client(), origin=Fetched(landing))[0] == "VERIFIED_DOI"
 
 
@@ -474,7 +494,7 @@ def test_a_record_without_a_primary_resource_falls_back_to_its_url():
     record = {k: v for k, v in PAPER_RECORD.items() if k != "resource"}
     _crossref_doi(DOI, {**record, "URL": "https://archive.example/papers/ebro"})
     _crossref_no_titles()
-    assert resolve_tier(PAPER_META, _client(), origin=Fetched(PAPER_PAGE))[0] == "METADATA_ONLY"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(PAPER_PAGE))[0] == "MATCHED_RECORD"
     assert (
         resolve_tier(PAPER_META, _client(), origin=Fetched("https://archive.example/papers/ebro"))[
             0
@@ -493,7 +513,7 @@ def test_a_doi_resolver_landing_page_names_one_document_not_the_host():
     _crossref_no_titles()
     assert (
         resolve_tier(PAPER_META, _client(), origin=Fetched("https://doi.org/10.9999/other"))[0]
-        == "METADATA_ONLY"
+        == "MATCHED_RECORD"
     )
     assert (
         resolve_tier(PAPER_META, _client(), origin=Fetched(f"https://doi.org/{DOI}"))[0]
@@ -531,6 +551,105 @@ def test_same_address_compares_host_and_path(landing, page, same):
     assert _same_address(landing, page) is same
 
 
+# --- the middle outcome: a record matched, but not this address -------------
+#
+# The page rule is right and stays; what it was not is graded. A record that
+# corroborates the document but registers a DIFFERENT landing page is not the
+# same evidence as no record at all, and MATCHED_RECORD is where it lands.
+
+# What an honest publisher page looks like to the gate: Elsevier serves the
+# article at www.sciencedirect.com but registers linkinghub.elsevier.com as the
+# record's landing page, so the record names a SIBLING address, not this one.
+SIBLING_RECORD = {
+    **PAPER_RECORD,
+    "resource": {"primary": {"URL": "https://linkinghub.elsevier.com/retrieve/pii/S3407"}},
+}
+
+
+@respx.mock
+def test_a_page_whose_record_names_a_sibling_domain_earns_the_matched_record_tier(
+    credibility_log,
+):
+    """The defect this tier fixes: a real ScienceDirect article page — DOI
+    resolves, the record's title and author corroborate — used to score exactly
+    like a page no registry ever heard of. It earns the middle outcome: a
+    registered work matches, the address it was fetched from is not the address
+    that work is registered at."""
+    _crossref_doi(DOI, SIBLING_RECORD)
+    _crossref_no_titles()
+    tier, record = resolve_tier(PAPER_META, _client(), origin=Fetched(PAPER_PAGE))
+    assert tier == "MATCHED_RECORD"
+    # The hole PR A closed stays closed: the record never comes back, so
+    # merge_record cannot import the registered work's publisher or date.
+    assert record is None
+    assert merge_record(PAPER_META, record).publisher == "Heliyon"  # never "Elsevier BV"
+    assert _TIER_POINTS["MATCHED_RECORD"] == 10.0
+    assert "does not name where it was fetched from" in credibility_log.text
+
+
+def test_the_matched_record_tier_sits_between_unverified_and_verified():
+    """Its whole meaning is its place in the order: real evidence, short of
+    showing this address IS that work."""
+    assert (
+        _TIER_POINTS["METADATA_ONLY"]
+        < _TIER_POINTS["MATCHED_RECORD"]
+        < _TIER_POINTS["VERIFIED_ISBN"]
+    )
+
+
+@respx.mock
+def test_a_page_no_record_matched_stays_metadata_only():
+    """The other side of the distinction: nothing resolved, nothing searched
+    corroborated — there is no record to have matched, so the floor is right."""
+    respx.get(f"{CROSSREF_BASE}/works/10.1038/famous").mock(return_value=httpx.Response(404))
+    _crossref_no_titles()
+    tier, record = resolve_tier(
+        PAGE_META, _client(), origin=Fetched("https://water-truths.example/ten-facts")
+    )
+    assert (tier, record) == ("METADATA_ONLY", None)
+
+
+@respx.mock
+def test_a_record_that_corroborates_nothing_is_not_promoted_to_matched_record(credibility_log):
+    """A DOI that resolves to a stranger's work proves only that the DOI
+    exists. _verified_candidates never yields it, so the refusal that earns
+    MATCHED_RECORD never happens — the page stays at the floor."""
+    _crossref_doi("10.1038/famous", STRANGER_RECORD)
+    _crossref_no_titles()
+    tier, record = resolve_tier(
+        PAGE_META, _client(), origin=Fetched("https://water-truths.example/ten-facts")
+    )
+    assert (tier, record) == ("METADATA_ONLY", None)
+    assert "neither title, authors nor publisher corroborates" in credibility_log.text
+
+
+@respx.mock
+def test_an_uploaded_file_can_never_reach_the_matched_record_tier():
+    """Uploaded.accepts is always true, so no candidate is ever refused for a
+    file the operator handed us: the same metadata and the same sibling-domain
+    record earn the top tier outright."""
+    _crossref_doi(DOI, SIBLING_RECORD)
+    tier, record = resolve_tier(PAPER_META, _client(), origin=UPLOADED)
+    assert tier == "VERIFIED_DOI"
+    assert record is not None
+
+
+@respx.mock
+def test_an_accepted_candidate_still_beats_a_refused_one():
+    """MATCHED_RECORD is a fallback, never a short circuit: the DOI path is
+    refused (the record names a sibling domain), and the weaker title path,
+    whose record DOES name this page, still wins."""
+    _crossref_doi(DOI, SIBLING_RECORD)
+    respx.get(f"{CROSSREF_BASE}/works").mock(
+        return_value=httpx.Response(200, json={"message": {"items": [PAPER_RECORD]}})
+    )
+    tier, record = resolve_tier(
+        PAPER_META, _client(), title_search=True, origin=Fetched(PAPER_PAGE)
+    )
+    assert tier == "VERIFIED_TITLE"
+    assert record is not None
+
+
 @respx.mock
 def test_a_pdf_with_the_same_metadata_is_unaffected(credibility_log):
     """A PDF has no address to compare, and its metadata is read from its own
@@ -549,11 +668,13 @@ def test_a_fetched_source_without_a_usable_address_fails_closed(address, credibi
     is truthy: an empty or missing address used to take the UNGATED path, the
     one shape a security rule must never default to. A fetched source we cannot
     place is exactly the one no record should be able to claim, so it earns no
-    tier — and the record stays out of merge_record."""
+    VERIFIED tier — the record names no address of ours, which is the same
+    refusal a mismatching address gets, so it lands on MATCHED_RECORD — and the
+    record stays out of merge_record either way."""
     _crossref_doi(DOI, PAPER_RECORD)
     _crossref_no_titles()
     tier, record = resolve_tier(PAPER_META, _client(), origin=Fetched(address))
-    assert (tier, record) == ("METADATA_ONLY", None)
+    assert (tier, record) == ("MATCHED_RECORD", None)
     assert merge_record(PAPER_META, record).publisher == "Heliyon"
     assert "no usable address" in credibility_log.text
 
@@ -570,7 +691,7 @@ def test_a_fetched_source_whose_address_is_not_a_url_fails_closed(address):
     identifier either, or a bare path carrying the DOI would verify itself."""
     _crossref_doi(DOI, PAPER_RECORD)
     _crossref_no_titles()
-    assert resolve_tier(PAPER_META, _client(), origin=Fetched(address))[0] == "METADATA_ONLY"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(address))[0] == "MATCHED_RECORD"
 
 
 def test_year_bearing_title_cannot_corroborate_by_year_alone():
@@ -1012,7 +1133,7 @@ def test_the_page_gate_covers_the_isbn_tier_too(credibility_log):
     metadata = META.model_copy(update={"isbn": "978-1-9191958-0-3"})
     impostor = "https://hunger-truths.example/the-index"
     assert resolve_tier(metadata, _client(), _isbn_client(), origin=Fetched(impostor))[0] == (
-        "METADATA_ONLY"
+        "MATCHED_RECORD"
     )
     assert "VERIFIED_ISBN" in credibility_log.text
     catalogue = "https://openlibrary.org/isbn/9781919195803"

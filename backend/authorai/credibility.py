@@ -16,6 +16,10 @@ arithmetic. Verification tiers, strongest first:
                   resolves at Open Library or Google Books AND the record's
                   title or publisher corroborates ours — the institutional-
                   book path Crossref structurally cannot serve
+  MATCHED_RECORD  a registry record corroborates the document's own fields,
+                  but the source was FETCHED and the record does not name the
+                  address it was fetched from — the work is registered, that
+                  this address serves it is unshown
   METADATA_ONLY   metadata extracted but not externally verified
   NONE            nothing extractable
 
@@ -27,6 +31,12 @@ tier a path proposes for a page, the record must also NAME that page
 (_record_names_page): the registry's landing page IS the page's address, or
 the page's address carries the identifier. resolve_tier applies that rule once,
 to every candidate every path produces, so no path can be added that forgets it.
+A candidate the rule refuses is never RETURNED — importing a stranger's
+publisher, date or title through merge_record is the hole that rule closed — but
+the refusal is recorded: the source lands on MATCHED_RECORD rather than the
+floor, because "a registered work matches this document, at another address" is
+not the same finding as "no registry has heard of it", and only one of those was
+sayable before.
 
 v1 defects deliberately killed here: publisher was reachable ONLY via
 Crossref-by-DOI (DOI-less NGO reports floored at ~32/100); publisher tier
@@ -56,7 +66,14 @@ CROSSREF_BASE = "https://api.crossref.org"
 CROSSREF_TIMEOUT = 10.0
 CROSSREF_RETRIES = 2
 
-Tier = Literal["VERIFIED_DOI", "VERIFIED_TITLE", "VERIFIED_ISBN", "METADATA_ONLY", "NONE"]
+Tier = Literal[
+    "VERIFIED_DOI",
+    "VERIFIED_TITLE",
+    "VERIFIED_ISBN",
+    "MATCHED_RECORD",
+    "METADATA_ONLY",
+    "NONE",
+]
 
 OPENLIBRARY_BASE = "https://openlibrary.org"
 GOOGLEBOOKS_BASE = "https://www.googleapis.com"
@@ -571,7 +588,10 @@ class Fetched:
 class Uploaded:
     """Where a source came FROM: the operator handed the app this file. It is
     the file they meant, so there is no address to compare and corroboration
-    alone gates it — every candidate that got this far is accepted."""
+    alone gates it — every candidate that got this far is accepted. Nothing is
+    ever refused for an uploaded file, so it can never land on MATCHED_RECORD:
+    a corroborated record verifies it outright.
+    """
 
     def accepts(self, candidate: _Verified) -> bool:
         return True
@@ -721,7 +741,13 @@ def resolve_tier(
 
     A file the operator UPLOADED (UPLOADED) is the file they meant and is gated
     by corroboration alone: there is no address it came from to compare.
+
+    A refused candidate still says something, so the refusal is not thrown away:
+    it yields MATCHED_RECORD, the outcome between unverified and verified. The
+    record itself is still withheld, so this can never become a route to another
+    work's fields — only to the honest statement that such a work exists.
     """
+    refused = False
     for candidate in _verified_candidates(
         metadata, crossref, isbn_lookup, title_search=title_search
     ):
@@ -729,6 +755,7 @@ def resolve_tier(
             return candidate.tier, candidate.record
         # Falling through rather than returning the record: merge_record would
         # otherwise fill our gaps from a work that is not ours.
+        refused = True
         logger.warning(
             "%s: %r matched a record that does not name where it was fetched from (%s) — "
             "treating as unverified",
@@ -736,6 +763,12 @@ def resolve_tier(
             candidate.subject,
             origin,
         )
+    if refused:
+        # Reached only through origin.accepts, so only an address rule refuses:
+        # a record corroborating nothing is never yielded at all, and stays at
+        # the floor below. An unplaceable fetched source refuses here too — the
+        # record names no address of ours either way, and it is still unverified.
+        return "MATCHED_RECORD", None
     if metadata.model_dump(exclude_defaults=True):
         return "METADATA_ONLY", None
     return "NONE", None
@@ -760,6 +793,10 @@ _TIER_POINTS = {
     "VERIFIED_DOI": 20.0,
     "VERIFIED_TITLE": 15.0,
     "VERIFIED_ISBN": 12.0,
+    # A registered work matches this document, at an address that is not this
+    # one: real evidence, and short of the verified tiers by exactly what it
+    # cannot show.
+    "MATCHED_RECORD": 10.0,
     "METADATA_ONLY": 5.0,
     "NONE": 0.0,
 }

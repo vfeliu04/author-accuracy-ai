@@ -564,7 +564,7 @@ class _DoiCrossref(_NoNetworkCrossref):
     ("link", "expected"),
     [
         (None, "VERIFIED_DOI"),
-        ("https://water-truths.example/rainfall.pdf", "METADATA_ONLY"),
+        ("https://water-truths.example/rainfall.pdf", "MATCHED_RECORD"),
     ],
     ids=["uploaded", "fetched-from-a-link"],
 )
@@ -578,7 +578,8 @@ def test_a_pdf_is_gated_by_where_it_came_from_not_by_its_media_type(
     address served; what the operator UPLOADED is the file they meant.
 
     Same bytes, same declared DOI, same Crossref record — only the origin
-    differs, and only the fetched one is refused."""
+    differs, and only the fetched one is refused (to MATCHED_RECORD: the record
+    matched, this address is not the one it names)."""
     run_id = scored_run["run"]
     pdf_doc, _ = _add_source(
         conn,
@@ -608,7 +609,7 @@ def test_a_pdf_is_gated_by_where_it_came_from_not_by_its_media_type(
     ("page", "expected"),
     [
         ("https://www.sciencedirect.com/science/article/pii/S3407", "VERIFIED_DOI"),
-        ("https://water-truths.example/ten-facts", "METADATA_ONLY"),
+        ("https://water-truths.example/ten-facts", "MATCHED_RECORD"),
     ],
     ids=["the-papers-own-page", "an-impostor-page"],
 )
@@ -650,11 +651,66 @@ def test_a_pages_declared_doi_is_verified_only_where_the_record_points(
     assert rows[web_doc]["metadata"]["publisher"] == "Heliyon"
 
 
+class _SiblingLandingCrossref(_NoNetworkCrossref):
+    """Crossref as a real publisher registers it: the record corroborates the
+    article, but its landing page is the publisher's OWN resolver domain, not
+    the address a reader (or this app) is served the article at."""
+
+    def by_doi(self, doi):
+        if doi != PAPER_DOI:
+            return None
+        return {
+            **PAPER_RECORD,
+            "resource": {"primary": {"URL": "https://linkinghub.elsevier.com/retrieve/pii/S3407"}},
+        }
+
+
+def test_a_publisher_page_the_record_does_not_name_is_stored_as_matched_record(conn, scored_run):
+    """The whole change, through the real scoring path: an honest publisher
+    article page whose registered landing page is a sibling domain used to be
+    stored at the floor, indistinguishable from a page no registry knows. It is
+    stored as MATCHED_RECORD, worth 10 of the verification component's 20 — and
+    what score_run persists is what /report serves, tier and components alike."""
+    run_id = scored_run["run"]
+    page = "https://www.sciencedirect.com/science/article/pii/S3407"
+    provenance = {
+        **WHO_PROVENANCE,
+        "url": page,
+        "final_url": page,
+        "title": "Rainfall variability in the Ebro basin",
+        "publisher": "Heliyon",
+        "doi": PAPER_DOI,
+    }
+    web_doc, _ = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Rainfall",
+        metadata={"sections": [], "provenance": provenance},
+        text="Rainfall in the basin fell by a fifth.",
+        url=page,
+    )
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    settings = Settings(anthropic_api_key="x", openai_api_key="x")
+    score_run(conn, llm, run_id, settings, crossref=_SiblingLandingCrossref())
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
+    assert row["tier"] == "MATCHED_RECORD"
+    assert row["components"]["verification"] == 10.0
+    # Still never merged: the page keeps its own publisher, not "Elsevier BV".
+    assert row["metadata"]["publisher"] == "Heliyon"
+
+
 def test_a_page_whose_stored_address_is_empty_is_not_verified(conn, scored_run):
     """Fail closed, through the real scoring path: a stored page whose
     provenance recorded no address at all. The gate used to be decided by
     whether that string was truthy, so an empty one scored as though nothing
-    needed gating and the declared DOI took the top tier."""
+    needed gating and the declared DOI took the top tier. A source we cannot
+    place is refused like any other the record does not name."""
     run_id = scored_run["run"]
     provenance = {
         "url": "",
@@ -681,7 +737,7 @@ def test_a_page_whose_stored_address_is_empty_is_not_verified(conn, scored_run):
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
     row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
-    assert row["tier"] == "METADATA_ONLY"
+    assert row["tier"] == "MATCHED_RECORD"
     assert row["metadata"]["publisher"] == "Heliyon"
 
 
@@ -719,7 +775,7 @@ def test_a_stored_page_is_fetched_content_whatever_its_upload_row_says(conn, sco
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
     row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
-    assert row["tier"] == "METADATA_ONLY"
+    assert row["tier"] == "MATCHED_RECORD"
 
 
 @pytest.mark.parametrize(
@@ -733,7 +789,7 @@ def test_a_stored_page_is_fetched_content_whatever_its_upload_row_says(conn, sco
         (
             "https://www.sciencedirect.com/science/article/pii/S3407",
             "https://water-truths.example/ten-facts",
-            "METADATA_ONLY",
+            "MATCHED_RECORD",
         ),
     ],
     ids=["a-redirector-to-the-paper", "a-redirect-away-from-it"],
@@ -783,7 +839,8 @@ def test_an_impostor_page_with_citation_tags_is_not_verified_by_any_path(conn, s
     opens the Crossref TITLE search — so a page declaring a real paper's DOI,
     title and author was rejected on the DOI path and then verified on the
     title path, importing the paper's publisher with it. No path may verify a
-    page from what the page says about itself."""
+    page from what the page says about itself — both are refused, which is what
+    MATCHED_RECORD records."""
     run_id = scored_run["run"]
     page = "https://water-truths.example/ten-facts"
     provenance = {
@@ -824,7 +881,7 @@ def test_an_impostor_page_with_citation_tags_is_not_verified_by_any_path(conn, s
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     score_run(conn, llm, run_id, settings, crossref=_BothChannels())
     row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
-    assert row["tier"] == "METADATA_ONLY"
+    assert row["tier"] == "MATCHED_RECORD"
     assert row["metadata"]["publisher"] == "Heliyon"  # never the paper's "Elsevier BV"
 
 
