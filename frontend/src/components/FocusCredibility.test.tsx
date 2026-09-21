@@ -135,7 +135,7 @@ describe("FocusCredibility", () => {
     expect(screen.getByText("10/20")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "A registry record matches this document's details, but it doesn't name the address this was fetched from — so this page could not be confirmed to be that work."
+        "A registry record matches this document's details, but it doesn't name the address this was fetched from — so it could not be confirmed to be that work."
       )
     ).toBeInTheDocument();
     expect(screen.getByText(/registry match only/)).toBeInTheDocument();
@@ -151,7 +151,7 @@ describe("FocusCredibility", () => {
     renderAt(reportWith({ sources: [floor] }), "a");
     expect(
       screen.getByText(
-        "Metadata was extracted from the document, but no external registry confirmed it."
+        "Metadata was extracted from the document, and no registry record matched it."
       )
     ).toBeInTheDocument();
   });

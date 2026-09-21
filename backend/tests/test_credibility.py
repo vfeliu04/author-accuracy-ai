@@ -668,13 +668,13 @@ def test_a_fetched_source_without_a_usable_address_fails_closed(address, credibi
     is truthy: an empty or missing address used to take the UNGATED path, the
     one shape a security rule must never default to. A fetched source we cannot
     place is exactly the one no record should be able to claim, so it earns no
-    VERIFIED tier — the record names no address of ours, which is the same
-    refusal a mismatching address gets, so it lands on MATCHED_RECORD — and the
-    record stays out of merge_record either way."""
+    verified tier AND no credit for the match: MATCHED_RECORD says a record
+    named a different address, and nothing here was ever compared. It stays at
+    the floor, and the record stays out of merge_record."""
     _crossref_doi(DOI, PAPER_RECORD)
     _crossref_no_titles()
     tier, record = resolve_tier(PAPER_META, _client(), origin=Fetched(address))
-    assert (tier, record) == ("MATCHED_RECORD", None)
+    assert (tier, record) == ("METADATA_ONLY", None)
     assert merge_record(PAPER_META, record).publisher == "Heliyon"
     assert "no usable address" in credibility_log.text
 
@@ -688,10 +688,11 @@ def test_a_fetched_source_without_a_usable_address_fails_closed(address, credibi
 def test_a_fetched_source_whose_address_is_not_a_url_fails_closed(address):
     """Unusable, not just absent: a value with no host names no page, so it
     cannot be compared with a landing link — and it must not be scanned for the
-    identifier either, or a bare path carrying the DOI would verify itself."""
+    identifier either, or a bare path carrying the DOI would verify itself.
+    Nothing was compared, so the match earns no grade above the floor."""
     _crossref_doi(DOI, PAPER_RECORD)
     _crossref_no_titles()
-    assert resolve_tier(PAPER_META, _client(), origin=Fetched(address))[0] == "MATCHED_RECORD"
+    assert resolve_tier(PAPER_META, _client(), origin=Fetched(address))[0] == "METADATA_ONLY"
 
 
 def test_year_bearing_title_cannot_corroborate_by_year_alone():

@@ -29,9 +29,9 @@ const TIER_EXPLANATIONS: Record<string, string> = {
   VERIFIED_ISBN:
     "The ISBN resolved at a book registry and its record corroborates the title or publisher.",
   MATCHED_RECORD:
-    "A registry record matches this document's details, but it doesn't name the address this was fetched from — so this page could not be confirmed to be that work.",
+    "A registry record matches this document's details, but it doesn't name the address this was fetched from — so it could not be confirmed to be that work.",
   METADATA_ONLY:
-    "Metadata was extracted from the document, but no external registry confirmed it.",
+    "Metadata was extracted from the document, and no registry record matched it.",
   NONE: "Nothing extractable, so nothing could be verified."
 };
 

@@ -710,7 +710,8 @@ def test_a_page_whose_stored_address_is_empty_is_not_verified(conn, scored_run):
     provenance recorded no address at all. The gate used to be decided by
     whether that string was truthy, so an empty one scored as though nothing
     needed gating and the declared DOI took the top tier. A source we cannot
-    place is refused like any other the record does not name."""
+    place stays at the floor: MATCHED_RECORD means a record named a DIFFERENT
+    address, and here nothing was ever compared."""
     run_id = scored_run["run"]
     provenance = {
         "url": "",
@@ -737,7 +738,7 @@ def test_a_page_whose_stored_address_is_empty_is_not_verified(conn, scored_run):
     settings = Settings(anthropic_api_key="x", openai_api_key="x")
     score_run(conn, llm, run_id, settings, crossref=_DoiCrossref())
     row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
-    assert row["tier"] == "MATCHED_RECORD"
+    assert row["tier"] == "METADATA_ONLY"
     assert row["metadata"]["publisher"] == "Heliyon"
 
 

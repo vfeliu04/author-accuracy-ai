@@ -20,7 +20,9 @@ arithmetic. Verification tiers, strongest first:
                   but the source was FETCHED and the record does not name the
                   address it was fetched from — the work is registered, that
                   this address serves it is unshown
-  METADATA_ONLY   metadata extracted but not externally verified
+  METADATA_ONLY   metadata extracted, and no registry record matched it (a
+                  source we could not place lands here too: nothing was ever
+                  compared, so the match above is not something we can claim)
   NONE            nothing extractable
 
 For a FETCHED PAGE no external record confers ANY of the three verified tiers
@@ -575,10 +577,21 @@ class Fetched:
     address: str | None
 
     def accepts(self, candidate: _Verified) -> bool:
-        address = self.address
-        if address is None or url_address(address) is None:
+        if not self.placed():
             return False
-        return _record_names_page(candidate, address)
+        return _record_names_page(candidate, self.address or "")
+
+    def placed(self) -> bool:
+        """Whether we know where this source came from at all.
+
+        A source we cannot place is not the same as one whose record names a
+        DIFFERENT address: there the comparison ran and failed, which is a thing
+        we can tell a reader about. Here there was nothing to compare, so the
+        refusal grades no higher than a source nothing matched (resolve_tier) —
+        which keeps the sentence the credibility view shows true of every source
+        that earns the middle tier.
+        """
+        return self.address is not None and url_address(self.address) is not None
 
     def __str__(self) -> str:
         return self.address or "no usable address"
@@ -595,6 +608,11 @@ class Uploaded:
 
     def accepts(self, candidate: _Verified) -> bool:
         return True
+
+    def placed(self) -> bool:
+        """Never asked: nothing is refused for an upload, so no refusal is ever
+        graded. False states the fact plainly — a file has no address."""
+        return False
 
     def __str__(self) -> str:
         return "an uploaded file"
@@ -763,11 +781,14 @@ def resolve_tier(
             candidate.subject,
             origin,
         )
-    if refused:
-        # Reached only through origin.accepts, so only an address rule refuses:
+    if refused and origin.placed():
+        # Reached only through origin.accepts, so only the address rule refuses:
         # a record corroborating nothing is never yielded at all, and stays at
-        # the floor below. An unplaceable fetched source refuses here too — the
-        # record names no address of ours either way, and it is still unverified.
+        # the floor below. `placed` is what keeps the grade honest — a source we
+        # could not place was never compared with anything, so it earns no more
+        # than one nothing matched, and the sentence shown for MATCHED_RECORD
+        # ("the record does not name the address this came from") stays true of
+        # every source that reaches it.
         return "MATCHED_RECORD", None
     if metadata.model_dump(exclude_defaults=True):
         return "METADATA_ONLY", None
