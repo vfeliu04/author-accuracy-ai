@@ -98,9 +98,12 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   // is ignored and the defaults for this one stand, with no frame in between.
   const scan = useReferenceScan(report);
   const [ticks, setTicks] = useState<{ of: ReferenceScan; set: ReadonlySet<number> } | null>(null);
-  const [addNote, setAddNote] = useState<string | null>(null);
+  // What the last Add click could not do, about this scan's rows: gone with
+  // the report it was about, like the ticks.
+  const [addNote, setAddNote] = useState<{ of: ReferenceScan; text: string } | null>(null);
   const defaults = useMemo(() => defaultTicks(scan.data), [scan.data]);
   const checked = ticks !== null && ticks.of === scan.data ? ticks.set : defaults;
+  const note = addNote !== null && addNote.of === scan.data ? addNote.text : null;
 
   // Matched on every render: sources arrive after the report, so the answer
   // is always taken against what is in the dialog now.
@@ -188,6 +191,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   // skipped (its row goes once the first copy is in); the cap stops the rest
   // and says so, with what got in.
   const addSuggested = () => {
+    if (!scan.data) return;
     const wanted = ticked.map(({ ref }) => ref.suggested_url as string);
     let next = links;
     let added = 0;
@@ -205,7 +209,10 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     setLinks(next);
     setAddNote(
       capped
-        ? `Added ${added} of ${wanted.length} — at most ${MAX_SOURCES} sources per verification.`
+        ? {
+            of: scan.data,
+            text: `Added ${added} of ${wanted.length} — at most ${MAX_SOURCES} sources per verification.`
+          }
         : null
     );
   };
@@ -468,11 +475,15 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           ) : null}
           {cut !== null ? <p className="modal__count">{cut}</p> : null}
           {missing.map(({ ref, index }) => {
-            const label = ref.title ?? ref.entry;
+            // The title, else the printed text; a row the scan kept for its
+            // DOI or address alone, with no text, is named by that. Never a
+            // blank label or tooltip.
+            const label = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
+            const tooltip = ref.entry || label;
             const tag = copyTag(ref, lookup?.status ?? "ok");
             if (ref.suggested_url === null) {
               return (
-                <div className="file-row" key={index} title={ref.entry}>
+                <div className="file-row" key={index} title={tooltip}>
                   <span className="file-row__check" aria-hidden />
                   <span className="file-row__name">{label}</span>
                   <span className="file-row__size">{tag}</span>
@@ -480,7 +491,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               );
             }
             return (
-              <label className="file-row" key={index} title={ref.entry}>
+              <label className="file-row" key={index} title={tooltip}>
                 <input
                   type="checkbox"
                   className="file-row__check"
@@ -505,7 +516,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               Add {plural(ticked.length, "link")}
             </button>
           ) : null}
-          {addNote ? <p className="modal__error">{addNote}</p> : null}
+          {note !== null ? <p className="modal__count">{note}</p> : null}
 
           {error ? <p className="modal__error">{error}</p> : null}
           {tooManySources ? (

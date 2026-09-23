@@ -730,4 +730,54 @@ describe("UploadDialog reference checklist", () => {
     await waitFor(() => expect(heading(1)).toBeInTheDocument());
     expect(screen.queryByText(/not shown|reference list/)).not.toBeInTheDocument();
   });
+
+  it("styles the Add note as a note, and drops it with the report it was about", async () => {
+    const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf(
+        ["one", "two", "three"].map((n) =>
+          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+        )
+      )
+    );
+    renderDialog();
+    const files = [pdf("report.pdf"), ...Array.from({ length: 18 }, (_, i) => pdf(`doc${i}.pdf`))];
+    fireEvent.change(fileInput(), { target: { files } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    fireEvent.click(addLinks());
+    const note = screen.getByText("Added 2 of 3 — at most 20 sources per verification.");
+    expect(note).toHaveClass("modal__count");
+    expect(note).not.toHaveClass("modal__error");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove report.pdf" }));
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+
+    // Another report's scan: still no note, even though 20 sources remain.
+    scan.mockResolvedValue(emptyScan);
+    await addReport("other.pdf");
+    expect(await screen.findByText("No reference list found in this report")).toBeInTheDocument();
+    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+  });
+
+  it("names a row with no title by what it prints, and never by nothing", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        cited({ entry: "", doi: "10.1000/blank" }),
+        cited({ entry: "", url: "https://c.org/blank", suggested_url: "https://c.org/blank" }),
+        cited({ entry: "" })
+      ])
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    const byDoi = screen.getByText("10.1000/blank").closest(".file-row");
+    expect(byDoi).toHaveAttribute("title", "10.1000/blank");
+    const byUrl = screen.getByRole("checkbox", { name: /c\.org\/blank/ }).closest(".file-row");
+    expect(byUrl).toHaveAttribute("title", "https://c.org/blank");
+    const bare = screen.getByText("(untitled entry)").closest(".file-row");
+    expect(bare).toHaveAttribute("title", "(untitled entry)");
+    for (const row of document.querySelectorAll(".file-row[title]")) {
+      expect(row.getAttribute("title")).not.toBe("");
+    }
+  });
 });
