@@ -97,13 +97,15 @@ CASES = [
         "39Literature Cited\nAlcamo, Joseph, Petra Doll",
         None,
     ),
-    # The page number on the line BEFORE the heading is absorbed by the
-    # numbered-heading prefix, harmlessly: 7,678 characters to the end.
+    # The page number on the line BEFORE the heading ("8 ") is not part of
+    # it: the heading rule reads one line at a time, so the slice starts at
+    # the heading word, 7,675 characters to the end (a pattern that ran
+    # across the newline used to absorb the "8 " as a numbered heading).
     (
         "example source two/Status_Brief_C_TRN_11.pdf",
         "heading",
-        (7_678, 7_678),
-        "8 \nReferences \n \nBallesteros, C., Lincke, D.",
+        (7_675, 7_675),
+        "References \n \nBallesteros, C., Lincke, D.",
         None,
     ),
     # No heading LINE at all (a footnote-style report, 56 pages): the last

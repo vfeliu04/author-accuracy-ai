@@ -322,6 +322,32 @@ def test_the_closing_text_says_when_the_cap_cut_it():
     assert reference_text(["References\n" + "x" * 9], max_chars=20).truncated is False
 
 
+# Hostile whitespace: the scan is one pass over each line — the pattern is
+# tested per line, with possessive quantifiers and only " " and "\t" as
+# space, never \s, which runs across newlines — so no run of spaces or "|"
+# can make it re-read what it already read. Measured before the rule: a
+# 100,000-space line took 33 seconds in the request thread, AFTER the
+# bounded child had returned the pages.
+@pytest.mark.parametrize(
+    ("page", "expected_source", "expected_start"),
+    [
+        (" " * 100_000, "tail", None),
+        (" " * 100_000 + "References", "heading", "References"),
+        ("\n".join(["|"] * 10_000), "tail", None),
+        (" |" * 32_500, "tail", None),
+    ],
+    ids=["100k spaces", "100k spaces then References", "10k lines of |", "65k of space and |"],
+)
+def test_the_heading_scan_is_linear_over_hostile_whitespace(page, expected_source, expected_start):
+    started = time.perf_counter()
+    text, source, _ = reference_text(["Body text.", page])
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.1, f"the heading scan took {elapsed:.2f} s"
+    assert source == expected_source
+    if expected_start is not None:
+        assert text.startswith(expected_start)
+
+
 # --- read_pages: pypdf over the spooled upload ---------------------------------
 
 

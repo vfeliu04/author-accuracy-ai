@@ -175,23 +175,55 @@ class ClosingText(NamedTuple):
 # Bibliography  | 2024 Global Hunger Index"); nothing else on the line. A
 # mid-line mention ("see References"), a title glued to a sentence's end
 # ("…175–179. BIBLIOGRAPHY", which such a page also carries as a footer) or
-# a contents leader ("Works Cited ....... 40") never matches. The `heading`
-# group is the heading itself: the leading `\s*` may have consumed blank
-# lines, which are not bibliography. `before`, `page` and `after` mark a
-# running header, which names its PAGE rather than a position on it — see
-# reference_text. Extend the forms only with evidence: a miss falls back to
-# the document tail, which still works.
+# a contents leader ("Works Cited ....... 40") never matches. `before`,
+# `page` and `after` mark a running header, which names its PAGE rather
+# than a position on it — see reference_text. Extend the forms only with
+# evidence: a miss falls back to the document tail, which still works.
+#
+# Matched against ONE LINE at a time (_headings, fullmatch), never against
+# the joined text: a pattern anchored with MULTILINE ^\s* re-consumed a run
+# of whitespace from every line start, and a second run inside `before`
+# overlapped it, so 100,000 spaces cost 33 seconds of the request thread
+# after the bounded child had returned. Here only " " and "\t" are space
+# (\s would run across newlines), and every repeat is possessive (*+, ++)
+# so a line is read once: where the pattern must choose — the colon, the
+# page number — an optional group tries its own spaces and gives them back
+# whole, never a character at a time.
 _HEADING = re.compile(
-    r"^\s*(?P<heading>"
-    r"(?P<before>[^\n|]*\|[^\S\n]*)?"
-    r"(?:\d+[.\s]*)?"
+    r"[ \t]*+(?P<heading>"
+    r"(?P<before>[^|]*+\|[ \t]*+)?"
+    r"(?:\d++[. \t]*+)?"
     r"(?:references|bibliography|works cited|reference list|literature cited)"
-    r"[^\S\n]*:?"
-    r"(?P<page>[^\S\n]+\d{1,4})?"
-    r"[^\S\n]*(?P<after>\|[^\n]*)?"
-    r")[^\S\n]*$",
-    re.IGNORECASE | re.MULTILINE,
+    r"(?:[ \t]*+:)?"
+    r"(?P<page>[ \t]++\d{1,4})?"
+    r"[ \t]*+(?P<after>\|.*+)?"
+    r")[ \t]*+",
+    re.IGNORECASE,
 )
+
+
+class _Heading(NamedTuple):
+    start: int  # where the heading word begins in the joined text
+    running: bool  # a running-header form: it names its page, not a position
+
+
+def _headings(text: str) -> list[_Heading]:
+    """Every line of `text` that is a heading (_HEADING), in order. One
+    fullmatch per line, bounded to the line's own characters, so the cost
+    is the text's length whatever it holds."""
+    found: list[_Heading] = []
+    start = 0
+    while True:
+        end = text.find("\n", start)
+        if end == -1:
+            end = len(text)
+        match = _HEADING.fullmatch(text, start, end)
+        if match:
+            running = any(match.group(name) for name in ("before", "page", "after"))
+            found.append(_Heading(match.start("heading"), running))
+        if end == len(text):
+            return found
+        start = end + 1
 
 
 def read_pages(
@@ -371,19 +403,17 @@ def reference_text(pages: list[str], *, max_chars: int = REFERENCE_MAX_CHARS) ->
     text = "\n".join(pages)
     if not text.strip():
         return ClosingText("", "none", False)
-    matches = list(_HEADING.finditer(text))
-    if not matches:
+    headings = _headings(text)
+    if not headings:
         return ClosingText(text[-max_chars:].strip(), "tail", len(text) > max_chars)
-    headings = [match.start("heading") for match in matches]
     # Where each page starts in the joined text (the join adds one newline).
     page_starts = list(accumulate((len(page) + 1 for page in pages[:-1]), initial=0))
-    heading_pages = [bisect_right(page_starts, position) - 1 for position in headings]
+    heading_pages = [bisect_right(page_starts, heading.start) - 1 for heading in headings]
     index = len(headings) - 1
     while index > 0 and heading_pages[index] - heading_pages[index - 1] <= HEADING_RUN_PAGES:
         index -= 1
-    match = matches[index]
-    running = any(match.group(name) for name in ("before", "page", "after"))
-    start = page_starts[heading_pages[index]] if running else headings[index]
+    heading = headings[index]
+    start = page_starts[heading_pages[index]] if heading.running else heading.start
     return ClosingText(
         text[start : start + max_chars].strip(), "heading", len(text) - start > max_chars
     )
