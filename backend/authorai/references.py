@@ -52,13 +52,21 @@ logger = setup_logger(__name__)
 # last and left out that last page's entries), so 65,000 characters reads
 # all of it with margin. The model reads that text in REFERENCE_CHUNK_CHARS
 # pieces (below): at ~4 characters a token a 65,000-character list is ~6
-# chunks and ~16k Haiku input tokens, and its ~224 entries come back as
-# ~25k output tokens across the pool — roughly $0.15 for that worst case; a
-# typical report's list is a page or two, under a cent. MAX_REFERENCES is
-# the most the scan keeps once the chunks' answers are concatenated
-# (extract_references trims a longer answer, loudly). 600 pages from the
-# end covers any whole report the pipeline accepts while bounding a hostile
-# file's page walk.
+# chunks and ~16k Haiku input tokens, and the Drought list's ~224 entries
+# come back as ~25k output tokens across the pool — roughly $0.15 for the
+# largest real list; a typical report's list is a page or two, under a
+# cent. MAX_REFERENCES is the most the scan keeps once the chunks' answers
+# are concatenated (extract_references trims a longer answer, loudly). It
+# is applied AFTER every chunk has answered, not as an early stop, so the
+# true worst case is a 65,000-character list of very short entries (~64
+# characters, ~1,000 entries): still all ~6 calls, ~55k output tokens,
+# about $0.30 at Haiku's $1/$5 per million, with ~700 entries then
+# discarded. Accepted as is: an early stop would have to read the chunks
+# in waves and hold the later ones until every call of the wave before
+# returned — latency on every long list, the Drought report's included,
+# to save a fraction of a dollar on lists the scan cuts to 300 anyway. 600
+# pages from the end covers any whole report the pipeline accepts while
+# bounding a hostile file's page walk.
 REFERENCE_MAX_CHARS = 65_000
 MAX_REFERENCES = 300
 REFERENCE_MAX_PAGES = 600
