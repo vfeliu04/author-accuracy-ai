@@ -151,19 +151,34 @@ _DOI_SHAPE = re.compile(r"^10\.\d{4,9}/\S+$")
 _DOT_SEGMENTS = frozenset({".", ".."})
 
 
+def _as_served(doi: str) -> str:
+    """The DOI as a server may read it before it normalizes the path:
+    percent-decoded until nothing changes. One decoding turns "%2e%2e" into
+    ".."; a server that decodes once still sees "%252e%252e" as "%2e%2e",
+    but one that decodes twice (a proxy in front of it) sees "..", so the
+    gate assumes the most decoding any hop may do."""
+    decoded = unquote(doi)
+    while decoded != doi:
+        doi, decoded = decoded, unquote(decoded)
+    return doi
+
+
 def _steers_the_path(doi: str) -> bool:
     """True when the DOI, quoted into a request path, would name a resource
     other than <endpoint>/<doi>. httpx applies RFC 3986 dot-segment removal
     to the path it sends, quoting notwithstanding, so "10.1000/../../admin"
     is a GET of /admin on the registry; a backslash is a path separator to
-    some servers; and a servlet container drops a ";param" suffix from each
-    segment BEFORE it normalizes, so "..;x" is ".." to it — the segment is
-    judged with that suffix stripped. A dot INSIDE a segment
-    (10.1016/j.heliyon.2024.e34730), or a ";" after ordinary text, is DOI
-    punctuation and passes."""
-    if "\\" in doi:
+    some servers; a servlet container drops a ";param" suffix from each
+    segment BEFORE it normalizes, so "..;x" is ".." to it; and a server
+    decodes "%2e%2e" (or, behind a decoding proxy, "%252e%252e") to ".."
+    before either step. So the DOI is judged as served: percent-decoded
+    until stable, then each segment without its ";" suffix — "..%3B" reads
+    "..;" and then "..". A dot INSIDE a segment (10.1016/j.heliyon.2024.e34730),
+    or a ";" after ordinary text, is DOI punctuation and passes."""
+    served = _as_served(doi)
+    if "\\" in doi or "\\" in served:
         return True
-    return any(segment.split(";", 1)[0] in _DOT_SEGMENTS for segment in doi.split("/"))
+    return any(segment.split(";", 1)[0] in _DOT_SEGMENTS for segment in served.split("/"))
 
 
 def clean_doi(doi: str) -> str | None:

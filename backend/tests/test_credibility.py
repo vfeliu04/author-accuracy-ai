@@ -209,6 +209,11 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
         "10.1000/a\\b",
         "10.1000/..;/x",
         "10.1000/x/.;y/z",
+        "10.1000/..%3B/x",  # the ";" percent-encoded: decoded, then stripped, then ".."
+        "10.1000/%2e%2e/x",  # a server decodes before it normalizes
+        "10.1000/%252e%252e/x",  # ... and a decoding proxy in front of it decodes once more
+        "10.1000/x%2F..%2F..%2Fadmin",  # encoded slashes become segments on such a server
+        "10.1000/a%5Cb",  # an encoded backslash
     ):
         assert _client().by_doi(bad) is None, bad
     assert route.call_count == 0, [str(c.request.url) for c in route.calls]
@@ -217,12 +222,19 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
 @respx.mock
 def test_a_semicolon_that_hides_no_dot_segment_is_requested_exactly():
     """A ";" is legitimate DOI punctuation when the segment before it is not
-    a dot segment: the lookup goes out, quoted, as the DOI under /works/."""
+    a dot segment: the lookup goes out, quoted, as the DOI under /works/.
+    Percent-encoded in the DOI itself it is still ordinary text — that DOI
+    goes out exactly as given, its "%" quoted once more, never decoded."""
     route = respx.get(f"{CROSSREF_BASE}/works/10.1000/a%3Bb/c").mock(
         return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
     )
     assert _client().by_doi("10.1000/a;b/c") == {"title": ["Anything"]}
     assert str(route.calls.last.request.url) == f"{CROSSREF_BASE}/works/10.1000/a%3Bb/c"
+    encoded = respx.get(f"{CROSSREF_BASE}/works/10.1000/a%253Bb/c").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Encoded"]}})
+    )
+    assert _client().by_doi("10.1000/a%3Bb/c") == {"title": ["Encoded"]}
+    assert str(encoded.calls.last.request.url) == f"{CROSSREF_BASE}/works/10.1000/a%253Bb/c"
 
 
 @pytest.mark.parametrize(
@@ -238,14 +250,22 @@ def test_a_semicolon_that_hides_no_dot_segment_is_requested_exactly():
         "10.1000/..;/x",
         "10.1000/x/.;y/z",
         "10.1000/x/..;",
+        "10.1000/..%3B/x",
+        "10.1000/%2e%2e/x",
+        "10.1000/%2E/x",
+        "10.1000/%252e%252e/x",
+        "10.1000/%25252e%25252e/x",
+        "10.1000/x%2F..%2F..%2Fadmin",
+        "10.1000/a%5Cb",
     ],
 )
 def test_clean_doi_rejects_a_dot_segment_or_a_backslash(doi, credibility_log):
     """A segment that IS "." or ".." steers the request path; a backslash is
     a path separator to some servers; a servlet container drops a ";param"
-    suffix from a segment BEFORE normalizing, so "..;x" is ".." to it. All
-    are refused as malformed, with the same warning as any other shapeless
-    DOI."""
+    suffix from a segment BEFORE normalizing, so "..;x" is ".." to it; and
+    a server percent-decodes before any of that, once per hop, so "%2e%2e",
+    "%252e%252e" and "..%3B" all reach some server as "..". All are refused
+    as malformed, with the same warning as any other shapeless DOI."""
     assert clean_doi(doi) is None
     assert "Malformed DOI" in credibility_log.text
 
@@ -257,6 +277,8 @@ def test_clean_doi_keeps_dots_inside_a_segment():
     assert clean_doi(f"https://doi.org/{doi}") == doi
     assert clean_doi("10.1000/a.b.c/d.e") == "10.1000/a.b.c/d.e"
     assert clean_doi("10.1000/a;b/c") == "10.1000/a;b/c"  # a ";" hiding no dot segment
+    assert clean_doi("10.1000/a%3Bb/c") == "10.1000/a%3Bb/c"  # the same, encoded
+    assert clean_doi("10.1000/j%2Ex.2020") == "10.1000/j%2Ex.2020"  # encoded dot INSIDE a segment
 
 
 @respx.mock
