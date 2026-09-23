@@ -13,6 +13,7 @@ import respx
 
 from authorai import references
 from authorai.references import (
+    HEADING_RUN_GAP,
     MAX_REFERENCES,
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
@@ -83,6 +84,32 @@ def test_a_chapter_list_farther_back_than_a_page_run_stays_excluded():
     assert text == final_list
     assert all(entry in text for entry in final_entries)
     assert SECOND_ENTRY not in text
+
+
+def _pages_with_headings_apart(gap: int) -> list[str]:
+    """Two pages whose heading words start exactly `gap` characters apart
+    in the joined text (the join adds one newline)."""
+    first = "References\n" + "x" * (gap - len("References\n") - 1)
+    return [first, "References\n" + ENTRY]
+
+
+def test_headings_exactly_one_run_gap_apart_are_one_section():
+    """The boundary is inclusive: a gap of exactly HEADING_RUN_GAP joins, so
+    the slice starts at the earlier heading. A mutant that compares with "<"
+    instead of "<=" fails here."""
+    pages = _pages_with_headings_apart(HEADING_RUN_GAP)
+    text, source = reference_text(pages)
+    assert source == "heading"
+    assert text == "\n".join(pages)
+
+
+def test_headings_one_more_than_a_run_gap_apart_are_two_sections():
+    """One character past the gap and the earlier heading is a separate
+    section: the slice starts at the last heading."""
+    pages = _pages_with_headings_apart(HEADING_RUN_GAP + 1)
+    text, source = reference_text(pages)
+    assert source == "heading"
+    assert text == "References\n" + ENTRY
 
 
 def test_a_contents_page_mention_far_earlier_stays_excluded():
