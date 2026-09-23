@@ -32,7 +32,7 @@ from bisect import bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from itertools import accumulate
 from pathlib import Path
-from typing import BinaryIO, Literal
+from typing import BinaryIO, Literal, NamedTuple
 from urllib.parse import quote
 
 import httpx
@@ -153,6 +153,18 @@ LOOKUP_WORKERS = 4
 LOOKUP_DEADLINE_SECONDS = 45.0
 
 TextSource = Literal["heading", "tail", "none"]
+
+
+class ClosingText(NamedTuple):
+    """What the model reads, where it came from, and whether the cap cut it:
+    a cut is reported to the dialog (the scan's `limits`), not only logged,
+    since a list read in part must not present the unread works as absent
+    from the user's sources."""
+
+    text: str
+    source: TextSource
+    truncated: bool
+
 
 # A line that IS a reference-list heading, in the forms pypdf prints from
 # real reports (the lines are pinned in the tests, cited by file and page):
@@ -325,10 +337,9 @@ def _bound_page_tree(reader: PdfReader) -> None:
             pending.extend(kids)
 
 
-def reference_text(
-    pages: list[str], *, max_chars: int = REFERENCE_MAX_CHARS
-) -> tuple[str, TextSource]:
-    """The closing text the model should read, and where it came from.
+def reference_text(pages: list[str], *, max_chars: int = REFERENCE_MAX_CHARS) -> ClosingText:
+    """The closing text the model should read, where it came from, and
+    whether `max_chars` cut it.
 
     From the report's reference-list heading forward when it prints one
     (the 51-page Drought report's 72,699-character tail starts inside its
@@ -359,10 +370,10 @@ def reference_text(
     """
     text = "\n".join(pages)
     if not text.strip():
-        return "", "none"
+        return ClosingText("", "none", False)
     matches = list(_HEADING.finditer(text))
     if not matches:
-        return text[-max_chars:].strip(), "tail"
+        return ClosingText(text[-max_chars:].strip(), "tail", len(text) > max_chars)
     headings = [match.start("heading") for match in matches]
     # Where each page starts in the joined text (the join adds one newline).
     page_starts = list(accumulate((len(page) + 1 for page in pages[:-1]), initial=0))
@@ -373,7 +384,9 @@ def reference_text(
     match = matches[index]
     running = any(match.group(name) for name in ("before", "page", "after"))
     start = page_starts[heading_pages[index]] if running else headings[index]
-    return text[start : start + max_chars].strip(), "heading"
+    return ClosingText(
+        text[start : start + max_chars].strip(), "heading", len(text) - start > max_chars
+    )
 
 
 def split_reference_text(text: str, *, chunk_chars: int = REFERENCE_CHUNK_CHARS) -> list[str]:
@@ -530,7 +543,16 @@ def _bounded(reference: Reference) -> Reference:
     )
 
 
-def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList:
+class Extraction(NamedTuple):
+    """The references kept, and how many rows were dropped on the way —
+    blank rows and the rows past MAX_REFERENCES — reported to the dialog as
+    the scan's `limits.references_dropped`."""
+
+    references: list[Reference]
+    dropped: int
+
+
+def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     """The model's reading of the closing text: one structured call per
     REFERENCE_CHUNK_CHARS chunk, LOOKUP_WORKERS at a time, the answers
     concatenated in chunk order, every `entry` cut to ENTRY_PREFIX_CHARS
@@ -579,7 +601,7 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList
             MAX_REFERENCES,
         )
         references = references[:MAX_REFERENCES]
-    return ReferenceList(references=references)
+    return Extraction(references, len(answered) - len(references))
 
 
 # --- Unpaywall ------------------------------------------------------------------

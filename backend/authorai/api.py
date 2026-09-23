@@ -435,9 +435,19 @@ class LookupStatus(BaseModel):
     detail: str | None = None
 
 
+class ScanLimits(BaseModel):
+    # What the scan's caps took, so the dialog can say the list was read in
+    # part instead of presenting the unread works as absent from the user's
+    # sources: the closing text cut at REFERENCE_MAX_CHARS, and the rows
+    # dropped — past MAX_REFERENCES, or blank with nothing to act on.
+    text_truncated: bool
+    references_dropped: int
+
+
 class ReferenceScan(BaseModel):
     text_source: refsmod.TextSource
     lookup: LookupStatus
+    limits: ScanLimits
     references: list[ScannedReference]
 
 
@@ -471,11 +481,12 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
         pages = refsmod.read_pages(report.file, timeout=settings.extract_timeout_seconds)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{report.filename!r}: {exc}") from exc
-    text, text_source = refsmod.reference_text(pages)
+    text, text_source, text_truncated = refsmod.reference_text(pages)
     references: list[refsmod.Reference] = []
+    dropped = 0
     if text_source != "none":
         llm = AnthropicClient(settings.anthropic_api_key)
-        references = refsmod.extract_references(llm, settings.references_model, text).references
+        references, dropped = refsmod.extract_references(llm, settings.references_model, text)
 
     mailto = (settings.crossref_mailto or "").strip()
     if not mailto:
@@ -499,6 +510,7 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     return ReferenceScan(
         text_source=text_source,
         lookup=lookup,
+        limits=ScanLimits(text_truncated=text_truncated, references_dropped=dropped),
         references=[
             ScannedReference(
                 **reference.model_dump(),

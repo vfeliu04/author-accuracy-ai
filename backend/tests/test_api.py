@@ -1460,6 +1460,7 @@ def test_reference_scan_lists_cited_works_and_writes_nothing(tmp_path, monkeypat
     body = resp.json()
     assert body["text_source"] == "heading"
     assert body["lookup"] == {"status": "ok", "detail": None}
+    assert body["limits"] == {"text_truncated": False, "references_dropped": 0}
     assert [(r["retrievability"], r["suggested_url"]) for r in body["references"]] == [
         ("pdf", "https://x.org/o.pdf"),
         ("paywalled", None),
@@ -1562,6 +1563,26 @@ def test_reference_scan_reads_the_last_pages_of_a_long_report_promptly(tmp_path,
     _nothing_written(settings)
 
 
+def test_reference_scan_reports_a_reference_list_cut_by_the_text_cap(tmp_path, monkeypatch):
+    """A bibliography longer than REFERENCE_MAX_CHARS is read in part; the
+    response says so (`limits.text_truncated`), so the dialog does not
+    present the works it never read as absent from the user's sources."""
+    from authorai import api as apimod
+    from authorai.references import REFERENCE_MAX_CHARS
+
+    fake = FakeLLM({ReferenceList: CITED})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    settings = _settings(tmp_path)
+    lines = ("Author, A. (2020). Work. J. 1.\n" * (REFERENCE_MAX_CHARS // 30 + 100)).rstrip()
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report(pages=["References\n" + lines]))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["text_source"] == "heading"
+    assert body["limits"] == {"text_truncated": True, "references_dropped": 0}
+    assert all(len(call["prompt"]) < REFERENCE_MAX_CHARS for call in fake.parse_calls)
+
+
 def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypatch):
     """A scanned (image-only) PDF has no text to read: the answer is 'none'
     and an empty list — the model is never asked, so it cannot invent a
@@ -1578,6 +1599,7 @@ def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypa
     assert resp.json() == {
         "text_source": "none",
         "lookup": {"status": "ok", "detail": None},
+        "limits": {"text_truncated": False, "references_dropped": 0},
         "references": [],
     }
     _nothing_written(settings)
@@ -1636,6 +1658,7 @@ def test_reference_scan_survives_a_blank_entry(tmp_path, monkeypatch):
         ("", "Titled work"),
         ("Printed, P. (2019). As printed.", None),
     ]
+    assert body["limits"] == {"text_truncated": False, "references_dropped": 1}
     assert body["references"][0] == {
         "title": "Titled work",
         "authors": ["Titled, T."],

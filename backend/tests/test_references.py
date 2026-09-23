@@ -64,7 +64,7 @@ def test_slices_from_the_last_references_heading():
         BODY,  # three pages between the two headings: more than a run
         "References\n" + ENTRY,
     ]
-    text, source = reference_text(pages, max_chars=100)
+    text, source, _ = reference_text(pages, max_chars=100)
     assert source == "heading"
     assert text == "References\n" + ENTRY
 
@@ -76,7 +76,7 @@ def test_a_running_header_does_not_cut_a_multi_page_bibliography_short():
     are one section, so the slice starts at the earliest of them."""
     first = "References\n" + ENTRY
     second = "45\nReferences\n" + SECOND_ENTRY
-    text, source = reference_text([first, second])
+    text, source, _ = reference_text([first, second])
     assert source == "heading"
     assert text == first + "\n" + second
 
@@ -89,7 +89,7 @@ def test_a_run_of_headers_joins_by_chaining_each_page_to_the_one_before():
     heading judged against the one before it, starts at page 0 and keeps
     all four pages' entries."""
     pages = [f"References\nEntry on page {i}. " + ENTRY for i in range(4)]
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == "\n".join(pages)
     assert all(f"Entry on page {i}." in text for i in range(4))
@@ -106,7 +106,9 @@ def test_a_chapter_list_several_pages_back_stays_excluded():
     final_entries = [f"Final ref {i}. " + ENTRY for i in range(120)]
     final_list = "References\n" + "\n".join(final_entries)
     sparse_page = "A short page.\n"
-    text, source = reference_text([chapter_list, sparse_page, sparse_page, sparse_page, final_list])
+    text, source, _ = reference_text(
+        [chapter_list, sparse_page, sparse_page, sparse_page, final_list]
+    )
     assert source == "heading"
     assert text == final_list
     assert all(entry in text for entry in final_entries)
@@ -125,7 +127,7 @@ def test_headings_exactly_one_run_apart_are_one_section():
     starts at the earlier heading. A mutant that compares with "<" instead
     of "<=" fails here."""
     pages = _pages_with_headings_apart(HEADING_RUN_PAGES)
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == "\n".join(pages)
 
@@ -134,7 +136,7 @@ def test_headings_one_page_more_than_a_run_apart_are_two_sections():
     """One page past the run and the earlier heading is a separate section:
     the slice starts at the last heading."""
     pages = _pages_with_headings_apart(HEADING_RUN_PAGES + 1)
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == "References\n" + ENTRY
 
@@ -149,7 +151,7 @@ def test_a_heading_that_begins_a_page_belongs_to_that_page():
     start on the page before, reads them as one run and keeps page 0."""
     assert HEADING_RUN_PAGES + 1 == 3
     pages = ["Body.\nReferences\n" + SECOND_ENTRY, "Body.", "Body.", "References\n" + ENTRY]
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == "References\n" + ENTRY
 
@@ -170,7 +172,7 @@ def test_a_heading_that_ends_a_page_belongs_to_that_page():
         BODY + "\nReferences",  # page 12: the heading at the foot, HEADING_RUN_PAGES later
         ENTRY,
     ]
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == "\n".join(pages[10:])
 
@@ -180,7 +182,7 @@ def test_a_contents_page_mention_far_earlier_stays_excluded():
     pages before the bibliography: more than HEADING_RUN_PAGES pages back
     from the last heading, so the slice still starts at the bibliography."""
     pages = ["Contents\nReferences\n45", *[BODY] * 10, "References\n" + ENTRY]
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == "References\n" + ENTRY
 
@@ -188,7 +190,7 @@ def test_a_contents_page_mention_far_earlier_stays_excluded():
 def test_the_slice_and_its_cap_start_at_the_heading_word():
     """Blank lines and indentation before the heading are matched by the
     pattern but are not bibliography: they do not count against the cap."""
-    text, source = reference_text(["Body", "\n\n   References\n" + "x" * 100], max_chars=20)
+    text, source, _ = reference_text(["Body", "\n\n   References\n" + "x" * 100], max_chars=20)
     assert source == "heading"
     assert text == ("References\n" + "x" * 100)[:20]
 
@@ -236,7 +238,7 @@ REAL_NON_HEADING_LINES = [
     ],
 )
 def test_every_heading_form_is_recognised(heading):
-    text, source = reference_text(["Body text.", heading + "\n" + ENTRY])
+    text, source, _ = reference_text(["Body text.", heading + "\n" + ENTRY])
     assert source == "heading"
     assert text.startswith(heading.strip())
     assert text.endswith(ENTRY)
@@ -247,7 +249,7 @@ def test_a_mid_line_mention_is_not_a_heading(line):
     """Only a line that IS the heading counts — 'see References' in prose,
     a title glued to a sentence's end, a contents leader — is not where the
     bibliography starts."""
-    text, source = reference_text(["Body text.", line + "\n" + ENTRY])
+    text, source, _ = reference_text(["Body text.", line + "\n" + ENTRY])
     assert source == "tail"
 
 
@@ -263,7 +265,7 @@ def test_a_running_footer_anchors_the_slice_at_its_page_start():
     after them — and the run of footers reaches back to the first page."""
     first = ENTRY + "\nNutrition  22 (1): 175–179. BIBLIOGRAPHY\n" + FOOTER_RECTO
     second = SECOND_ENTRY + "\n" + FOOTER_VERSO
-    text, source = reference_text([BODY, first, second])
+    text, source, _ = reference_text([BODY, first, second])
     assert source == "heading"
     assert text.startswith(ENTRY)
     assert text.endswith(FOOTER_VERSO)
@@ -273,32 +275,32 @@ def test_a_running_footer_anchors_the_slice_at_its_page_start():
 def test_a_plain_heading_still_anchors_at_the_heading_word():
     """A heading line without a page number or decoration is where the list
     starts, whatever precedes it on the page."""
-    text, source = reference_text([BODY, "Conclusions end here.\nReferences\n" + ENTRY])
+    text, source, _ = reference_text([BODY, "Conclusions end here.\nReferences\n" + ENTRY])
     assert source == "heading"
     assert text == "References\n" + ENTRY
 
 
 def test_a_contents_line_with_a_page_number_far_from_the_list_stays_excluded():
     pages = ["Contents\nBIBLIOGRAPHY    51", BODY, BODY, BODY, ENTRY + "\n" + FOOTER_RECTO]
-    text, source = reference_text(pages)
+    text, source, _ = reference_text(pages)
     assert source == "heading"
     assert text == ENTRY + "\n" + FOOTER_RECTO
 
 
 def test_no_heading_falls_back_to_the_document_tail():
-    text, source = reference_text(["A" * 100, "B" * 100], max_chars=50)
+    text, source, _ = reference_text(["A" * 100, "B" * 100], max_chars=50)
     assert source == "tail"
     assert text == "B" * 50
 
 
 def test_the_heading_slice_is_capped_from_the_heading_forward():
-    text, source = reference_text(["References\n" + "x" * 100], max_chars=20)
+    text, source, _ = reference_text(["References\n" + "x" * 100], max_chars=20)
     assert source == "heading"
     assert text == ("References\n" + "x" * 100)[:20]
 
 
 def test_the_default_cap_is_the_code_constant():
-    text, source = reference_text(["y" * (REFERENCE_MAX_CHARS + 500)])
+    text, source, _ = reference_text(["y" * (REFERENCE_MAX_CHARS + 500)])
     assert source == "tail"
     assert len(text) == REFERENCE_MAX_CHARS
 
@@ -306,8 +308,18 @@ def test_the_default_cap_is_the_code_constant():
 def test_no_text_at_all_means_no_model_call():
     """A scanned PDF yields no text; the answer is 'none', never an invented
     bibliography — the endpoint skips the model on this value."""
-    assert reference_text([]) == ("", "none")
-    assert reference_text(["", "  \n\t"]) == ("", "none")
+    assert reference_text([]) == ("", "none", False)
+    assert reference_text(["", "  \n\t"]) == ("", "none", False)
+
+
+def test_the_closing_text_says_when_the_cap_cut_it():
+    """The dialog presents the list as the whole reference list; a cap that
+    cut the text is reported, not only logged, so it can say otherwise."""
+    assert reference_text(["References\n" + "x" * 100], max_chars=20).truncated is True
+    assert reference_text(["References\n" + "x" * 100], max_chars=200).truncated is False
+    assert reference_text(["A" * 100, "B" * 100], max_chars=50).truncated is True
+    assert reference_text(["A" * 100, "B" * 100], max_chars=500).truncated is False
+    assert reference_text(["References\n" + "x" * 9], max_chars=20).truncated is False
 
 
 # --- read_pages: pypdf over the spooled upload ---------------------------------
@@ -578,7 +590,8 @@ def test_a_short_list_is_one_call_under_the_references_contract():
     )
     llm = FakeLLM({ReferenceList: wanted})
     result = extract_references(llm, "claude-haiku-4-5", "References\n" + ENTRY)
-    assert result == wanted
+    assert result.references == wanted.references
+    assert result.dropped == 0
     assert len(llm.parse_calls) == 1
     call = llm.parse_calls[0]
     assert call["model"] == "claude-haiku-4-5"
@@ -811,8 +824,21 @@ def test_the_cap_applies_to_the_parts_concatenated(references_log):
 
 def test_extract_references_returns_a_short_list_untouched(references_log):
     two = ReferenceList(references=[Reference(entry="a"), Reference(entry="b")])
-    assert extract_references(FakeLLM({ReferenceList: two}), "m", "References") == two
+    result = extract_references(FakeLLM({ReferenceList: two}), "m", "References")
+    assert (result.references, result.dropped) == (two.references, 0)
     assert references_log.text == ""
+
+
+def test_extract_references_counts_every_row_it_dropped(monkeypatch, references_log):
+    """Blank rows and the rows past MAX_REFERENCES alike: the count the scan
+    reports as `references_dropped`."""
+    monkeypatch.setattr(references, "MAX_REFERENCES", 2)
+    answer = ReferenceList(
+        references=[Reference(entry=""), *[Reference(entry=f"r{i}") for i in range(5)]]
+    )
+    result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
+    assert [r.entry for r in result.references] == ["r0", "r1"]
+    assert result.dropped == 1 + 3
 
 
 def test_blank_optional_fields_read_as_absent():

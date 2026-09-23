@@ -150,7 +150,7 @@ def _slice(relative: str):
 def test_real_reports_slice_where_measured(
     relative, expected_source, bounds, starts_with, ends_with
 ):
-    text, source = _slice(relative)
+    text, source, _ = _slice(relative)
     assert source == expected_source
     low, high = bounds
     assert low <= len(text) <= high, f"{relative}: {len(text)} chars from {source!r}"
@@ -167,7 +167,7 @@ def test_the_largest_real_list_splits_into_the_chunks_the_cost_comment_counts():
     last entry (Zkhiri) in the last chunk."""
     from authorai.references import REFERENCE_CHUNK_CHARS, split_reference_text
 
-    text, _ = _slice(DROUGHT)
+    text, _, _ = _slice(DROUGHT)
     chunks = split_reference_text(text)
     assert len(chunks) == 6
     assert all(len(chunk) <= REFERENCE_CHUNK_CHARS for chunk in chunks)
