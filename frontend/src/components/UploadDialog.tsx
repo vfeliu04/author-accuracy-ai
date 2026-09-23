@@ -160,15 +160,16 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
-  // Adds the link in the box and returns the new list. A rejected link stays in
-  // the box, with the reason, so it can be corrected in place.
-  const commitLink = (): string[] | null => {
-    const result = checkLink(linkText, links);
+  // Adds the link in the box to `base` (the links held, or those plus what
+  // the same click added before it) and returns the new list. A rejected
+  // link stays in the box, with the reason, so it can be corrected in place.
+  const commitLink = (base: string[]): string[] | null => {
+    const result = checkLink(linkText, base);
     if ("error" in result) {
       setLinkError(result.error);
       return null;
     }
-    const next = [...links, result.link];
+    const next = [...base, result.link];
     setLinks(next);
     setLinkText("");
     setLinkError(null);
@@ -176,7 +177,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   };
 
   const addLink = () => {
-    if (linkText.trim() !== "") commitLink();
+    if (linkText.trim() !== "") commitLink(links);
   };
 
   const removeReport = () => {
@@ -201,15 +202,16 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   };
 
   // The only way a suggestion becomes a source: the ticked rows, each through
-  // the same checks a typed link gets, up to the source cap. A tick that did
-  // not get in is never dropped in silence: the cap stops the rest and says
-  // so, with what got in, and a row the checks refuse against the links now
-  // held (a duplicate of one ticked just before it — its row goes once the
-  // first copy is in) is counted, with the reason.
-  const addSuggested = () => {
-    if (!scan.data) return;
+  // the same checks a typed link gets, up to the source cap, added to `base`
+  // and returned with whether the cap stopped any. A tick that did not get
+  // in is never dropped in silence: the cap stops the rest and says so, with
+  // what got in, and a row the checks refuse against the links now held (a
+  // duplicate of one ticked just before it — its row goes once the first
+  // copy is in) is counted, with the reason.
+  const addSuggested = (base: string[]): { next: string[]; capped: boolean } => {
+    if (!scan.data) return { next: base, capped: false };
     const wanted = ticked.map(({ ref }) => ref.suggested_url as string);
-    let next = links;
+    let next = base;
     let added = 0;
     let capped = false;
     const refused: string[] = [];
@@ -238,6 +240,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
         ? null
         : { of: scan.data, text: `Added ${added} of ${wanted.length} — ${why.join(" ")}` }
     );
+    return { next, capped };
   };
 
   const handleDrop = (event: DragEvent) => {
@@ -268,11 +271,18 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
 
   const submit = () => {
     if (!report) return;
-    // A link still in the box was meant to go too, so it is added first; one
-    // that can't be added, or that passes the limit, holds the upload.
+    // Ticked rows and a link still in the box were meant to go too, so they
+    // are added first, the ticks then the box; a tick the limit stops, or a
+    // typed link that can't be added or passes the limit, holds the upload
+    // and says why.
     let submitted = links;
+    if (ticked.length > 0) {
+      const { next, capped } = addSuggested(submitted);
+      if (capped) return;
+      submitted = next;
+    }
     if (linkText.trim() !== "") {
-      const next = commitLink();
+      const next = commitLink(submitted);
       if (next === null || sources.length + next.length > MAX_SOURCES) return;
       submitted = next;
     }
@@ -539,7 +549,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               type="button"
               className="btn btn--ghost"
               disabled={ticked.length === 0}
-              onClick={addSuggested}
+              onClick={() => addSuggested(links)}
             >
               Add {plural(ticked.length, "link")}
             </button>

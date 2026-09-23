@@ -820,4 +820,54 @@ describe("UploadDialog reference checklist", () => {
     expect(screen.queryByRole("button", { name: /^Add \d+ links?$/ })).not.toBeInTheDocument();
     expect(heading(2)).toBeInTheDocument();
   });
+
+  it("sends the ticked free copies with Verify, added first like a typed link", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+        cited({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two" }),
+        cited({ title: "Work three", retrievability: "paywalled" })
+      ])
+    );
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), pdf("s.pdf")] } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    expect(addLinks()).toHaveTextContent("Add 2 links");
+    typeLink("https://c.org/typed");
+
+    fireEvent.click(verify());
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const [, sourcesArg, linksArg] = create.mock.calls[0];
+    expect((sourcesArg as File[]).map((f) => f.name)).toEqual(["s.pdf"]);
+    expect(linksArg).toEqual(["https://a.org/one", "https://b.org/two", "https://c.org/typed"]);
+  });
+
+  it("holds Verify when the ticked copies pass the source limit, and says what got in", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf(
+        ["one", "two", "three"].map((n) =>
+          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+        )
+      )
+    );
+    renderDialog();
+    const files = [pdf("report.pdf"), ...Array.from({ length: 18 }, (_, i) => pdf(`doc${i}.pdf`))];
+    fireEvent.change(fileInput(), { target: { files } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+
+    fireEvent.click(verify());
+    expect(screen.getByText("Added 2 of 3 — at most 20 sources per verification.")).toBeInTheDocument();
+    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Work three/ })).toBeChecked();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(create).not.toHaveBeenCalled();
+
+    // Unticking the one that did not fit lets the upload go, with the two.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work three/ }));
+    fireEvent.click(verify());
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(create.mock.calls[0][2]).toEqual(["https://a.org/one", "https://a.org/two"]);
+  });
 });
