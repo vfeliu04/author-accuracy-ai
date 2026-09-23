@@ -14,10 +14,10 @@ const MAX_SOURCES = 20;
 const MAX_FILE_BYTES = 50_000_000;
 const MAX_TOTAL_BYTES = 200_000_000;
 // The most of a cited work's name a row shows; the whole text is its tooltip.
-// The server cuts a title at 500 characters and an entry at 160, and the
-// model writes the DOI and the address that name a row with neither: this is
-// the dialog's own bound, whatever the server sends.
-const LABEL_MAX_CHARS = 300;
+// The server cuts a title at 500 characters and a label at 40, and the model
+// writes the DOI and the address that name a row with neither: this is the
+// dialog's own bound, whatever the server sends.
+const NAME_MAX_CHARS = 300;
 
 function isPdf(file: File): boolean {
   return file.name.toLowerCase().endsWith(".pdf");
@@ -33,8 +33,25 @@ function uploadError(err: unknown): string {
 }
 
 // A cited work with its place in the scan, which is what a tick refers to,
-// and why the dialog would refuse its suggested address, if it would.
+// and why the dialog would refuse its suggested address, if it would. The
+// place, not the DOI, address or label: a work the list prints twice is two
+// rows that agree on every field, and each keeps its own tick; and the tick
+// set is bound to the scan it was made for, so a place never moves under it.
 type Cited = { ref: ScannedReference; index: number; refused: string | null };
+
+// What names a row: the title, else the short label the scan printed (an
+// author or organisation and the year), else the DOI or address the entry
+// printed, else a placeholder. Never blank, whatever the server sends.
+function rowName(ref: ScannedReference): string {
+  return ref.title || ref.label || ref.doi || ref.url || "(untitled entry)";
+}
+
+// The row's tooltip: the whole name, then the DOI and the address the entry
+// printed, when it did and the name is not already that one.
+function rowTooltip(name: string, ref: ScannedReference): string {
+  const printed = [ref.doi, ref.url].filter((part): part is string => !!part && part !== name);
+  return [name, ...printed].join(" — ");
+}
 
 // The dialog's own link gate over the suggested address alone (a YouTube
 // page, say — the server's offer gate and the dialog's do not agree on every
@@ -556,15 +573,12 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           ) : null}
           {cut !== null ? <p className="modal__count">{cut}</p> : null}
           {missing.map(({ ref, index, refused }) => {
-            // The title, else the printed text; a row the scan kept for its
-            // DOI or address alone, with no text, is named by that. Never a
-            // blank label or tooltip. A name past the display bound is cut,
-            // and the whole of it is then the tooltip in place of the entry,
-            // which the server cut at 160 and so need not hold the tail.
-            const full = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
-            const cut = full.length > LABEL_MAX_CHARS;
-            const label = cut ? `${full.slice(0, LABEL_MAX_CHARS)}…` : full;
-            const tooltip = cut ? full : ref.entry || full;
+            // A name past the display bound is cut; the tooltip holds the
+            // whole of it either way.
+            const full = rowName(ref);
+            const over = full.length > NAME_MAX_CHARS;
+            const name = over ? `${full.slice(0, NAME_MAX_CHARS)}…` : full;
+            const tooltip = rowTooltip(full, ref);
             const tag = copyTag(ref, lookup?.status ?? "ok");
             // A row with an address the dialog would take is a label around
             // its tick box; one with no address, or a refused one, is a plain
@@ -583,7 +597,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
                 ) : (
                   <span className="file-row__check" aria-hidden />
                 )}
-                <span className="file-row__name">{label}</span>
+                <span className="file-row__name">{name}</span>
                 {ref.suggested_url !== null ? (
                   <span className="file-row__host" title={ref.suggested_url}>
                     {linkHost(ref.suggested_url)}

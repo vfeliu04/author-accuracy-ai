@@ -477,7 +477,7 @@ describe("UploadDialog reference checklist", () => {
           retrievability: "pdf",
           suggested_url: "https://europepmc.org/articles/PMC1?pdf=render"
         }),
-        scannedReference({ entry: "Anon. (n.d.). A note without a title." })
+        scannedReference({ label: "Anon n.d." })
       ])
     );
     renderDialog();
@@ -485,7 +485,7 @@ describe("UploadDialog reference checklist", () => {
     await waitFor(() => expect(heading(3)).toBeInTheDocument());
     expect(screen.getByText("Water scarcity in the Mediterranean basin")).toBeInTheDocument();
     expect(screen.getByText("paywalled")).toBeInTheDocument();
-    expect(screen.getByText("Anon. (n.d.). A note without a title.")).toBeInTheDocument();
+    expect(screen.getByText("Anon n.d.")).toBeInTheDocument();
 
     // A link carrying the DOI stands for the first work.
     typeLink("https://doi.org/10.1000/abc");
@@ -498,7 +498,7 @@ describe("UploadDialog reference checklist", () => {
     await waitFor(() =>
       expect(screen.queryByText("Drought hotspots of the twenty-first century")).not.toBeInTheDocument()
     );
-    expect(screen.getByText("Anon. (n.d.). A note without a title.")).toBeInTheDocument();
+    expect(screen.getByText("Anon n.d.")).toBeInTheDocument();
     expect(heading(1)).toBeInTheDocument();
   });
 
@@ -768,9 +768,9 @@ describe("UploadDialog reference checklist", () => {
   it("names a row with no title by what it prints, and never by nothing", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        scannedReference({ entry: "", doi: "10.1000/blank" }),
-        scannedReference({ entry: "", url: "https://c.org/blank", suggested_url: "https://c.org/blank" }),
-        scannedReference({ entry: "" })
+        scannedReference({ doi: "10.1000/blank" }),
+        scannedReference({ url: "https://c.org/blank", suggested_url: "https://c.org/blank" }),
+        scannedReference()
       ])
     );
     renderDialog();
@@ -787,17 +787,81 @@ describe("UploadDialog reference checklist", () => {
     }
   });
 
+  it("names a row by its printed label when the title is missing, with the DOI and address on hover", async () => {
+    // The scan returns a short key per entry ("Adler 2011"), never the entry
+    // verbatim: it names the row after the title, before the DOI or address,
+    // and the tooltip is the name with whichever of those the entry printed.
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        scannedReference({ label: "Adler 2011", doi: "10.1000/adler" }),
+        scannedReference({
+          title: "A titled work",
+          label: "Baker 2012",
+          url: "https://c.org/baker",
+          suggested_url: "https://c.org/baker"
+        }),
+        scannedReference({ label: "Cole 2013" }),
+        scannedReference({ label: "Dunn 2014", doi: "10.1000/dunn", url: "https://c.org/dunn" })
+      ])
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(4)).toBeInTheDocument());
+    expect(screen.getByText("Adler 2011").closest(".file-row")).toHaveAttribute(
+      "title",
+      "Adler 2011 — 10.1000/adler"
+    );
+    expect(screen.queryByText("Baker 2012")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /A titled work/ }).closest(".file-row")).toHaveAttribute(
+      "title",
+      "A titled work — https://c.org/baker"
+    );
+    expect(screen.getByText("Cole 2013").closest(".file-row")).toHaveAttribute("title", "Cole 2013");
+    expect(screen.getByText("Dunn 2014").closest(".file-row")).toHaveAttribute(
+      "title",
+      "Dunn 2014 — 10.1000/dunn — https://c.org/dunn"
+    );
+  });
+
+  it("keeps a tick on the row it was made on when one work is printed twice", async () => {
+    // A tick refers to a row's place in the scan, not to its DOI, address or
+    // label: a bibliography that prints the same work twice yields two rows
+    // with every field equal, and unticking one must leave the other alone.
+    const twice = () =>
+      scannedReference({
+        title: "Same work, printed twice",
+        label: "Evans 2015",
+        doi: "10.1000/twice",
+        retrievability: "pdf",
+        suggested_url: "https://c.org/twice.pdf"
+      });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(scanOf([twice(), twice()]));
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(2)).toBeInTheDocument());
+    const boxes = screen.getAllByRole("checkbox", { name: /Same work/ });
+    expect(boxes).toHaveLength(2);
+    expect(boxes[0]).toBeChecked();
+    expect(boxes[1]).toBeChecked();
+    expect(addLinks()).toHaveTextContent("Add 2 links");
+
+    fireEvent.click(boxes[0]);
+    expect(boxes[0]).not.toBeChecked();
+    expect(boxes[1]).toBeChecked();
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+  });
+
   it("cuts a long label for display and keeps the whole text on hover", async () => {
-    // The server cuts a title at 500 characters and an entry at 160, and a
+    // The server cuts a title at 500 characters and a label at 40, and a
     // printed address at nothing at all; the row shows at most 300 of any of
-    // them, with the whole text as the row's tooltip in place of the entry.
+    // them, with the whole text as the row's tooltip.
     const title = `Title ${"t".repeat(600)}`;
     const url = `https://c.org/${"u".repeat(2400)}`;
     const exact = "x".repeat(300);
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
         scannedReference({ title }),
-        scannedReference({ entry: "", url }),
+        scannedReference({ url }),
         scannedReference({ title: exact })
       ])
     );
@@ -810,8 +874,8 @@ describe("UploadDialog reference checklist", () => {
     expect(byTitle.closest(".file-row")).toHaveAttribute("title", title);
     const byUrl = screen.getByText(`${url.slice(0, 300)}…`);
     expect(byUrl.closest(".file-row")).toHaveAttribute("title", url);
-    // At the limit nothing is cut, and the printed entry stays the tooltip.
-    expect(screen.getByText(exact).closest(".file-row")).toHaveAttribute("title", "An entry as printed.");
+    // At the limit nothing is cut, and the whole name is the tooltip.
+    expect(screen.getByText(exact).closest(".file-row")).toHaveAttribute("title", exact);
     for (const name of document.querySelectorAll(".file-row__name")) {
       expect((name.textContent ?? "").length).toBeLessThanOrEqual(301);
     }
@@ -1069,6 +1133,36 @@ describe("UploadDialog reference checklist", () => {
     expect(await screen.findByText("The scan may have missed some entries")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
     expect(screen.queryByText("Scanning the report's references…")).not.toBeInTheDocument();
+  });
+
+  it("shows the sentence a 502 from the scan carries, with Try again, and scans again on the click", async () => {
+    // A model answer the server could not read is a 502 whose detail is a
+    // sentence for the reader. It reaches the dialog through the real
+    // fetcher, is shown like any failed scan — once, since the scan is never
+    // retried on its own — and Try again asks the server once more.
+    vi.mocked(v2.scanReferences).mockRestore();
+    const detail = "The model's answer could not be read as a reference list — try the scan again.";
+    const json = (body: unknown, status: number) =>
+      new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({ detail }, 502))
+      .mockResolvedValueOnce(json(scanOf([scannedReference({ title: "Work one" })]), 200));
+    vi.stubGlobal("fetch", fetchMock);
+    renderDialog();
+    await addReport();
+    expect(await screen.findByText(detail)).toHaveClass("modal__error");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByText(/Cited by the report/)).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/references\/scan$/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.getByText("Work one")).toBeInTheDocument();
+    expect(screen.queryByText(detail)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("offers to try a failed scan again, and lists the works when it answers", async () => {
