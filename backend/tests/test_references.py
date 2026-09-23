@@ -440,13 +440,65 @@ def test_extract_references_returns_a_short_list_untouched(references_log):
 
 def test_blank_optional_fields_read_as_absent():
     """The model sometimes prints '' for a field it was told to leave null;
-    downstream code (the DOI lookup, the printed-URL rule) keys on absence."""
+    downstream code (the DOI lookup, the printed-URL rule) keys on absence.
+    `entry` is a str, not optional: a blank one stays "" (never None, which
+    the field's own type rejects on re-validation) and is judged by the
+    actionable rule instead."""
     reference = Reference(entry="  x  ", title="  ", doi="", url=" \n", authors=["A", "  ", "B"])
     assert reference.entry == "x"
     assert reference.title is None
     assert reference.doi is None
     assert reference.url is None
     assert reference.authors == ["A", "B"]
+    assert Reference(entry="").entry == ""
+    assert Reference(entry=" \n\t ").entry == ""
+
+
+def test_a_blank_entry_is_dropped_loudly_unless_the_row_names_the_work(references_log):
+    """A model slip: `entry` printed as "" or whitespace where the prompt
+    asked for the entry's first characters. The rule, stated once in
+    `actionable`: with no title, DOI or address either, the row is not a
+    reference the user can act on and is dropped — counted in a WARNING,
+    never silently; with any of those it is kept, its entry "", since the
+    dialog can still show the title and check the work. Authors and a year
+    alone name nothing the dialog can show, so that row is dropped too."""
+    answer = ReferenceList(
+        references=[
+            Reference(entry=""),
+            Reference(entry="   ", title="Titled work"),
+            Reference(entry="\n\t", doi="10.1000/x"),
+            Reference(entry="", url="https://x.org/p"),
+            Reference(entry="  ", authors=["Only, A."], year=2020),
+            Reference(entry="kept as printed"),
+        ]
+    )
+    result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
+    assert [(r.entry, r.title, r.doi, r.url) for r in result.references] == [
+        ("", "Titled work", None, None),
+        ("", None, "10.1000/x", None),
+        ("", None, None, "https://x.org/p"),
+        ("kept as printed", None, None, None),
+    ]
+    assert all(isinstance(r.entry, str) for r in result.references)
+    assert "WARNING" in references_log.text
+    assert "dropping 2 of 6 references" in references_log.text
+
+
+def test_a_null_entry_is_a_parse_failure_not_a_blank_row():
+    """`entry` is a required string in the schema the model decodes under,
+    so the constrained answer cannot carry a null there; a hand-built one
+    fails validation at parse time — the model-failure 500, like any
+    unparseable answer — and never reaches the actionable rule."""
+    from anthropic import transform_schema
+    from pydantic import ValidationError
+
+    schema = transform_schema(ReferenceList)["$defs"]["Reference"]
+    assert "entry" in schema["required"]
+    assert schema["properties"]["entry"]["type"] == "string"
+    with pytest.raises(ValidationError):
+        Reference(entry=None)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        ReferenceList.model_validate({"references": [{"entry": None}]})
 
 
 def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():

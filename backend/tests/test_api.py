@@ -1558,6 +1558,48 @@ def test_reference_scan_without_a_contact_email_looks_nothing_up(tmp_path, monke
     ]
 
 
+def test_reference_scan_survives_a_blank_entry(tmp_path, monkeypatch):
+    """A model slip — `entry` "" or whitespace where the prompt asked for
+    the entry's first characters — is an ordinary answer, not a 500: the
+    handler re-validates each reference as a ScannedReference, and a blank
+    entry must arrive there as "" (a str), never as None. The row with a
+    title is listed with entry "", the row with nothing to act on is
+    dropped. raise_server_exceptions=False so a handler failure shows as
+    the HTTP 500 the dialog would see."""
+    from authorai import api as apimod
+
+    settings = _settings(tmp_path)  # crossref_mailto unset: no lookup, no network
+    answer = ReferenceList(
+        references=[
+            Reference(entry=""),
+            Reference(entry="   ", title="Titled work", authors=["Titled, T."], year=2020),
+            Reference(entry="Printed, P. (2019). As printed."),
+        ]
+    )
+    fake = FakeLLM({ReferenceList: answer})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    app = create_app(settings, worker=_NoopWorker())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [(r["entry"], r["title"]) for r in body["references"]] == [
+        ("", "Titled work"),
+        ("Printed, P. (2019). As printed.", None),
+    ]
+    assert body["references"][0] == {
+        "title": "Titled work",
+        "authors": ["Titled, T."],
+        "year": 2020,
+        "doi": None,
+        "url": None,
+        "entry": "",
+        "retrievability": "unknown",
+        "suggested_url": None,
+    }
+    _nothing_written(settings)
+
+
 @respx.mock
 def test_reference_scan_survives_an_unpaywall_outage(tmp_path, monkeypatch):
     """A registry outage is not a scan failure: the citation list is still

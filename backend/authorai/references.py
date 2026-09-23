@@ -208,7 +208,8 @@ class Reference(BaseModel):
     and the proof that the row came from the page rather than from memory.
     A prefix, not the whole entry: the whole would dominate the output
     budget (see REFERENCE_CHUNK_CHARS), and the first line finds the entry
-    on the page just as well."""
+    on the page just as well. A blank `entry` is a model slip; whether the
+    row survives it is `actionable`'s rule."""
 
     title: str | None = Field(default=None, description="The cited work's title, as printed")
     authors: list[str] = Field(
@@ -226,7 +227,7 @@ class Reference(BaseModel):
         )
     )
 
-    @field_validator("title", "doi", "url", "entry", mode="after")
+    @field_validator("title", "doi", "url", mode="after")
     @classmethod
     def _blank_is_absent(cls, value: str | None) -> str | None:
         # The model sometimes prints '' where it was told to leave null; the
@@ -234,6 +235,14 @@ class Reference(BaseModel):
         if value is None:
             return None
         return value.strip() or None
+
+    @field_validator("entry", mode="after")
+    @classmethod
+    def _entry_stripped(cls, value: str) -> str:
+        # Stripped, never None: `entry` is a str, and a value the field's own
+        # type rejects would fail the endpoint's re-validation (a 500 for a
+        # blank the model printed). A blank one is judged by `actionable`.
+        return value.strip()
 
     @field_validator("authors", mode="after")
     @classmethod
@@ -243,6 +252,19 @@ class Reference(BaseModel):
 
 class ReferenceList(BaseModel):
     references: list[Reference] = Field(default_factory=list)
+
+
+def actionable(reference: Reference) -> bool:
+    """Whether the row is one the user can act on — the rule, in this one
+    place. A reference prints text (`entry`, the proof it came from the
+    page) or names its work by title, DOI or address, which the dialog can
+    show, match against the user's sources and look up without the text. A
+    row with none of these — a model slip, `entry` printed as "" where the
+    prompt asked for the entry's first characters — is not a reference:
+    extract_references drops it and counts the drops in a warning. Authors
+    and a year alone name nothing the dialog can show, so they do not keep
+    a row."""
+    return bool(reference.entry or reference.title or reference.doi or reference.url)
 
 
 REFERENCES_SYSTEM = f"""\
@@ -290,17 +312,17 @@ def _chunk_prompt(index: int, total: int, chunk: str) -> str:
 def _prefixed(reference: Reference) -> Reference:
     """The reference with `entry` cut to ENTRY_PREFIX_CHARS — the prompt asks
     for that many, and the model does not always count."""
-    entry = reference.entry or ""
-    if len(entry) <= ENTRY_PREFIX_CHARS:
+    if len(reference.entry) <= ENTRY_PREFIX_CHARS:
         return reference
-    return reference.model_copy(update={"entry": entry[:ENTRY_PREFIX_CHARS]})
+    return reference.model_copy(update={"entry": reference.entry[:ENTRY_PREFIX_CHARS]})
 
 
 def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList:
     """The model's reading of the closing text: one structured call per
     REFERENCE_CHUNK_CHARS chunk, LOOKUP_WORKERS at a time, the answers
-    concatenated in chunk order, every `entry` cut to ENTRY_PREFIX_CHARS and
-    the list to MAX_REFERENCES in code. The caps are deliberately NOT in the
+    concatenated in chunk order, every `entry` cut to ENTRY_PREFIX_CHARS,
+    rows that are not `actionable` dropped (counted in a warning), and the
+    list cut to MAX_REFERENCES in code. The caps are deliberately NOT in the
     schema, where structured outputs may not honour them and a validation
     failure would fail the whole scan instead of trimming it.
 
@@ -327,7 +349,14 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList
     # in-flight ones.
     with ThreadPoolExecutor(max_workers=LOOKUP_WORKERS) as pool:
         parts = list(pool.map(extract, range(len(chunks))))
-    references = [_prefixed(reference) for part in parts for reference in part.references]
+    answered = [_prefixed(reference) for part in parts for reference in part.references]
+    references = [reference for reference in answered if actionable(reference)]
+    if len(references) < len(answered):
+        logger.warning(
+            "dropping %d of %d references with no printed entry and no title, DOI or address",
+            len(answered) - len(references),
+            len(answered),
+        )
     if len(references) > MAX_REFERENCES:
         logger.warning(
             "the model returned %d references over %d parts — keeping the first %d",
