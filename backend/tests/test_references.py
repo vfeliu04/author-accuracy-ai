@@ -1275,6 +1275,64 @@ def test_lookups_run_only_for_dois_and_stay_aligned_with_the_references():
 
 
 @respx.mock
+def test_the_same_doi_printed_by_several_entries_is_looked_up_once():
+    """A report cites one work in several chapters: one request, and the
+    verdict reaches every row that prints the DOI."""
+    twice = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/twice").mock(
+        return_value=httpx.Response(200, json=_record(url_for_pdf="https://x.org/twice.pdf"))
+    )
+    other = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/other").mock(
+        return_value=httpx.Response(200, json=_record(is_oa=False))
+    )
+    refs = [
+        Reference(entry="a", doi="10.1000/twice"),
+        Reference(entry="b", doi="10.1000/other"),
+        Reference(entry="c", doi="10.1000/twice"),
+        Reference(entry="d"),
+        Reference(entry="e", doi="10.1000/twice"),
+    ]
+    client = _unpaywall()
+    try:
+        resolved = lookup_retrievability(client, refs)
+    finally:
+        client.close()
+    assert twice.call_count == 1
+    assert other.call_count == 1
+    assert resolved == [
+        ("pdf", "https://x.org/twice.pdf"),
+        ("paywalled", None),
+        ("pdf", "https://x.org/twice.pdf"),
+        ("unknown", None),
+        ("pdf", "https://x.org/twice.pdf"),
+    ]
+
+
+def test_a_registry_that_answers_too_slowly_hits_the_lookup_deadline(monkeypatch):
+    """Cancel-on-failure was the only exit: a registry answering 200 slowly
+    (under its per-request timeout) never fails, and 300 DOIs four at a time
+    at 9 s each is eleven minutes with the dialog waiting. The lookup phase
+    has a deadline: at it, queued lookups are cancelled, in-flight ones are
+    abandoned (their answers discarded; the caller is not held), and the
+    scan answers "unavailable" with what WAS resolved — the same partial
+    contract as a failure."""
+    monkeypatch.setattr(references, "LOOKUP_DEADLINE_SECONDS", 0.3)
+    fake = _FakeUnpaywall(blocking={"slow"})
+    names = ["fast", "slow1", "slow2", "slow3", "slow4", "queued"]
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in names]
+    started = time.perf_counter()
+    try:
+        with pytest.raises(RegistryUnavailable, match="timed out after 0.3 seconds") as caught:
+            lookup_retrievability(fake, refs)
+        elapsed = time.perf_counter() - started
+    finally:
+        fake.release.set()
+    assert elapsed < 2.0, elapsed  # the deadline, not the slow lookups
+    assert caught.value.resolved == [("pdf", "https://x.org/fast.pdf"), *[("unknown", None)] * 5]
+    threading.Event().wait(0.3)  # the released workers finish, and try the queue
+    assert sorted(fake.calls) == sorted(f"10.1000/{n}" for n in names[:5])  # queued: never
+
+
+@respx.mock
 def test_the_lookup_is_capped_at_max_references(monkeypatch):
     monkeypatch.setattr(references, "MAX_REFERENCES", 2)
     for name in ("one", "two"):
@@ -1365,9 +1423,9 @@ def test_the_failing_worker_itself_never_requests_the_next_queued_lookup(monkeyp
     monkeypatch.setattr(references, "LOOKUP_WORKERS", 1)
     real_as_completed = references.as_completed
 
-    def as_completed_after_the_worker_moved_on(futures):
-        by_index = {index: future for future, index in futures.items()}
-        for future in real_as_completed(futures):
+    def as_completed_after_the_worker_moved_on(futures, timeout=None):
+        by_index = {rows[0]: future for future, rows in futures.items()}
+        for future in real_as_completed(futures, timeout=timeout):
             if future is by_index[0]:
                 # The caller is late: the worker has dequeued late1 already.
                 done, _ = wait([by_index[1]], timeout=5)

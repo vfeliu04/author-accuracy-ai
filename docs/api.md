@@ -34,7 +34,7 @@ curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 | Pages read by the reference scan | The last 600 (`REFERENCE_MAX_PAGES` in `references.py`) | In `POST /api/references/scan`; earlier pages are not read |
 | Closing text the reference scan sends to the model | 65,000 characters (`REFERENCE_MAX_CHARS`), from the last reference-list heading forward — or from the earliest heading of a run of headings each at most 2 pages (`HEADING_RUN_PAGES`) before the next: a multi-page bibliography repeats its heading on each page — else the last 65,000 of the document; read in parts of at most 12,000 characters (`REFERENCE_CHUNK_CHARS`), one model call each, 4 at a time | In `POST /api/references/scan`; the model never sees more |
 | References returned by a scan | 300 (`MAX_REFERENCES`); a longer model answer is cut in code after every part has answered (the cut saves no model call), with a warning in the log. Each `entry` is at most 160 characters (`ENTRY_PREFIX_CHARS`) | In `POST /api/references/scan` |
-| Unpaywall lookups per scan | One per printed DOI, four at a time, 10-second timeout and two retries each; the first registry failure ends the lookup | In `POST /api/references/scan` → `lookup.status` `unavailable`, still 200 |
+| Unpaywall lookups per scan | One per distinct printed DOI (a DOI several entries print is asked about once), four at a time, 10-second timeout and two retries each; the first registry failure ends the lookup, and so does a 45-second deadline on the lookup phase as a whole (`LOOKUP_DEADLINE_SECONDS`) | In `POST /api/references/scan` → `lookup.status` `unavailable`, still 200 |
 | Fetched response served as `text/html` or `application/xhtml+xml` (a web page, or a PDF served under an HTML type) | 10,000,000 bytes, counted after decompression (`fetch_max_bytes`) | In the ingest step's fetch → run `FAILED` |
 | Fetched response served as `application/pdf` or `application/octet-stream` | 50,000,000 bytes, counted after decompression (`max_upload_bytes`) | In the ingest step's fetch → run `FAILED` |
 | Time to fetch one link, redirects and DNS lookups included | 30 seconds (`fetch_timeout_seconds`); a slow DNS lookup is not cut short, and the budget is checked again once it returns | In the ingest step's fetch → run `FAILED` |
@@ -129,9 +129,9 @@ Every `suggested_url` has passed the syntax gate a pasted link passes (`http`/`h
 |---|---|
 | `ok` | Every printed DOI was asked about (also when there was nothing to ask) |
 | `unconfigured` | `AUTHORAI_CROSSREF_MAILTO` is unset, which Unpaywall requires (it answers 422 without a contact email): no lookup was made and every reference is `unknown`; printed addresses are still offered |
-| `unavailable` | Unpaywall failed part-way (throttled, down, or unreachable after the retries); `detail` says how. The response is still 200: references resolved before the failure keep their verdict, the rest are `unknown` |
+| `unavailable` | Unpaywall failed part-way (throttled, down, unreachable after the retries, or answering in a form the client cannot read), or the lookup phase passed its 45-second deadline (`detail` then reads `Unpaywall lookups timed out after 45 seconds`); `detail` says how. The response is still 200: references resolved before the failure keep their verdict, the rest are `unknown` |
 
-Lookups run four at a time; the first registry failure stops the rest. A failure of the model call itself is not caught and is a 500, as for chat.
+Lookups run four at a time, one per distinct DOI; the first registry failure stops the rest, and at the deadline queued lookups are cancelled and in-flight ones abandoned. A failure of the model call itself is not caught and is a 500, as for chat.
 
 ## Runs and jobs
 

@@ -132,8 +132,15 @@ HEADING_RUN_PAGES = 2
 # httpx.Client is thread-safe and so is the Anthropic client: four calls at
 # a time keep a long list's chunk calls, and its Unpaywall lookups, to
 # seconds instead of a serial crawl, without leaning on either service
-# (Unpaywall asks for polite use, not a rate).
+# (Unpaywall asks for polite use, not a rate). The lookup phase as a whole
+# has a deadline: a registry that answers slowly but inside its per-request
+# timeout never FAILS, and 300 DOIs four at a time at 9 s each is eleven
+# minutes with the dialog waiting on a sync endpoint. 45 s is a generous
+# multiple of the typical phase (a few seconds for a real list) and of the
+# model calls the dialog has already waited for; at the deadline the scan
+# answers with what was resolved, flagged, like a failure.
 LOOKUP_WORKERS = 4
+LOOKUP_DEADLINE_SECONDS = 45.0
 
 TextSource = Literal["heading", "tail", "none"]
 
@@ -726,8 +733,10 @@ class _Skipped(Exception):
 
 
 def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) -> list[Resolved]:
-    """Retrievability for every reference, in order — a lookup for each
-    printed DOI, LOOKUP_WORKERS at a time, the rest NOT_RESOLVED.
+    """Retrievability for every reference, in order — one lookup for each
+    DISTINCT printed DOI (a report cites one work in several chapters; the
+    verdict reaches every row that prints it), LOOKUP_WORKERS at a time,
+    the rest NOT_RESOLVED.
 
     Capped at MAX_REFERENCES (extract_references already trims; this is the
     second wall). The first registry failure ends the whole lookup: pending
@@ -738,9 +747,13 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
     httpx error it does not cover (a DecodingError from a body that
     contradicts its Content-Encoding, an InvalidURL from a DOI past httpx's
     own length limit) or a ValueError — one policy, so no failure route
-    reaches the caller as a 500. A failure in THIS thread (reading a
-    result) is not the registry's and propagates, but the queue is
-    cancelled on the way out all the same.
+    reaches the caller as a 500. So does LOOKUP_DEADLINE_SECONDS passing:
+    the same RegistryUnavailable with what was resolved, except that the
+    in-flight lookups are then abandoned rather than awaited — waiting on
+    them is what the deadline exists to stop; the caller's close() ends
+    them, and their answers are discarded. A failure in THIS thread
+    (reading a result) is not the registry's and propagates, but the queue
+    is cancelled on the way out all the same.
     """
     results: list[Resolved] = [NOT_RESOLVED] * len(references)
     # Raised by the failing lookup itself, before its worker returns to the
@@ -762,24 +775,42 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
                 f"Unpaywall lookup failed: {type(exc).__name__}: {shown_text(str(exc))}"
             ) from exc
 
+    rows_by_doi: dict[str, list[int]] = {}
+    for index, reference in enumerate(references[:MAX_REFERENCES]):
+        if reference.doi:
+            rows_by_doi.setdefault(reference.doi, []).append(index)
     pool = ThreadPoolExecutor(max_workers=LOOKUP_WORKERS)
-    futures: dict[Future, int] = {
-        pool.submit(lookup, reference.doi): index
-        for index, reference in enumerate(references[:MAX_REFERENCES])
-        if reference.doi
+    futures: dict[Future, list[int]] = {
+        pool.submit(lookup, doi): rows for doi, rows in rows_by_doi.items()
     }
+
+    def resolve(future: Future) -> None:
+        verdict = retrievability(future.result())
+        for index in futures[future]:
+            results[index] = verdict
+
+    def keep_what_was_reached() -> None:
+        for future in futures:
+            if future.done() and not future.cancelled() and future.exception() is None:
+                resolve(future)
+
     try:
-        for future in as_completed(futures):
+        for future in as_completed(futures, timeout=LOOKUP_DEADLINE_SECONDS):
             try:
-                record = future.result()
+                future.result()
             except _Skipped:
                 continue
-            results[futures[future]] = retrievability(record)
+            resolve(future)
+    except TimeoutError:
+        failed.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        keep_what_was_reached()
+        raise RegistryUnavailable(
+            f"Unpaywall lookups timed out after {LOOKUP_DEADLINE_SECONDS:g} seconds", results
+        ) from None
     except RuntimeError as exc:
         pool.shutdown(wait=True, cancel_futures=True)
-        for future, index in futures.items():
-            if future.done() and not future.cancelled() and future.exception() is None:
-                results[index] = retrievability(future.result())
+        keep_what_was_reached()
         raise RegistryUnavailable(str(exc), results) from exc
     finally:
         # Idempotent after the paths above. For any other escape: the queue
