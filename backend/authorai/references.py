@@ -696,15 +696,16 @@ def split_reference_text(text: str, *, chunk_chars: int = REFERENCE_CHUNK_CHARS)
     return chunks
 
 
+# The class docstring travels to the model inside the JSON schema
+# (transform_schema keeps class descriptions), so it is the model-facing
+# description and nothing more. The reasoning lives here instead: the anchor
+# that ties a row to the page is title + year + identifier (DOI or address),
+# verified in code — the lookup keys on the DOI and the dialog matches the
+# title against the user's sources. `label` is a key, never evidence: a
+# verbatim field made the model fail (see LABEL_MAX_CHARS). Whether a row is
+# kept is `actionable`'s rule.
 class Reference(BaseModel):
-    """One printed reference entry, as fields. The anchor that ties a row to
-    the page is title + year + identifier (DOI or address), verified in
-    code: the lookup keys on the DOI and the dialog matches the title
-    against the user's sources. `label` is a short key for the entry as
-    printed — the first author's surname or the organisation, plus the
-    year — shown when the title is null; a key, never evidence, because a
-    verbatim field made the model fail (see LABEL_MAX_CHARS). Whether a row
-    is kept is `actionable`'s rule."""
+    """One entry of the report's own reference list, as printed."""
 
     title: str | None = Field(default=None, description="The cited work's title, as printed")
     authors: list[str] = Field(
