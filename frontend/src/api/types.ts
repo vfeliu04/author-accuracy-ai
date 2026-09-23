@@ -230,6 +230,38 @@ export type ChatResponse = {
   mode: ChatMode;
 };
 
+// POST /api/references/scan — the report's own reference list, read before
+// the run exists. Nothing is stored; the dialog matches it against the sources
+// on hand and offers the free copies as links.
+
+// Where a free copy of a cited work was found: a PDF, a landing page, none
+// because the work is paywalled, or unknown (no DOI, no record, or no lookup).
+export type Retrievability = "pdf" | "landing" | "paywalled" | "unknown";
+
+// "unconfigured" = no contact address set, so nothing was looked up;
+// "unavailable" = the lookup service failed part-way (detail says how).
+export type LookupStatus = "ok" | "unconfigured" | "unavailable";
+
+export type ScannedReference = {
+  title: string | null;
+  authors: string[];
+  year: number | null;
+  doi: string | null; // only when printed in the entry
+  url: string | null; // only when printed in the entry
+  entry: string; // the printed text, verbatim — shown when the title is null
+  retrievability: Retrievability;
+  // The link the user may add: set for "pdf" and "landing", and for an entry
+  // that printed a URL but no DOI (then retrievability stays "unknown": the
+  // address was validated, never visited). Never set for "paywalled".
+  suggested_url: string | null;
+};
+
+export type ReferenceScan = {
+  text_source: "heading" | "tail" | "none";
+  lookup: { status: LookupStatus; detail: string | null };
+  references: ScannedReference[];
+};
+
 export const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(["DONE", "FAILED"]);
 
 export const isTerminal = (status: RunStatus | undefined): boolean =>

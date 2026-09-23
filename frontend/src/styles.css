@@ -1873,6 +1873,16 @@ a {
   font-size: 0.8rem;
 }
 
+/* The tick on a cited work the report leans on; the same box, empty, keeps a
+   row with nothing to add in line with the others. */
+.file-row__check {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
 .file-slot {
   display: flex;
   align-items: center;
