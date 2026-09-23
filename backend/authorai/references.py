@@ -104,11 +104,13 @@ REFERENCE_MAX_PAGES = 600
 # more nodes than this — so the flatten it then permits costs at most this
 # many nodes, whatever the file declares. 10,000 is far past any report
 # the pipeline accepts (the layout pass takes seconds a page) while a real
-# tree of that size walks in milliseconds. The address-space cap is the
-# child's bound on what pypdf's FlateDecode can inflate (zlib.decompress
-# with no output limit in the pinned 3.17.4): Linux enforces RLIMIT_AS;
-# macOS refuses to set it, and there the deadline and the CPU limit remain
-# the reader's bounds.
+# tree of that size walks in milliseconds. The address-space cap is a
+# backstop on what pypdf's FlateDecode can inflate (zlib.decompress with
+# no output limit in the pinned 3.17.4) behind the memory watchdog below:
+# Linux enforces RLIMIT_AS, and the child sets it only when it leaves the
+# watchdog its headroom (_limit_address_space); macOS refuses to set it.
+# The watchdog, the deadline and the CPU limit are the reader's bounds on
+# every platform.
 PAGE_TREE_CEILING = 10_000
 READER_ADDRESS_SPACE_BYTES = 1 << 30
 
@@ -147,9 +149,11 @@ READER_MAX_TEXT_CHARS = 8_000_000
 # about a gigabyte a second: a few hundred MB past the line, on an 8 GB
 # machine). 768 MiB is more than five times what the largest example report
 # needs (139 MiB for the 66-page 2024 GHI, interpreter included: pypdf holds
-# a page's streams, not the file). Where RLIMIT_AS is enforced (Linux) it
-# stays the first line of defence, and the MemoryError it raises ends the
-# child with the same code. The exit code is one no other ending uses:
+# a page's streams, not the file). The address-space cap, where it is set
+# (Linux, and only when it leaves this bound its headroom over what the
+# process already maps — see _limit_address_space), is a backstop behind
+# it, and the MemoryError it raises ends the child with the same code.
+# The exit code is one no other ending uses:
 # Python's 1 is an unhandled exception and 2 a usage error; a signal reads
 # as a negative status.
 READER_MEMORY_BYTES = 768 * 1024 * 1024
@@ -410,16 +414,55 @@ def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) 
 
 
 def _limit_address_space(limit: int) -> None:
-    """Cap this process's address space at `limit` bytes, never loosening a
-    stricter limit it inherited. Enforced on Linux; macOS refuses the call
-    (EINVAL, which the resource module raises as ValueError), and the
-    refusal is not a reader failure: the deadline and the CPU limit hold."""
+    """Cap this process's address space at `limit` bytes — a backstop behind
+    the memory watchdog, never loosening a stricter limit it inherited.
+    RLIMIT_AS counts every mapping: the interpreter, the native libraries
+    the imports pull in (lxml, numpy through sqlite_vec, cryptography), each
+    thread's stack and glibc's per-thread arenas, so on Linux the child
+    maps hundreds of MB before pypdf runs, and a fixed cap would fall on a
+    legitimate report before the watchdog (which reads RESIDENT memory)
+    could. So the cap is set only when what the process maps now
+    (address_space_in_use) plus READER_MEMORY_BYTES fits under it — then
+    it cannot fire before the watchdog would — and is otherwise left unset,
+    logged, with the watchdog as the memory bound. Where the usage cannot
+    be read (macOS has no /proc) the cap is asked for as before; macOS
+    refuses the call (EINVAL, which the resource module raises as
+    ValueError), and the refusal is not a reader failure: the deadline,
+    the CPU limit and the watchdog hold."""
+    in_use = address_space_in_use()
+    if in_use is not None and in_use + READER_MEMORY_BYTES > limit:
+        logger.info(
+            "the reader already maps %d bytes of address space, so a cap of %d would leave "
+            "the memory watchdog no headroom: the watchdog is the memory bound",
+            in_use,
+            limit,
+        )
+        return
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
     wanted = min(value for value in (limit, soft, hard) if value != resource.RLIM_INFINITY)
     try:
         resource.setrlimit(resource.RLIMIT_AS, (wanted, hard))
     except (ValueError, OSError) as exc:
         logger.debug("the platform refused an address-space limit for the reader: %s", exc)
+
+
+_PROCESS_STATUS = Path("/proc/self/status")
+
+
+def address_space_in_use(status: Path = _PROCESS_STATUS) -> int | None:
+    """This process's address-space size in bytes — VmSize from the Linux
+    process status file, in kB there — or None where there is no such file
+    (macOS) or no such line."""
+    try:
+        text = status.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("VmSize:"):
+            fields = line.split()
+            if len(fields) >= 2 and fields[1].isdigit():
+                return int(fields[1]) * 1024
+    return None
 
 
 def peak_resident_bytes() -> int:

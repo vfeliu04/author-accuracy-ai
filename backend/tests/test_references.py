@@ -673,6 +673,48 @@ def test_the_reader_caps_its_address_space_without_loosening_an_inherited_cap(mo
     references._limit_address_space(READER_ADDRESS_SPACE_BYTES)  # tolerated
 
 
+def test_the_address_space_cap_is_set_only_when_it_leaves_the_watchdog_its_headroom(
+    monkeypatch, references_log
+):
+    """RLIMIT_AS counts every mapping — the interpreter, the native libraries
+    pypdf's imports pull in, thread stacks, glibc's per-thread arenas — so a
+    Linux child maps hundreds of MB before pypdf runs, and a fixed 1 GiB
+    cap would fall on a legitimate report before the watchdog (which reads
+    RESIDENT memory) could. The watchdog is the memory bound; the cap is a
+    backstop set only when what the process maps now plus the watchdog's
+    bound fits under it, so it can never fire first. Where the usage cannot
+    be read (macOS has no /proc) it is asked for as before, and refused."""
+    calls: list = []
+    monkeypatch.setattr(
+        resource, "getrlimit", lambda which: (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+    )
+    monkeypatch.setattr(resource, "setrlimit", lambda which, limits: calls.append(limits))
+    monkeypatch.setattr(references, "address_space_in_use", lambda: None)
+    references._limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    assert calls == [(READER_ADDRESS_SPACE_BYTES, resource.RLIM_INFINITY)]
+    calls.clear()
+    fits = READER_ADDRESS_SPACE_BYTES - READER_MEMORY_BYTES
+    monkeypatch.setattr(references, "address_space_in_use", lambda: fits)
+    references._limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    assert calls == [(READER_ADDRESS_SPACE_BYTES, resource.RLIM_INFINITY)]
+    calls.clear()
+    monkeypatch.setattr(references, "address_space_in_use", lambda: fits + 1)
+    references._limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    assert calls == []
+    assert "the watchdog is the memory bound" in references_log.text
+
+
+def test_address_space_in_use_reads_vmsize_from_the_process_status(tmp_path):
+    status = tmp_path / "status"
+    status.write_text(
+        "Name:\tpython\nVmPeak:\t  900000 kB\nVmSize:\t  123456 kB\nVmRSS:\t 1000 kB\n"
+    )
+    assert references.address_space_in_use(status) == 123456 * 1024
+    assert references.address_space_in_use(tmp_path / "missing") is None  # macOS: no /proc
+    (tmp_path / "bare").write_text("Name:\tpython\n")
+    assert references.address_space_in_use(tmp_path / "bare") is None
+
+
 # --- the memory watchdog: the bound RLIMIT_AS cannot give on macOS ------------
 
 
