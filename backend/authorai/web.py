@@ -290,13 +290,15 @@ def in_bounded_child(
                 outcome = receiver.recv()
             except (EOFError, OSError):  # the child died before reporting (EOF) or
                 pass  # while reporting (a frame cut short): killed, out of memory
-            # The child is done with the pipe — it reported, or it is gone —
-            # so let it end by itself before _stop reaps it: a child still
-            # tearing down when its pipe closed would otherwise be terminated,
-            # and its exit status, which a caller reads to tell a bound from
-            # a bug, would always be SIGTERM. One that closed its pipe and
-            # reads on is stopped after the grace.
-            child.join(_EXIT_GRACE_SECONDS)
+            if outcome is None:
+                # A child that reported nothing is judged by its exit status
+                # (a bound or a bug — the caller's call), so let it end by
+                # itself before _stop reaps it: one still tearing down when
+                # its pipe closed would otherwise be terminated, and the
+                # status would always read SIGTERM. One that closed its pipe
+                # and reads on is stopped after the grace. A child that
+                # reported is reaped at once: its status is never read.
+                child.join(_EXIT_GRACE_SECONDS)
         finally:
             sender.close()
             receiver.close()
@@ -314,10 +316,10 @@ def in_bounded_child(
     return outcome
 
 
-# How long a child that is done with its pipe may take to end by itself
-# before _stop terminates it: an interpreter's teardown is tens of
-# milliseconds, so a real exit is never cut short, and a child that closed
-# its pipe and reads on costs at most this before it is stopped.
+# How long a child that reported nothing may take to end by itself before
+# _stop terminates it: an interpreter's teardown is tens of milliseconds,
+# so a real exit is never cut short, and a child that closed its pipe and
+# reads on costs at most this before it is stopped.
 _EXIT_GRACE_SECONDS = 1.0
 
 
