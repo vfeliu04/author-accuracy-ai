@@ -224,13 +224,20 @@ def _limit_address_space(limit: int) -> None:
 
 
 def _last_pages(handle: BinaryIO, max_pages: int) -> list[str]:
+    """The text of the last `max_pages` pages of the REAL page list. pypdf
+    3.17.4's `reader.pages` is a view over the trailer's declared /Count for
+    an encrypted file (it flattens the tree only for an unencrypted one), so
+    a stale count would drop the closing pages — the bibliography — or make
+    a file every viewer opens unreadable: the list is built from the tree
+    explicitly, once the walk above has bounded its cost (the pinned
+    version's flatten; `flattened_pages` is the public name of its result)."""
     reader = PdfReader(handle, strict=False)
     if reader.is_encrypted:
         reader.decrypt("")
     _bound_page_tree(reader)
-    pages = reader.pages
-    first = max(0, len(pages) - max_pages)
-    return [pages[index].extract_text() or "" for index in range(first, len(pages))]
+    reader._flatten()  # noqa: SLF001 - the one way to the real list, see above
+    pages = reader.flattened_pages or []
+    return [page.extract_text() or "" for page in pages[-max_pages:]]
 
 
 def _bound_page_tree(reader: PdfReader) -> None:

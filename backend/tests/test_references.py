@@ -292,6 +292,31 @@ def test_read_pages_opens_a_pdf_encrypted_with_an_empty_password():
     assert [p.strip() for p in read_pages(encrypted, timeout=30)] == ["Restricted references"]
 
 
+def _encrypted(pages: list[str]) -> bytes:
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter()
+    writer.append(PdfReader(io.BytesIO(pdf_with_pages(pages))))
+    writer.encrypt(user_password="", owner_password="owner-only")
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("declared", [b"/Count 2", b"/Count 9"])
+def test_an_encrypted_pdf_is_paged_by_its_real_page_list_not_the_declared_count(declared):
+    """pypdf's page list is a view over the trailer's /Count for an
+    encrypted file (it flattens the real tree only for an unencrypted one),
+    so a stale count silently dropped the closing pages — where the
+    bibliography lives — or made a file every viewer opens unreadable. The
+    count is a claim; the pages are what the tree holds."""
+    encrypted = _encrypted(["one", "two", "three"])
+    assert encrypted.count(b"/Count 3") == 1
+    patched = encrypted.replace(b"/Count 3", declared)  # same length: the xref still holds
+    pages = read_pages(io.BytesIO(patched), timeout=30)
+    assert [page.strip() for page in pages] == ["one", "two", "three"]
+
+
 # --- read_pages: a bounded child, and a page tree bounded before it is walked --
 
 
