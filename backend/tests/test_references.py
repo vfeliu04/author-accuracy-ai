@@ -752,6 +752,34 @@ def test_entries_are_cut_to_the_prefix_length_verbatim(references_log):
     assert f"first {ENTRY_PREFIX_CHARS} characters" in REFERENCES_SYSTEM
 
 
+def test_titles_and_authors_are_cut_in_code_after_parsing_like_the_entry():
+    """Bounds are code, not schema (see the constants): a title or an author
+    name is model output with no length the schema may enforce, and it is
+    shown in the dialog and matched against the user's sources. The entry's
+    prefix rule already existed; title and authors get the same treatment,
+    and a name list is cut to MAX_AUTHORS."""
+    from authorai.references import AUTHOR_MAX_CHARS, MAX_AUTHORS, TITLE_MAX_CHARS
+
+    answer = ReferenceList(
+        references=[
+            Reference(
+                entry="e",
+                title="T" * (TITLE_MAX_CHARS + 100),
+                authors=[f"A{i}" + "a" * AUTHOR_MAX_CHARS for i in range(MAX_AUTHORS + 10)],
+            ),
+            Reference(entry="short", title="Short", authors=["One, A.", "Two, B."]),
+        ]
+    )
+    result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References\n" + ENTRY)
+    long, short = result.references
+    assert long.title == "T" * TITLE_MAX_CHARS
+    assert len(long.authors) == MAX_AUTHORS
+    assert all(len(name) == AUTHOR_MAX_CHARS for name in long.authors)
+    assert long.authors[0].startswith("A0")
+    assert (short.title, short.authors) == ("Short", ["One, A.", "Two, B."])
+    assert (TITLE_MAX_CHARS, MAX_AUTHORS, AUTHOR_MAX_CHARS) == (500, 50, 200)
+
+
 def test_extract_references_caps_the_list_in_code_with_a_warning(references_log):
     """The cap is NOT in the schema (structured outputs may not honour
     max_length, and a client-side validation failure would 500 the scan): the

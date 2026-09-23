@@ -103,6 +103,16 @@ REFERENCE_MAX_PAGES = 600
 PAGE_TREE_CEILING = 10_000
 READER_ADDRESS_SPACE_BYTES = 1 << 30
 
+# Every other model-written field is bounded in code after parsing too
+# (extract_references), for the same reason the entry is: a title or an
+# author name is shown in the dialog and matched against the user's
+# sources, and the schema cannot enforce a length. Real values are far
+# below — a long title is ~200 characters, an author list of 50 names is
+# a consortium paper's — so a cut changes nothing real.
+TITLE_MAX_CHARS = 500
+MAX_AUTHORS = 50
+AUTHOR_MAX_CHARS = 200
+
 # The output budget, not the input, bounds one call: PARSE_MAX_TOKENS
 # (16,000) cannot carry a whole long list — the Drought list's ~224 entries
 # with a verbatim `entry` would need 20-32k output tokens, so one call would
@@ -507,19 +517,25 @@ def _chunk_prompt(index: int, total: int, chunk: str) -> str:
     )
 
 
-def _prefixed(reference: Reference) -> Reference:
+def _bounded(reference: Reference) -> Reference:
     """The reference with `entry` cut to ENTRY_PREFIX_CHARS — the prompt asks
-    for that many, and the model does not always count."""
-    if len(reference.entry) <= ENTRY_PREFIX_CHARS:
-        return reference
-    return reference.model_copy(update={"entry": reference.entry[:ENTRY_PREFIX_CHARS]})
+    for that many, and the model does not always count — and the title and
+    author names to their caps (see the constants)."""
+    return reference.model_copy(
+        update={
+            "entry": reference.entry[:ENTRY_PREFIX_CHARS],
+            "title": reference.title[:TITLE_MAX_CHARS] if reference.title else reference.title,
+            "authors": [name[:AUTHOR_MAX_CHARS] for name in reference.authors[:MAX_AUTHORS]],
+        }
+    )
 
 
 def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList:
     """The model's reading of the closing text: one structured call per
     REFERENCE_CHUNK_CHARS chunk, LOOKUP_WORKERS at a time, the answers
-    concatenated in chunk order, every `entry` cut to ENTRY_PREFIX_CHARS,
-    rows that are not `actionable` dropped (counted in a warning), and the
+    concatenated in chunk order, every `entry` cut to ENTRY_PREFIX_CHARS
+    (title and authors to their caps, likewise), rows that are not
+    `actionable` dropped (counted in a warning), and the
     list cut to MAX_REFERENCES in code. The caps are deliberately NOT in the
     schema, where structured outputs may not honour them and a validation
     failure would fail the whole scan instead of trimming it.
@@ -547,7 +563,7 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList
     # in-flight ones.
     with ThreadPoolExecutor(max_workers=LOOKUP_WORKERS) as pool:
         parts = list(pool.map(extract, range(len(chunks))))
-    answered = [_prefixed(reference) for part in parts for reference in part.references]
+    answered = [_bounded(reference) for part in parts for reference in part.references]
     references = [reference for reference in answered if actionable(reference)]
     if len(references) < len(answered):
         logger.warning(
