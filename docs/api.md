@@ -138,7 +138,7 @@ Every `suggested_url` has passed the syntax gate a pasted link passes (`http`/`h
 | `unconfigured` | `AUTHORAI_CROSSREF_MAILTO` is unset, which Unpaywall requires (it answers 422 without a contact email): no lookup was made and every reference is `unknown`; printed addresses are still offered |
 | `unavailable` | Unpaywall failed part-way (throttled, down, unreachable after the retries, or answering in a form the client cannot read), or the lookup phase passed its 45-second deadline (`detail` then reads `Unpaywall lookups timed out after 45 seconds`); `detail` says how. The response is still 200: references resolved before the failure keep their verdict, the rest are `unknown` |
 
-Lookups run four at a time, one per distinct DOI; the first registry failure stops the rest, and at the deadline queued lookups are cancelled and in-flight ones abandoned. A failure of the model call itself is not caught and is a 500, as for chat.
+Lookups run four at a time, one per distinct DOI; the first registry failure stops the rest (the in-flight lookups get what is left of the deadline to finish, then are abandoned), and at the deadline queued lookups are cancelled and in-flight ones abandoned. A failure of the model call itself is not caught and is a 500, as for chat.
 
 ## Runs and jobs
 

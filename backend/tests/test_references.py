@@ -1949,6 +1949,31 @@ def test_a_registry_that_answers_too_slowly_hits_the_lookup_deadline(monkeypatch
     assert sorted(fake.calls) == sorted(f"10.1000/{n}" for n in names[:5])  # queued: never
 
 
+def test_a_registry_failure_waits_for_in_flight_lookups_only_to_the_deadline(monkeypatch):
+    """The failure branch used to shutdown(wait=True): a failure at 44 s
+    followed by in-flight lookups against a registry gone silent held the
+    dialog for their whole retry schedule (~33 s each) past the deadline.
+    Now a failure gives the in-flight lookups what is LEFT of the deadline
+    — here half a second, which one lookup never finishes in — then
+    abandons them as the deadline does, with the failure's own message and
+    what was reached. The queued lookup is still never requested."""
+    monkeypatch.setattr(references, "LOOKUP_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(references, "LOOKUP_WORKERS", 2)
+    fake = _FakeUnpaywall(raising={"fail": RuntimeError("Unpaywall HTTP 503")}, blocking={"slow"})
+    refs = _cited("slow1", "fail", "queued")
+    started = time.perf_counter()
+    try:
+        with pytest.raises(RegistryUnavailable, match="HTTP 503") as caught:
+            lookup_retrievability(fake, refs)
+        elapsed = time.perf_counter() - started
+    finally:
+        fake.release.set()
+    assert 0.3 <= elapsed < 2.0, elapsed  # what was left of the deadline, not the lookup
+    assert caught.value.resolved == [("unknown", None)] * 3
+    threading.Event().wait(0.3)
+    assert sorted(fake.calls) == ["10.1000/fail", "10.1000/slow1"]
+
+
 @respx.mock
 def test_the_lookup_is_capped_at_max_references(monkeypatch):
     monkeypatch.setattr(references, "MAX_REFERENCES", 2)

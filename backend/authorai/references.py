@@ -28,8 +28,9 @@ import re
 import resource
 import sys
 import threading
+import time
 from bisect import bisect_right
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from itertools import accumulate
 from pathlib import Path
 from typing import BinaryIO, Literal, NamedTuple
@@ -1079,18 +1080,22 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
 
     Capped at MAX_REFERENCES (extract_references already trims; this is the
     second wall). The first registry failure ends the whole lookup: pending
-    lookups are cancelled, in-flight ones finish (no request is abandoned
-    mid-way, and nothing runs on after the caller has the answer), and
-    RegistryUnavailable carries every verdict that was reached. A failure
-    is whatever a lookup raises: the retry policy's RuntimeError, or an
-    httpx error it does not cover (a DecodingError from a body that
-    contradicts its Content-Encoding, an InvalidURL from a DOI past httpx's
-    own length limit) or a ValueError — one policy, so no failure route
-    reaches the caller as a 500. So does LOOKUP_DEADLINE_SECONDS passing:
-    the same RegistryUnavailable with what was resolved, except that the
-    in-flight lookups are then abandoned rather than awaited — waiting on
-    them is what the deadline exists to stop; the caller's close() ends
-    them, and their answers are discarded. A failure in THIS thread
+    lookups are cancelled, in-flight ones get what is LEFT of the deadline
+    to finish (a request is not abandoned mid-way for nothing, and their
+    verdicts are kept), and RegistryUnavailable carries every verdict that
+    was reached. A failure is whatever a lookup raises: the retry policy's
+    RuntimeError, or an httpx error it does not cover (a DecodingError from
+    a body that contradicts its Content-Encoding, an InvalidURL from a DOI
+    past httpx's own length limit) or a ValueError — one policy, so no
+    failure route reaches the caller as a 500. So does
+    LOOKUP_DEADLINE_SECONDS passing: the same RegistryUnavailable with what
+    was resolved, and the in-flight lookups abandoned rather than awaited —
+    waiting on them is what the deadline exists to stop (a failure at 44 s
+    followed by three in-flight lookups against a registry gone silent
+    would otherwise hold the dialog for their retry schedules, ~33 s each,
+    past it); the caller's close() ends them, and their answers are
+    discarded. The deadline bounds both routes: it is measured from the
+    first lookup, whichever branch consults it. A failure in THIS thread
     (reading a result) is not the registry's and propagates, but the queue
     is cancelled on the way out all the same.
     """
@@ -1133,6 +1138,7 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
             if future.done() and not future.cancelled() and future.exception() is None:
                 resolve(future)
 
+    started = time.monotonic()
     try:
         for future in as_completed(futures, timeout=LOOKUP_DEADLINE_SECONDS):
             try:
@@ -1148,7 +1154,10 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
             f"Unpaywall lookups timed out after {LOOKUP_DEADLINE_SECONDS:g} seconds", results
         ) from None
     except RuntimeError as exc:
-        pool.shutdown(wait=True, cancel_futures=True)
+        # The queue is cancelled at once; the in-flight lookups get what is
+        # left of the deadline, then are abandoned as at the deadline.
+        pool.shutdown(wait=False, cancel_futures=True)
+        wait(futures, timeout=max(0.0, LOOKUP_DEADLINE_SECONDS - (time.monotonic() - started)))
         keep_what_was_reached()
         raise RegistryUnavailable(str(exc), results) from exc
     finally:
