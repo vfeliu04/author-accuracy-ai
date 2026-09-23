@@ -43,6 +43,7 @@ from pypdf.generic import IndirectObject
 
 from authorai.credibility import clean_doi, get_json_with_retries, registry_client
 from authorai.fetch import (
+    MAX_URL_LENGTH,
     is_public_address,
     is_youtube_url,
     shown_text,
@@ -169,6 +170,16 @@ READER_WATCH_INTERVAL_SECONDS = 0.25
 TITLE_MAX_CHARS = 500
 MAX_AUTHORS = 50
 AUTHOR_MAX_CHARS = 200
+# The printed address and DOI likewise: a row that has only one of them is
+# still actionable, and the dialog labels it by that value and shows it as
+# the row's tooltip, so an uncut one reached the DOM whole. An address
+# longer than the link gate's MAX_URL_LENGTH can never become a link
+# (offerable_url refuses it, so it is never suggested), and clean_doi
+# refuses a DOI over its own 256 (credibility.DOI_MAX_CHARS) before any
+# lookup — 300 leaves that refusal its say, and its log line, on a DOI
+# that is merely too long rather than absurd.
+URL_FIELD_MAX_CHARS = MAX_URL_LENGTH
+DOI_FIELD_MAX_CHARS = 300
 
 # The output budget, not the input, bounds one call: PARSE_MAX_TOKENS
 # (16,000) cannot carry a whole long list — the Drought list's ~224 entries
@@ -771,13 +782,15 @@ def _chunk_prompt(index: int, total: int, chunk: str) -> str:
 
 def _bounded(reference: Reference) -> Reference:
     """The reference with `entry` cut to ENTRY_PREFIX_CHARS — the prompt asks
-    for that many, and the model does not always count — and the title and
-    author names to their caps (see the constants)."""
+    for that many, and the model does not always count — and the title,
+    author names, address and DOI to their caps (see the constants)."""
     return reference.model_copy(
         update={
             "entry": reference.entry[:ENTRY_PREFIX_CHARS],
             "title": reference.title[:TITLE_MAX_CHARS] if reference.title else reference.title,
             "authors": [name[:AUTHOR_MAX_CHARS] for name in reference.authors[:MAX_AUTHORS]],
+            "url": reference.url[:URL_FIELD_MAX_CHARS] if reference.url else reference.url,
+            "doi": reference.doi[:DOI_FIELD_MAX_CHARS] if reference.doi else reference.doi,
         }
     )
 

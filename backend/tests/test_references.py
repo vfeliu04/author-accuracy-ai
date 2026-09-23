@@ -23,8 +23,10 @@ import pytest
 import respx
 
 from authorai import references
+from authorai.fetch import MAX_URL_LENGTH
 from authorai.llm import PARSE_MAX_TOKENS
 from authorai.references import (
+    DOI_FIELD_MAX_CHARS,
     ENTRY_PREFIX_CHARS,
     ENTRY_STARTS_FLOOR,
     HEADING_RUN_PAGES,
@@ -38,6 +40,7 @@ from authorai.references import (
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
     UNPAYWALL_BASE,
+    URL_FIELD_MAX_CHARS,
     Reference,
     ReferenceList,
     RegistryUnavailable,
@@ -1377,6 +1380,30 @@ def test_titles_and_authors_are_cut_in_code_after_parsing_like_the_entry():
     assert long.authors[0].startswith("A0")
     assert (short.title, short.authors) == ("Short", ["One, A.", "Two, B."])
     assert (TITLE_MAX_CHARS, MAX_AUTHORS, AUTHOR_MAX_CHARS) == (500, 50, 200)
+
+
+def test_a_printed_address_and_doi_are_cut_in_code_like_the_other_fields():
+    """The two fields _bounded did not cut: a row that has only one of them
+    is still actionable, and the dialog labels it by that value and shows
+    it as the row's tooltip, so a model-written 60,000-character address
+    reached the DOM whole. An address longer than fetch.MAX_URL_LENGTH can
+    never become a link (offerable_url refuses it, so it is never
+    suggested), and clean_doi refuses a DOI over 256 characters, so the
+    cuts change nothing real."""
+    long = "x" * 60_000
+    answer = ReferenceList(
+        references=[
+            Reference(entry="", url="https://x.org/" + long),
+            Reference(entry="", doi="10.1000/" + long),
+        ]
+    )
+    result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
+    by_url, by_doi = result.references
+    assert len(by_url.url) == URL_FIELD_MAX_CHARS == MAX_URL_LENGTH == 2048
+    assert by_url.url.startswith("https://x.org/")
+    assert len(by_doi.doi) == DOI_FIELD_MAX_CHARS == 300
+    assert by_doi.doi.startswith("10.1000/")
+    assert result.dropped == 0  # a cut row is still the row
 
 
 def test_extract_references_caps_the_list_in_code_with_a_warning(references_log):
