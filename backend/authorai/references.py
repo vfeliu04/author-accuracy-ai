@@ -604,6 +604,10 @@ def actionable(reference: Reference) -> bool:
 
 
 REFERENCES_SYSTEM = f"""\
+Return ONE object per entry. A reference list of N entries yields exactly N
+objects — never combine entries into one object, never stop before the last
+entry of the text you were given.
+
 You read the closing pages of a report and list the works its reference list
 cites. Every entry you return describes a work the report CITES — never the
 report itself. Report ONLY what the text actually prints — never guess, never

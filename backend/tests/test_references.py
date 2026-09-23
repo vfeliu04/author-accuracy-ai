@@ -1139,6 +1139,21 @@ def test_the_prompt_asks_for_every_entry_of_a_long_list():
     assert "never completed" in contract
 
 
+def test_the_prompt_opens_with_the_one_object_per_entry_rule():
+    """Measured live (MISTAKES 2026-09-23): six identical calls on a 37-entry
+    list answered 37 / 1 / 37 / 37 / 1 / 1 — the model either closed the
+    list after one short object or put the whole list into one object's
+    text. The structural rule is therefore the FIRST thing the prompt says,
+    in one unmistakable sentence pair, before any field is described."""
+    contract = " ".join(REFERENCES_SYSTEM.split())  # the prompt wraps at 80 columns
+    rule = (
+        "Return ONE object per entry. A reference list of N entries yields exactly N "
+        "objects — never combine entries into one object, never stop before the last "
+        "entry of the text you were given."
+    )
+    assert contract.startswith(rule)
+
+
 # --- Unpaywall: the one registry-GET policy, on a second registry --------------
 
 MAILTO = "checker@example.org"
