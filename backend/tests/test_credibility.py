@@ -160,6 +160,24 @@ def test_malformed_200_body_raises_instead_of_reading_as_not_found():
 
 
 @respx.mock
+def test_a_200_whose_body_is_not_json_raises_the_same_registry_failure():
+    """A 200 with an HTML body (captive portal, CDN error page) is the same
+    malfunction as a non-object body, and every caller sees one failure
+    type: RuntimeError, never the json.JSONDecodeError httpx raises."""
+    respx.get(f"{CROSSREF_BASE}/works/10.1000/html").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><body>Service degraded</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    with pytest.raises(RuntimeError, match="not JSON") as caught:
+        _client().by_doi("10.1000/html")
+    assert not isinstance(caught.value, ValueError)
+    assert "Crossref" in str(caught.value)
+
+
+@respx.mock
 def test_malformed_doi_is_skipped_without_a_request():
     # No route mocked: any HTTP call would make respx raise. The URL-prefixed
     # and shapeless forms both fall through to METADATA_ONLY with a warning.

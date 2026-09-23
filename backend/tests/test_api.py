@@ -1582,5 +1582,36 @@ def test_reference_scan_survives_an_unpaywall_outage(tmp_path, monkeypatch):
     _nothing_written(settings)
 
 
+@respx.mock
+def test_reference_scan_survives_a_200_whose_body_is_not_json(tmp_path, monkeypatch):
+    """A captive portal or a CDN error page answers 200 with HTML. That is a
+    registry malfunction like the 200-non-object case, and the contract is
+    the same: 200 with lookup.status "unavailable" and the cause in
+    `detail` — never a 500 from a JSON decode error escaping the lookup."""
+    from authorai import api as apimod
+
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/.*").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><body>Service degraded</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    settings = _settings(tmp_path, crossref_mailto="checker@example.org")
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: FakeLLM({ReferenceList: CITED}))
+    with TestClient(
+        create_app(settings, worker=_NoopWorker()), raise_server_exceptions=False
+    ) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["lookup"]["status"] == "unavailable"
+    assert "not JSON" in body["lookup"]["detail"]
+    assert "Unpaywall" in body["lookup"]["detail"]
+    assert len(body["references"]) == len(CITED.references)
+    _nothing_written(settings)
+
+
 def test_reference_scan_needs_the_report_part(client):
     assert client.post(SCAN, headers=AUTH).status_code == 422

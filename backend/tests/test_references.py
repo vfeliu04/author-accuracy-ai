@@ -291,6 +291,26 @@ def test_unpaywall_malformed_200_body_raises_instead_of_reading_as_not_found():
 
 
 @respx.mock
+def test_a_200_whose_body_is_not_json_raises_the_registry_failure_not_a_decode_error():
+    """A captive portal or CDN error page answers 200 with HTML. Like the
+    non-object case it is a malfunction, and it must surface as the same
+    RuntimeError the pooled lookup turns into "unavailable" — a decode error
+    escaping here would fail the whole scan with a 500."""
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/html").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><body>Service degraded</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    with pytest.raises(RuntimeError, match="not JSON") as caught:
+        _unpaywall().by_doi("10.1000/html")
+    assert not isinstance(caught.value, ValueError)
+    assert "Unpaywall" in str(caught.value)
+    assert "/v2/10.1000/html" in str(caught.value)
+
+
+@respx.mock
 def test_an_unknown_doi_is_an_html_404_and_reads_as_not_found():
     """Live: Unpaywall answers an unknown DOI with HTTP 404 and an HTML body.
     That is an answer — None — and the body is never parsed as JSON (which

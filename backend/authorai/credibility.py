@@ -238,12 +238,22 @@ def get_json_with_retries(
             failure = f"{type(exc).__name__}: {exc}"
         else:
             if response.status_code == 200:
-                payload = response.json()
+                # A 200 whose body is not a JSON object is a malfunction
+                # (a captive portal or CDN error page, proxy interference),
+                # not an answer — every registry envelopes in an object.
+                # Treating it as "not found" would silently downgrade tiers,
+                # and letting httpx's JSONDecodeError (a ValueError) escape
+                # would give callers a second failure type: the pooled
+                # Unpaywall lookup catches RuntimeError alone, and turned
+                # the decode error into a 500.
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"{provider} returned 200 with a body that is not JSON ({url}) — "
+                        "malformed registry response"
+                    ) from exc
                 if not isinstance(payload, dict):
-                    # A 200 whose body is not a JSON object is a malfunction
-                    # (proxy/CDN interference), not an answer — both registries
-                    # always envelope in an object. Treating it as "not found"
-                    # would silently downgrade tiers.
                     raise RuntimeError(
                         f"{provider} returned 200 with a non-object body ({url}) — "
                         "malformed registry response"
