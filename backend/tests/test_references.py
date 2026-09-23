@@ -1362,6 +1362,109 @@ def test_the_failing_worker_itself_never_requests_the_next_queued_lookup(monkeyp
     assert caught.value.resolved == [("unknown", None)] * 3
 
 
+class _FakeUnpaywall:
+    """A client whose `by_doi` answers, raises, or blocks per DOI, and records
+    every call — the pooled lookup's contract without a socket."""
+
+    def __init__(
+        self, raising: dict[str, Exception] | None = None, blocking: set[str] = frozenset()
+    ):
+        self.raising = raising or {}
+        self.blocking = blocking
+        self.release = threading.Event()
+        self.calls: list[str] = []
+        self._lock = threading.Lock()
+
+    def by_doi(self, doi: str) -> dict | None:
+        with self._lock:
+            self.calls.append(doi)
+        name = doi.rsplit("/", 1)[-1]
+        if name in self.raising:
+            raise self.raising[name]
+        if any(name.startswith(prefix) for prefix in self.blocking):
+            assert self.release.wait(10), f"{doi} was never released"
+        return _record(url_for_pdf=f"https://x.org/{name}.pdf")
+
+    def close(self) -> None:
+        pass
+
+
+@respx.mock
+def test_a_decoding_error_from_the_registry_is_the_registry_failure_not_a_500(monkeypatch):
+    """A response whose body does not match its Content-Encoding (a CDN error
+    page behind a gzip header) raises httpx.DecodingError — a RequestError,
+    not the TransportError the retry policy catches nor the RuntimeError the
+    pool shielded. It is a registry failure like any other: the lookup ends,
+    queued lookups are never requested, and the scan answers "unavailable"."""
+    monkeypatch.setattr(references, "LOOKUP_WORKERS", 1)
+    lie = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/lie").mock(
+        return_value=httpx.Response(
+            503, headers={"content-encoding": "gzip"}, stream=httpx.ByteStream(b"{not gzip}")
+        )
+    )
+    late = respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/10\.1000/late\d").mock(
+        return_value=httpx.Response(200, json=_record(is_oa=False))
+    )
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("lie", "late1", "late2")]
+    client = _unpaywall()
+    try:
+        with pytest.raises(RegistryUnavailable, match="DecodingError") as caught:
+            lookup_retrievability(client, refs)
+    finally:
+        client.close()
+    assert lie.call_count == 1
+    assert late.call_count == 0
+    assert caught.value.resolved == [("unknown", None)] * 3
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.InvalidURL("URL too long"), ValueError("no JSON object could be decoded")],
+    ids=["InvalidURL", "ValueError"],
+)
+def test_any_lookup_failure_ends_the_lookup_like_an_outage(monkeypatch, failure):
+    """httpx.InvalidURL (a request URL past httpx's own limit) and ValueError
+    are neither TransportError nor RuntimeError; each is wrapped as the one
+    registry failure, sets the flag the workers check, and cancels the queue."""
+    monkeypatch.setattr(references, "LOOKUP_WORKERS", 1)
+    fake = _FakeUnpaywall(raising={"down": failure})
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("down", "late1", "late2")]
+    with pytest.raises(RegistryUnavailable, match=type(failure).__name__) as caught:
+        lookup_retrievability(fake, refs)
+    assert fake.calls == ["10.1000/down"]
+    assert str(failure) in str(caught.value)
+    assert caught.value.resolved == [("unknown", None)] * 3
+
+
+def test_an_escape_from_the_caller_thread_cancels_the_queued_lookups(monkeypatch):
+    """A failure raised while READING a result (not in a worker) is not a
+    registry failure and propagates — but it must not leave every queued
+    lookup to run: the pool's teardown cancels the queue and the workers'
+    flag stops the one dequeued in the meantime. One worker: `bad` answers,
+    `late1` is in flight (blocked) when the caller fails, `late2` is queued."""
+    monkeypatch.setattr(references, "LOOKUP_WORKERS", 1)
+    fake = _FakeUnpaywall(blocking={"late"})
+    real = references.retrievability
+
+    def failing(record):
+        if record and "bad.pdf" in (record["best_oa_location"]["url_for_pdf"] or ""):
+            raise AttributeError("'list' object has no attribute 'get'")
+        return real(record)
+
+    monkeypatch.setattr(references, "retrievability", failing)
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("bad", "late1", "late2")]
+    # Released on a timer, never by the test body: a teardown that WAITS for
+    # the in-flight lookup would otherwise hang the suite instead of failing.
+    threading.Timer(0.5, fake.release.set).start()
+    started = time.perf_counter()
+    with pytest.raises(AttributeError):
+        lookup_retrievability(fake, refs)
+    assert time.perf_counter() - started < 0.5  # the caller is not held for the in-flight one
+    assert fake.release.wait(5)
+    threading.Event().wait(0.3)  # the released worker finishes late1 and tries the queue
+    assert fake.calls == ["10.1000/bad", "10.1000/late1"]  # late2: cancelled, never requested
+
+
 def test_registry_unavailable_is_a_runtime_error_carrying_the_partial_result():
     exc = RegistryUnavailable("Unpaywall gave no answer", [("unknown", None)])
     assert isinstance(exc, RuntimeError)

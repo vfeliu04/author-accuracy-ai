@@ -41,7 +41,13 @@ from pypdf import PdfReader
 from pypdf.generic import IndirectObject
 
 from authorai.credibility import clean_doi, get_json_with_retries
-from authorai.fetch import is_public_address, is_youtube_url, url_host, validate_source_url
+from authorai.fetch import (
+    is_public_address,
+    is_youtube_url,
+    shown_text,
+    url_host,
+    validate_source_url,
+)
 from authorai.llm import LLM
 from authorai.log import setup_logger
 from authorai.web import ExtractionTimeoutError, end_with_parent, handover_file, in_bounded_child
@@ -716,7 +722,14 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
     second wall). The first registry failure ends the whole lookup: pending
     lookups are cancelled, in-flight ones finish (no request is abandoned
     mid-way, and nothing runs on after the caller has the answer), and
-    RegistryUnavailable carries every verdict that was reached.
+    RegistryUnavailable carries every verdict that was reached. A failure
+    is whatever a lookup raises: the retry policy's RuntimeError, or an
+    httpx error it does not cover (a DecodingError from a body that
+    contradicts its Content-Encoding, an InvalidURL from a DOI past httpx's
+    own length limit) or a ValueError — one policy, so no failure route
+    reaches the caller as a 500. A failure in THIS thread (reading a
+    result) is not the registry's and propagates, but the queue is
+    cancelled on the way out all the same.
     """
     results: list[Resolved] = [NOT_RESOLVED] * len(references)
     # Raised by the failing lookup itself, before its worker returns to the
@@ -732,6 +745,11 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
         except RuntimeError:
             failed.set()
             raise
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+            failed.set()
+            raise RuntimeError(
+                f"Unpaywall lookup failed: {type(exc).__name__}: {shown_text(str(exc))}"
+            ) from exc
 
     pool = ThreadPoolExecutor(max_workers=LOOKUP_WORKERS)
     futures: dict[Future, int] = {
@@ -753,5 +771,9 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
                 results[index] = retrievability(future.result())
         raise RegistryUnavailable(str(exc), results) from exc
     finally:
-        pool.shutdown(wait=True)
+        # Idempotent after the paths above. For any other escape: the queue
+        # is cancelled, the flag stops a lookup dequeued meanwhile, and the
+        # caller is not held for an in-flight one — its answer is discarded.
+        failed.set()
+        pool.shutdown(wait=False, cancel_futures=True)
     return results
