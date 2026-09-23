@@ -13,6 +13,11 @@ import { alreadyAdded, stem } from "../lib/references";
 const MAX_SOURCES = 20;
 const MAX_FILE_BYTES = 50_000_000;
 const MAX_TOTAL_BYTES = 200_000_000;
+// The most of a cited work's name a row shows; the whole text is its tooltip.
+// The server cuts a title at 500 characters and an entry at 160, and the
+// model writes the DOI and the address that name a row with neither: this is
+// the dialog's own bound, whatever the server sends.
+const LABEL_MAX_CHARS = 300;
 
 function isPdf(file: File): boolean {
   return file.name.toLowerCase().endsWith(".pdf");
@@ -269,11 +274,17 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   // limit's own message, with Verify disabled, until a tick or a source goes
   // — never as a click that adds what fits and asks for another. A typed link
   // is checked only on Add or Verify, so it is committed first and counted then.
-  const tooManySources = sourceCount + ticked.length > MAX_SOURCES;
+  // The ticks count toward the minimum too — a report with ticked copies alone
+  // may go, since Verify adds them — and so they are counted wherever the
+  // reader counts: the Sources header, the footer line and the button, which
+  // says how many it will add. A tick the registry chose is never sent
+  // uncounted. Not in sourceCount itself: that is what the dialog holds now.
+  const tickedCount = ticked.length;
+  const tooManySources = sourceCount + tickedCount > MAX_SOURCES;
   const tooBig = totalBytes > MAX_TOTAL_BYTES;
   const canSubmit =
     report !== null &&
-    (sourceCount > 0 || hasTypedLink) &&
+    (sourceCount > 0 || tickedCount > 0 || hasTypedLink) &&
     !tooManySources &&
     !tooBig &&
     !create.isPending;
@@ -281,8 +292,15 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const countParts = [
     fileCount > 0 ? plural(fileCount, "file") : null,
     links.length > 0 ? plural(links.length, "link") : null,
+    tickedCount > 0 ? plural(tickedCount, "ticked link") : null,
     fileCount > 0 ? formatBytes(totalBytes) : null
   ].filter((part): part is string => part !== null);
+  const sourcesLabel = tickedCount > 0 ? `${sourceCount} + ${tickedCount} ticked` : `${sourceCount}`;
+  const verifyLabel = create.isPending
+    ? "Uploading…"
+    : tickedCount > 0
+      ? `Verify with ${plural(tickedCount, "link")}`
+      : "Verify report";
 
   const submit = () => {
     if (!report) return;
@@ -386,7 +404,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             </button>
           )}
 
-          <span className="field-label">Sources ({sourceCount})</span>
+          <span className="field-label">Sources ({sourcesLabel})</span>
           {sourceCount === 0 ? (
             <button
               type="button"
@@ -540,9 +558,13 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           {missing.map(({ ref, index, refused }) => {
             // The title, else the printed text; a row the scan kept for its
             // DOI or address alone, with no text, is named by that. Never a
-            // blank label or tooltip.
-            const label = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
-            const tooltip = ref.entry || label;
+            // blank label or tooltip. A name past the display bound is cut,
+            // and the whole of it is then the tooltip in place of the entry,
+            // which the server cut at 160 and so need not hold the tail.
+            const full = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
+            const cut = full.length > LABEL_MAX_CHARS;
+            const label = cut ? `${full.slice(0, LABEL_MAX_CHARS)}…` : full;
+            const tooltip = cut ? full : ref.entry || full;
             const tag = copyTag(ref, lookup?.status ?? "ok");
             // A row with an address the dialog would take is a label around
             // its tick box; one with no address, or a refused one, is a plain
@@ -602,7 +624,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               Cancel
             </button>
             <button type="button" className="btn btn--primary" disabled={!canSubmit} onClick={submit}>
-              {create.isPending ? "Uploading…" : "Verify report"}
+              {verifyLabel}
             </button>
           </div>
         </div>

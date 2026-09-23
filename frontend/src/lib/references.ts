@@ -4,7 +4,7 @@
 // the checklist is there for. The server says what the report cites and where
 // a free copy lives; this decides what is still missing.
 import type { ScannedReference } from "../api/types";
-import { checkLink } from "./links";
+import { MAX_LINK_LENGTH, checkLink } from "./links";
 
 export function stem(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -26,7 +26,19 @@ export function cleanDoi(doi: string): string | null {
 // there, sometimes with its slash encoded. Only a whole path segment counts.
 const DOI_IN_PATH = /(?:^|\/)(10\.\d{4,9}\/[^\s?#]+)/;
 
+// The dialog holds no link past its limit (links.ts), so an address longer
+// than that as written can never be one of them, and it is answered before
+// the parser sees it: the model writes `url` and `suggested_url`, and
+// nothing here runs `new URL` over a string of whatever length it chose.
+// Measured as written, before the #fragment goes: an address carried past
+// the limit by its fragment alone is skipped too, and a printed one that
+// long is not worth a parse.
+function pastTheLimit(candidate: string): boolean {
+  return candidate.length > MAX_LINK_LENGTH;
+}
+
 export function doiInUrl(link: string): string | null {
+  if (pastTheLimit(link)) return null;
   let path: string;
   try {
     path = new URL(link).pathname;
@@ -109,7 +121,7 @@ function linkByDoi(ref: ScannedReference, links: readonly string[]): string | nu
 // against one added link, is that link.
 function linkByUrl(ref: ScannedReference, links: readonly string[]): string | null {
   for (const candidate of [ref.url, ref.suggested_url]) {
-    if (!candidate || "error" in checkLink(candidate, [])) continue;
+    if (!candidate || pastTheLimit(candidate) || "error" in checkLink(candidate, [])) continue;
     const hit = links.find((link) => "error" in checkLink(candidate, [link]));
     if (hit) return hit;
   }

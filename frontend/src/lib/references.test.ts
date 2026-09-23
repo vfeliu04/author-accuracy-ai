@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { scannedReference } from "../test/fixtures";
+import { MAX_LINK_LENGTH } from "./links";
 import {
   alreadyAdded,
   cleanDoi,
@@ -8,6 +9,27 @@ import {
   normalizeTitle,
   stem
 } from "./references";
+
+// How many links the code under test parsed: the global the parser is
+// reached by, counted. A string past the dialog's limit must never reach it.
+function countingParses(): { count: number } {
+  const parses = { count: 0 };
+  const Native = URL;
+  vi.stubGlobal(
+    "URL",
+    class extends Native {
+      constructor(...args: ConstructorParameters<typeof Native>) {
+        parses.count += 1;
+        super(...args);
+      }
+    }
+  );
+  return parses;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 
 describe("stem", () => {
@@ -54,6 +76,17 @@ describe("doiInUrl", () => {
     expect(doiInUrl("https://example.org/v10.1000/abc")).toBeNull(); // not a path segment
     expect(doiInUrl("https://example.org/?doi=10.1000/abc")).toBeNull(); // not in the path
     expect(doiInUrl("not a link")).toBeNull();
+  });
+
+  it("answers null for a link past the dialog's limit without parsing it", () => {
+    const head = "https://doi.org/10.1000/abc?pad=";
+    const atLimit = `${head}${"a".repeat(MAX_LINK_LENGTH - head.length)}`;
+    expect(atLimit).toHaveLength(MAX_LINK_LENGTH);
+    const parses = countingParses();
+    expect(doiInUrl(atLimit)).toBe("10.1000/abc");
+    expect(parses.count).toBe(1);
+    expect(doiInUrl(`${atLimit}a`)).toBeNull();
+    expect(parses.count).toBe(1);
   });
 });
 
@@ -159,6 +192,25 @@ describe("alreadyAdded", () => {
       expect(
         alreadyAdded(scannedReference({ url: "www.example.org/paper" }), [], ["https://www.example.org/paper"])
       ).toBeNull();
+    });
+
+    // The model writes `url` and `suggested_url` at whatever length it chose;
+    // the dialog holds no link past its limit, so an address that long is
+    // skipped before any parser sees it, and one at the limit still matches.
+    it("skips an address past the dialog's limit without parsing it, and matches one at the limit", () => {
+      const head = "https://example.org/";
+      const atLimit = `${head}${"a".repeat(MAX_LINK_LENGTH - head.length)}`;
+      expect(atLimit).toHaveLength(MAX_LINK_LENGTH);
+      const parses = countingParses();
+      expect(alreadyAdded(scannedReference({ url: atLimit }), [], [atLimit])).toBe(atLimit);
+      expect(parses.count).toBeGreaterThan(0);
+
+      parses.count = 0;
+      const past = `${atLimit}a`;
+      for (const cited of [scannedReference({ url: past }), scannedReference({ suggested_url: past })]) {
+        expect(alreadyAdded(cited, [], [past, "https://example.org/paper"])).toBeNull();
+      }
+      expect(parses.count).toBe(0);
     });
   });
 
