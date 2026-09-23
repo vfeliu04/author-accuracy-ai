@@ -259,6 +259,10 @@ export type ScannedReference = {
 export type ReferenceScan = {
   text_source: "heading" | "tail" | "none";
   lookup: { status: LookupStatus; detail: string | null };
+  // What the scan's caps cut: the closing text the model read (65,000
+  // characters from the heading) and the list itself (300 entries, blank
+  // ones dropped). A cut list must not read as the whole list.
+  limits: { text_truncated: boolean; references_dropped: number };
   references: ScannedReference[];
 };
 

@@ -67,6 +67,18 @@ function scanMessage(error: Error | null): string | null {
   return error !== null && error.name !== "AbortError" ? error.message : null;
 }
 
+// What the scan's caps cut, in one line: a list read or kept in part must not
+// pass for the whole one, since the works past the cut are unread, not absent.
+function limitsNote({ text_truncated, references_dropped }: ReferenceScan["limits"]): string | null {
+  const parts = [
+    text_truncated ? "Read the first part of a long reference list" : null,
+    references_dropped > 0
+      ? `${references_dropped === 1 ? "1 entry" : `${references_dropped} entries`} not shown`
+      : null
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? null : parts.join(" — ");
+}
+
 export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const create = useCreateRun();
@@ -248,6 +260,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
 
   const scanError = scanMessage(scan.error);
   const lookup = scan.data?.lookup;
+  const cut = scan.data ? limitsNote(scan.data.limits) : null;
 
   return (
     <div
@@ -453,6 +466,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               Free copies could not be looked up{lookup.detail ? `: ${lookup.detail}` : "."}
             </p>
           ) : null}
+          {cut !== null ? <p className="modal__count">{cut}</p> : null}
           {missing.map(({ ref, index }) => {
             const label = ref.title ?? ref.entry;
             const tag = copyTag(ref, lookup?.status ?? "ok");

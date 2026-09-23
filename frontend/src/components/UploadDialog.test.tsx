@@ -10,9 +10,12 @@ function pdf(name: string, bytes = 100): File {
   return new File([new Uint8Array(bytes)], name, { type: "application/pdf" });
 }
 
+const noLimits: ReferenceScan["limits"] = { text_truncated: false, references_dropped: 0 };
+
 const emptyScan: ReferenceScan = {
   text_source: "none",
   lookup: { status: "ok", detail: null },
+  limits: noLimits,
   references: []
 };
 
@@ -32,9 +35,10 @@ function cited(over: Partial<ScannedReference> = {}): ScannedReference {
 
 function scanOf(
   references: ScannedReference[],
-  lookup: ReferenceScan["lookup"] = { status: "ok", detail: null }
+  lookup: ReferenceScan["lookup"] = { status: "ok", detail: null },
+  limits: ReferenceScan["limits"] = noLimits
 ): ReferenceScan {
-  return { text_source: "heading", lookup, references };
+  return { text_source: "heading", lookup, limits, references };
 }
 
 // Every report picked in a test is scanned; one quiet answer keeps the tests
@@ -689,5 +693,41 @@ describe("UploadDialog reference checklist", () => {
     expect(await screen.findByRole("checkbox", { name: /B one/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /B printed/ })).not.toBeChecked();
     expect(addLinks()).toHaveTextContent("Add 1 link");
+  });
+
+  it("says, in one muted line, when the scan read or kept only part of the list", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([cited({ title: "Work one" })], { status: "ok", detail: null }, {
+        text_truncated: true,
+        references_dropped: 12
+      })
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    const line = screen.getByText("Read the first part of a long reference list — 12 entries not shown");
+    expect(line).toHaveClass("modal__count");
+    expect(line).not.toHaveClass("modal__error");
+  });
+
+  it("names one dropped entry alone, and says nothing when nothing was cut", async () => {
+    const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([cited({ title: "Work one" })], { status: "ok", detail: null }, {
+        text_truncated: false,
+        references_dropped: 1
+      })
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.getByText("1 entry not shown")).toHaveClass("modal__count");
+    expect(screen.queryByText(/first part of a long reference list/)).not.toBeInTheDocument();
+
+    cleanup();
+    scan.mockResolvedValue(scanOf([cited({ title: "Work one" })]));
+    renderDialog();
+    await addReport("other.pdf");
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.queryByText(/not shown|reference list/)).not.toBeInTheDocument();
   });
 });
