@@ -23,7 +23,6 @@ fetcher would make without a network — a literal private or local address —
 so no link is offered that ingest would then refuse.
 """
 
-import ipaddress
 import os
 import re
 import resource
@@ -792,10 +791,10 @@ def offerable_url(url: str) -> str:
     if host == "localhost" or host.endswith(".localhost"):
         raise ValueError(f"Source URL {normalized!r} names the local machine")
     try:
-        literal = ipaddress.ip_address(host)
+        public = is_public_address(host)
     except ValueError:
         return normalized  # a name: resolved, and gated, at ingest
-    if not is_public_address(literal):
+    if not public:
         raise ValueError(f"Source URL {normalized!r} names a private or reserved address")
     return normalized
 
