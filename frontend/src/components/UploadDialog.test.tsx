@@ -662,4 +662,32 @@ describe("UploadDialog reference checklist", () => {
     ).toBeInTheDocument();
     expect(addLinks()).toHaveTextContent("Add 1 link");
   });
+
+  it("forgets the ticks made for one report's scan when another report's scan arrives", async () => {
+    const scanA = scanOf([
+      cited({ title: "A one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+      cited({ title: "A two", retrievability: "pdf", suggested_url: "https://a.org/two" })
+    ]);
+    const scanB = scanOf([
+      cited({ title: "B one", retrievability: "pdf", suggested_url: "https://b.org/one" }),
+      cited({ title: "B printed", url: "https://b.org/printed", suggested_url: "https://b.org/printed" })
+    ]);
+    vi.spyOn(v2, "scanReferences").mockImplementation((file) =>
+      Promise.resolve(file.name === "a.pdf" ? scanA : scanB)
+    );
+    renderDialog();
+    await addReport("a.pdf");
+    // Untick row 0; row 1 stays ticked. Under a set not keyed to its scan,
+    // B's row 0 (a free copy) would come up unticked and B's row 1 (an
+    // address never checked) ticked: the shape of A's choices, not B's.
+    fireEvent.click(await screen.findByRole("checkbox", { name: /A one/ }));
+    expect(screen.getByRole("checkbox", { name: /A one/ })).not.toBeChecked();
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove a.pdf" }));
+    await addReport("b.pdf");
+    expect(await screen.findByRole("checkbox", { name: /B one/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /B printed/ })).not.toBeChecked();
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+  });
 });
