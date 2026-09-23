@@ -348,6 +348,45 @@ def _flat_page_tree(leaves: int, *, count: int) -> bytes:
     return pdf_from_objects(objects)
 
 
+def _cmap_pdf(bfchars: str) -> bytes:
+    """One page set in a Type0 font whose ToUnicode CMap maps glyphs as
+    `bfchars` says — the shape of a real malformed font, which pypdf decodes
+    with `surrogatepass` (strict=False) rather than refuse."""
+    cmap = (
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+        "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
+        "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+        f"{bfchars}\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
+    ).encode()
+    content = b"BT /F1 12 Tf 72 720 Td <000100020002> Tj ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>",
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /Fake /Encoding /Identity-H "
+        b"/DescendantFonts [5 0 R] /ToUnicode 6 0 R >>",
+        b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fake /CIDSystemInfo "
+        b"<< /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>",
+        b"<< /Length " + str(len(cmap)).encode() + b" >>\nstream\n" + cmap + b"\nendstream",
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+    ]
+    return pdf_from_objects(objects)
+
+
+def test_a_lone_surrogate_from_a_broken_font_is_replaced_so_the_text_can_be_sent():
+    """A glyph mapped to an unpaired surrogate (<D800>) reaches the model
+    call as a str the SDK cannot encode as UTF-8 — a 500 raised before any
+    request. The reader replaces it; a valid pair (an emoji) is untouched."""
+    lone = _cmap_pdf("2 beginbfchar\n<0001> <D800>\n<0002> <0041>\nendbfchar")
+    (page,) = read_pages(io.BytesIO(lone), timeout=30)
+    assert page.strip() == "?AA"
+    page.encode("utf-8")  # what the SDK does with the prompt
+    pair = _cmap_pdf("1 beginbfchar\n<0001> <D83DDE00>\n<0002> <0041>\nendbfchar")
+    (page,) = read_pages(io.BytesIO(pair), timeout=30)
+    assert page.strip() == "\U0001f600AA"
+
+
 def _reader_that_never_answers(sender, path, *_args):
     """A reader holding its whole budget: a file pypdf never finishes with."""
     threading.Event().wait(60)

@@ -235,9 +235,18 @@ def _last_pages(handle: BinaryIO, max_pages: int) -> list[str]:
     if reader.is_encrypted:
         reader.decrypt("")
     _bound_page_tree(reader)
-    reader._flatten()  # noqa: SLF001 - the one way to the real list, see above
+    reader._flatten()  # the one way to the real list, see above
     pages = reader.flattened_pages or []
-    return [page.extract_text() or "" for page in pages[-max_pages:]]
+    return [_sendable(page.extract_text() or "") for page in pages[-max_pages:]]
+
+
+def _sendable(text: str) -> str:
+    """The page's text as a str the model request can carry. pypdf decodes a
+    font's ToUnicode map with `surrogatepass`, so a broken font (a glyph
+    mapped to an unpaired surrogate) yields a str that no UTF-8 encoder
+    accepts, and the SDK's request encoding would raise before any request
+    — a 500. Each such code unit becomes "?"; a valid pair is untouched."""
+    return text.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def _bound_page_tree(reader: PdfReader) -> None:
