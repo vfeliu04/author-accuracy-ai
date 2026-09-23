@@ -39,11 +39,12 @@ ENTRY = "Smith, J. (2020). Water stress and cities. Journal of Hydrology, 12(3),
 def test_slices_from_the_last_references_heading():
     """A report can print 'References' more than once (a chapter's own list
     far earlier); the bibliography starts at the LAST one when the earlier
-    one lies farther back than the cap."""
+    one lies farther back than HEADING_RUN_GAP — the cap plays no part in
+    where the slice starts."""
     pages = [
         "Intro. See References for details.",
         "References\nChapter 1's own short list.",
-        "Body text continues. " * 10,
+        "Body text continues. " * 600,  # 12,600 characters: more than a page run
         "References\n" + ENTRY,
     ]
     text, source = reference_text(pages, max_chars=100)
@@ -57,7 +58,7 @@ SECOND_ENTRY = "Jones, K. (2019). Rivers under stress. Nature Water, 1(1), 2-3."
 def test_a_running_header_does_not_cut_a_multi_page_bibliography_short():
     """Each page of a long bibliography carries 'References' as a running
     header. The LAST match is on the last page; slicing from it alone would
-    lose every earlier entry. Headings within one cap-length span are one
+    lose every earlier entry. Headings at most HEADING_RUN_GAP apart are one
     section, so the slice starts at the earliest of them."""
     first = "References\n" + ENTRY
     second = "45\nReferences\n" + SECOND_ENTRY
@@ -66,9 +67,27 @@ def test_a_running_header_does_not_cut_a_multi_page_bibliography_short():
     assert text == first + "\n" + second
 
 
+def test_a_chapter_list_farther_back_than_a_page_run_stays_excluded():
+    """A chapter-end reference list 25,000 characters before the closing
+    bibliography is a separate section: the slice starts at the LAST heading
+    and keeps every one of the final list's 120 entries (10,940 characters,
+    well under the cap), with the chapter list out. Under a cap-sized merge
+    window the chapter list would have been joined and the cap would have
+    cut the final list short."""
+    chapter_list = "References\n" + SECOND_ENTRY
+    final_entries = [f"Final ref {i}. " + ENTRY for i in range(120)]
+    final_list = "References\n" + "\n".join(final_entries)
+    assert len(final_list) == 10_940
+    text, source = reference_text([chapter_list, "b" * 25_000, final_list])
+    assert source == "heading"
+    assert text == final_list
+    assert all(entry in text for entry in final_entries)
+    assert SECOND_ENTRY not in text
+
+
 def test_a_contents_page_mention_far_earlier_stays_excluded():
     """A table of contents prints 'References' on a line of its own, far
-    before the bibliography: outside the cap's reach back from the last
+    before the bibliography: more than HEADING_RUN_GAP back from the last
     heading, so the slice still starts at the bibliography."""
     pages = ["Contents\nReferences\n45", "x" * 100_000, "References\n" + ENTRY]
     text, source = reference_text(pages)
@@ -250,8 +269,17 @@ def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():
         "maximum",
     ):
         assert keyword not in dumped, keyword
-    assert references.MAX_REFERENCES == 80
+    assert references.MAX_REFERENCES == 150
+    assert references.REFERENCE_MAX_CHARS == 60_000
+    assert references.HEADING_RUN_GAP == 12_000
     assert references.REFERENCE_MAX_PAGES == 600
+
+
+def test_the_prompt_asks_for_every_entry_of_a_long_list():
+    """The cap admits 150 entries, so the model must not stop early or
+    summarize a long list: the contract says so in words."""
+    assert "may be long" in REFERENCES_SYSTEM
+    assert "every entry" in REFERENCES_SYSTEM
 
 
 # --- Unpaywall: the one registry-GET policy, on a second registry --------------

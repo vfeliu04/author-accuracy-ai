@@ -42,13 +42,28 @@ logger = setup_logger(__name__)
 
 # Bounds are code, not schema: structured outputs do not honour max_length
 # and a client-side validation failure would 500 the scan (see
-# extract_references). 30,000 characters is 4–7x the measured real
-# bibliographies (~7.5k Haiku tokens); 80 entries is more than any report in
-# the example sets prints; 600 pages from the end covers any whole report
-# the pipeline accepts while bounding a hostile file's page walk.
-REFERENCE_MAX_CHARS = 30_000
-MAX_REFERENCES = 80
+# extract_references). Measured on the example reports: the largest real
+# bibliography, the Drought report's 11-page Works Cited list, spans ~57,000
+# characters from its first running header to its last (61,616 to the end
+# of its last page), so 60,000 characters reads all of it but that page's
+# final entries — at ~4 characters a token, ~15k Haiku input tokens, about
+# two cents. That list prints ~250 entries; 150 is the most the scan keeps
+# (extract_references trims a longer answer, loudly). 600 pages from the end
+# covers any whole report the pipeline accepts while bounding a hostile
+# file's page walk.
+REFERENCE_MAX_CHARS = 60_000
+MAX_REFERENCES = 150
 REFERENCE_MAX_PAGES = 600
+
+# How far apart two heading matches may sit and still be one section: a
+# bibliography that spans several pages repeats its heading on each page as a
+# running header, and the Drought report's run of eleven sit 5,072 to 6,064
+# characters apart, so 12,000 (two such pages) joins a bibliography's pages
+# with margin, while a chapter-end reference list 25,000 characters before
+# the closing one stays a separate section. Page-sized on purpose, not
+# cap-sized: the cap bounds what the model reads, not what counts as one
+# list.
+HEADING_RUN_GAP = 12_000
 
 TextSource = Literal["heading", "tail", "none"]
 
@@ -103,9 +118,12 @@ def reference_text(
     Which heading: the LAST one — a chapter's own list or a contents-page
     line comes earlier — except that a bibliography spanning several pages
     prints its heading on each as a running header, and slicing from the
-    last of those would drop every earlier page. So headings within one
-    cap's length before the last are one section, and the slice starts at
-    the earliest of them; a mention farther back stays excluded.
+    last of those would drop every earlier page. So the rule, in this one
+    place: take the last heading match, walk back while the gap to the
+    previous match is at most HEADING_RUN_GAP, and start at the earliest
+    heading reached, keeping the first `max_chars` from there. A heading
+    farther back than one run gap — a chapter's list, a contents line —
+    stays excluded.
     """
     text = "\n".join(pages)
     if not text.strip():
@@ -113,8 +131,10 @@ def reference_text(
     headings = [match.start(1) for match in _HEADING.finditer(text)]
     if not headings:
         return text[-max_chars:].strip(), "tail"
-    last = headings[-1]
-    start = next(position for position in headings if position >= last - max_chars)
+    index = len(headings) - 1
+    while index > 0 and headings[index] - headings[index - 1] <= HEADING_RUN_GAP:
+        index -= 1
+    start = headings[index]
     return text[start : start + max_chars].strip(), "heading"
 
 
@@ -171,9 +191,11 @@ null.
 - `url`: ONLY a web address printed in the entry.
 
 In-text citations such as "(Smith, 2020)", footnote markers, figure and table
-sources, and the report's own title and imprint are not entries. A document
-without a reference list yields an empty list — that is the correct answer,
-not a failure.
+sources, and the report's own title and imprint are not entries. The list
+may be long — a report can cite a few hundred works: list every entry it
+prints, in order, and never stop early or summarize. A document without a
+reference list yields an empty list — that is the correct answer, not a
+failure.
 """
 
 
