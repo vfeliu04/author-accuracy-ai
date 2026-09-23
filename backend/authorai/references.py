@@ -972,3 +972,43 @@ def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) 
         failed.set()
         pool.shutdown(wait=False, cancel_futures=True)
     return results
+
+
+LookupState = Literal["ok", "unconfigured", "unavailable"]
+
+
+class Lookup(NamedTuple):
+    """How the retrievability lookup went — ok: every DOI was asked about;
+    unconfigured: no contact email, so nothing was asked; unavailable: the
+    registry failed part-way, `detail` says how — and the verdicts reached,
+    aligned with the references given (NOT_RESOLVED for every row nothing
+    reached). The scan's `lookup` field and its rows are built from this."""
+
+    status: LookupState
+    detail: str | None
+    resolved: list[Resolved]
+
+
+def resolve_retrievability(references: list[Reference], mailto: str | None) -> Lookup:
+    """The scan's retrieval policy, in one place. No contact email means no
+    lookup at all (Unpaywall refuses requests without one), and a registry
+    failure part-way keeps the list and flags it rather than failing the
+    scan — the citations are useful without retrievability. The client
+    lives for this one lookup."""
+    mailto = (mailto or "").strip()
+    if not mailto:
+        return Lookup("unconfigured", None, [NOT_RESOLVED] * len(references))
+    client = UnpaywallClient(mailto)
+    try:
+        return Lookup("ok", None, lookup_retrievability(client, references))
+    except RegistryUnavailable as exc:
+        return Lookup("unavailable", str(exc), exc.resolved)
+    finally:
+        client.close()
+
+
+def suggested_url(reference: Reference, found: str | None) -> str | None:
+    """The address the dialog may offer for a row: the free copy the lookup
+    found, else the address a DOI-less entry prints (printed_url, through
+    the same gate), else none."""
+    return found or printed_url(reference)

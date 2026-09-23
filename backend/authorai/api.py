@@ -431,7 +431,7 @@ class LookupStatus(BaseModel):
     # ok: every DOI was asked about. unconfigured: no contact email, so
     # nothing was asked. unavailable: the registry failed part-way; `detail`
     # says how, and the list keeps what was resolved before the failure.
-    status: Literal["ok", "unconfigured", "unavailable"]
+    status: refsmod.LookupState
     detail: str | None = None
 
 
@@ -474,8 +474,10 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     list and no model call. A missing contact email means no lookup
     ("unconfigured"); a registry failure part-way keeps the list and flags
     it ("unavailable") rather than failing the scan, because the citations
-    are useful without retrievability. A model failure is not caught: 500,
-    like chat. Sync, so its blocking reads run on the threadpool.
+    are useful without retrievability (references.resolve_retrievability
+    holds that rule, and suggested_url which address a row offers). A model
+    failure is not caught: 500, like chat. Sync, so its blocking reads run
+    on the threadpool.
     """
     settings: Settings = request.app.state.settings
     _validate_pdf(report, settings.max_upload_bytes)
@@ -490,36 +492,24 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
         llm = AnthropicClient(settings.anthropic_api_key)
         references, dropped = refsmod.extract_references(llm, settings.references_model, text)
 
-    mailto = (settings.crossref_mailto or "").strip()
-    if not mailto:
-        lookup = LookupStatus(status="unconfigured")
-        resolved = [refsmod.NOT_RESOLVED] * len(references)
-    else:
-        unpaywall = refsmod.UnpaywallClient(mailto)
-        try:
-            resolved = refsmod.lookup_retrievability(unpaywall, references)
-            lookup = LookupStatus(status="ok")
-        except refsmod.RegistryUnavailable as exc:
-            logger.warning(
-                "Unpaywall gave no answer — listing the references without retrievability: %s",
-                exc,
-            )
-            resolved = exc.resolved
-            lookup = LookupStatus(status="unavailable", detail=str(exc))
-        finally:
-            unpaywall.close()
+    lookup = refsmod.resolve_retrievability(references, settings.crossref_mailto)
+    if lookup.status == "unavailable":
+        logger.warning(
+            "Unpaywall gave no answer — listing the references without retrievability: %s",
+            lookup.detail,
+        )
 
     return ReferenceScan(
         text_source=text_source,
-        lookup=lookup,
+        lookup=LookupStatus(status=lookup.status, detail=lookup.detail),
         limits=ScanLimits(text_truncated=text_truncated, references_dropped=dropped),
         references=[
             ScannedReference(
                 **reference.model_dump(),
                 retrievability=kind,
-                suggested_url=url or refsmod.printed_url(reference),
+                suggested_url=refsmod.suggested_url(reference, found),
             )
-            for reference, (kind, url) in zip(references, resolved, strict=True)
+            for reference, (kind, found) in zip(references, lookup.resolved, strict=True)
         ],
     )
 
