@@ -94,8 +94,9 @@ def reference_text(
     """The closing text the model should read, and where it came from.
 
     From the report's reference-list heading forward when it prints one
-    (the 51-page Drought report drops from 72,699 to 4,443 characters), else
-    the last `max_chars` of the document (two of four test reports print no
+    (the 51-page Drought report's 72,699-character tail starts inside its
+    body; its 11-page Works Cited list starts at the heading), else the
+    last `max_chars` of the document (two of four test reports print no
     heading). No text at all is ("", "none"): a scanned PDF must not yield an
     invented bibliography, so the caller makes no model call on that value.
 

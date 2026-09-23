@@ -16,7 +16,11 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "example_sources"
 
 CASES = [
     # (relative path, expected text_source, (min chars, max chars))
-    ("example source two/Drought Hotspots 2023-2025_ENG.pdf", "heading", (3_000, 6_000)),
+    # The Drought report's Works Cited list runs 11 pages and repeats its
+    # heading on each as a running header; the slice starts at the first of
+    # them and reaches the cap (before the running-header rule it read the
+    # last page alone: 4,443 characters, ten pages of entries lost).
+    ("example source two/Drought Hotspots 2023-2025_ENG.pdf", "heading", (29_000, 30_000)),
     (
         "example source two/Defining_domestic_water_consumption_based_on_perso.pdf",
         "heading",
