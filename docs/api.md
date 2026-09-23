@@ -112,7 +112,7 @@ Response:
 
 `text_source` says where the text came from: `heading` (from the reference-list heading, as above), `tail` (no heading; the document's end) or `none` (no text at all; `references` is then empty). At most 300 references are returned (`MAX_REFERENCES`); a longer model answer is cut after every part has answered, with a warning in the server log.
 
-Each reference carries what its entry **prints** — `title`, `authors`, `year`, `doi` (no URL prefix) and `url` are `null` or empty when the entry does not print them, and the model is told never to supply a DOI from memory — plus `entry`, the first 160 characters of the reference as printed (`ENTRY_PREFIX_CHARS`; the model is asked for that many and code cuts a longer answer), which the dialog shows when there is no title. `retrievability` and `suggested_url` come from Unpaywall, asked by DOI:
+Each reference carries what its entry **prints** — `title`, `authors`, `year`, `doi` (no URL prefix) and `url` are `null` or empty when the entry does not print them, and the model is told never to supply a DOI from memory — plus `entry`, the first 160 characters of the reference as printed (`ENTRY_PREFIX_CHARS`; the model is asked for that many and code cuts a longer answer), which the dialog shows when there is no title. A reference the model returns with a blank `entry` is kept, `entry` `""`, only when it prints a title, DOI or address the dialog can still show and check; with none of those it is not a reference the user can act on and is dropped, with a warning in the server log that counts the drops. `retrievability` and `suggested_url` come from Unpaywall, asked by DOI:
 
 | `retrievability` | Meaning | `suggested_url` |
 |---|---|---|
