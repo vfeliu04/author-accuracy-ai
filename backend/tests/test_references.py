@@ -5,6 +5,7 @@ for HTTP, FakeLLM for the model, a hand-built PDF for pypdf)."""
 import io
 import json
 import threading
+from concurrent.futures import wait
 
 import httpx
 import pytest
@@ -615,6 +616,50 @@ def test_the_first_outage_cancels_the_rest_and_keeps_what_was_resolved(monkeypat
         ("unknown", None),
         ("unknown", None),
     ]
+
+
+@respx.mock
+def test_the_failing_worker_itself_never_requests_the_next_queued_lookup(monkeypatch):
+    """The `failed` flag exists for one race: the failing lookup's own worker
+    returns to the queue and dequeues a pending lookup BEFORE the caller's
+    thread reaches cancel_futures. The outage test above usually sees the
+    caller win that race, so removing the flag survives it most runs.
+
+    Here the race is decided, not timed: one worker, so the queued lookups
+    sit behind the failing one; and as_completed is wrapped so the caller
+    does not receive the failed future until the worker has finished with
+    the NEXT queued lookup — skipped by the flag, or requested without it.
+    Only then may the caller cancel. Either way the outcome is observable:
+    with the flag, the late lookup's future is done with no request made.
+    """
+    _no_sleep(monkeypatch)
+    monkeypatch.setattr(references, "LOOKUP_WORKERS", 1)
+    real_as_completed = references.as_completed
+
+    def as_completed_after_the_worker_moved_on(futures):
+        by_index = {index: future for future, index in futures.items()}
+        for future in real_as_completed(futures):
+            if future is by_index[0]:
+                # The caller is late: the worker has dequeued late1 already.
+                done, _ = wait([by_index[1]], timeout=5)
+                assert done, "the worker never reached the queued lookup"
+            yield future
+
+    monkeypatch.setattr(references, "as_completed", as_completed_after_the_worker_moved_on)
+    down = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/down").mock(return_value=httpx.Response(503))
+    late = respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/10\.1000/late\d").mock(
+        return_value=httpx.Response(200, json=_record(is_oa=False))
+    )
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("down", "late1", "late2")]
+    client = _unpaywall()
+    try:
+        with pytest.raises(RegistryUnavailable, match="HTTP 503") as caught:
+            lookup_retrievability(client, refs)
+    finally:
+        client.close()
+    assert down.call_count == 3
+    assert late.call_count == 0, "a queued lookup was requested after the registry had failed"
+    assert caught.value.resolved == [("unknown", None)] * 3
 
 
 def test_registry_unavailable_is_a_runtime_error_carrying_the_partial_result():
