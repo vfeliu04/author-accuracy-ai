@@ -109,7 +109,7 @@ describe("familyNames", () => {
 
 describe("alreadyAdded", () => {
   describe("by DOI", () => {
-    const cited = ref({ doi: "10.1000/abc" });
+    const cited = scannedReference({ doi: "10.1000/abc" });
 
     it("matches a link carrying the DOI in doi.org, dx.doi.org or publisher form", () => {
       for (const link of [
@@ -123,20 +123,20 @@ describe("alreadyAdded", () => {
 
     it("accepts a DOI the entry printed with its prefix", () => {
       expect(
-        alreadyAdded(ref({ doi: "https://doi.org/10.1000/abc" }), [], ["https://doi.org/10.1000/abc"])
+        alreadyAdded(scannedReference({ doi: "https://doi.org/10.1000/abc" }), [], ["https://doi.org/10.1000/abc"])
       ).toBe("https://doi.org/10.1000/abc");
     });
 
     it("does not match another DOI, a malformed one, or a DOI outside the path", () => {
       expect(alreadyAdded(cited, [], ["https://doi.org/10.1000/abd"])).toBeNull();
-      expect(alreadyAdded(ref({ doi: "abc" }), [], ["https://example.org/abc"])).toBeNull();
+      expect(alreadyAdded(scannedReference({ doi: "abc" }), [], ["https://example.org/abc"])).toBeNull();
       expect(alreadyAdded(cited, [], ["https://example.org/?doi=10.1000/abc"])).toBeNull();
     });
   });
 
   describe("by canonical URL", () => {
     it("matches the printed URL through the dialog's own link rules, #fragment included", () => {
-      const cited = ref({ url: "https://example.org/paper#abstract" });
+      const cited = scannedReference({ url: "https://example.org/paper#abstract" });
       expect(alreadyAdded(cited, [], ["https://example.org/paper"])).toBe(
         "https://example.org/paper"
       );
@@ -146,7 +146,7 @@ describe("alreadyAdded", () => {
     });
 
     it("matches the suggested copy too, so an added suggestion leaves the list", () => {
-      const cited = ref({ suggested_url: "https://europepmc.org/articles/PMC1?pdf=render" });
+      const cited = scannedReference({ suggested_url: "https://europepmc.org/articles/PMC1?pdf=render" });
       expect(alreadyAdded(cited, [], ["https://europepmc.org/articles/PMC1?pdf=render"])).toBe(
         "https://europepmc.org/articles/PMC1?pdf=render"
       );
@@ -154,16 +154,16 @@ describe("alreadyAdded", () => {
 
     it("does not match a different query string, or an address that isn't a link", () => {
       expect(
-        alreadyAdded(ref({ url: "https://example.org/paper?v=2" }), [], ["https://example.org/paper"])
+        alreadyAdded(scannedReference({ url: "https://example.org/paper?v=2" }), [], ["https://example.org/paper"])
       ).toBeNull();
       expect(
-        alreadyAdded(ref({ url: "www.example.org/paper" }), [], ["https://www.example.org/paper"])
+        alreadyAdded(scannedReference({ url: "www.example.org/paper" }), [], ["https://www.example.org/paper"])
       ).toBeNull();
     });
   });
 
   describe("by title", () => {
-    const cited = ref({ title: "Water scarcity in the Mediterranean basin" });
+    const cited = scannedReference({ title: "Water scarcity in the Mediterranean basin" });
 
     it("matches a file named after the title, in either direction of containment", () => {
       expect(alreadyAdded(cited, ["Water_scarcity_in_the_Mediterranean_basin.pdf"], [])).toBe(
@@ -174,7 +174,7 @@ describe("alreadyAdded", () => {
         "FAO-2024-water-scarcity-in-the-mediterranean-basin-full.pdf"
       );
       // The title holds the file name and more.
-      const longer = ref({
+      const longer = scannedReference({
         title: "Global assessment of water scarcity in the Mediterranean basin and beyond"
       });
       expect(alreadyAdded(longer, ["water scarcity in the Mediterranean basin.pdf"], [])).toBe(
@@ -183,22 +183,22 @@ describe("alreadyAdded", () => {
     });
 
     it("never matches on fewer than four tokens, so generic short titles stay listed", () => {
-      expect(alreadyAdded(ref({ title: "Annual Report" }), ["Annual_Report.pdf"], [])).toBeNull();
-      expect(alreadyAdded(ref({ title: "The 2020 report" }), ["the-2020-report.pdf"], [])).toBeNull();
+      expect(alreadyAdded(scannedReference({ title: "Annual Report" }), ["Annual_Report.pdf"], [])).toBeNull();
+      expect(alreadyAdded(scannedReference({ title: "The 2020 report" }), ["the-2020-report.pdf"], [])).toBeNull();
       // A one-word file name is contained in almost any title.
       expect(alreadyAdded(cited, ["basin.pdf"], [])).toBeNull();
-      expect(alreadyAdded(ref({ title: "Introduction" }), ["Introduction.pdf"], [])).toBeNull();
+      expect(alreadyAdded(scannedReference({ title: "Introduction" }), ["Introduction.pdf"], [])).toBeNull();
     });
 
     it("matches whole words only", () => {
       expect(
-        alreadyAdded(ref({ title: "Global hunger report 2024" }), ["global_hunger_reports_2024.pdf"], [])
+        alreadyAdded(scannedReference({ title: "Global hunger report 2024" }), ["global_hunger_reports_2024.pdf"], [])
       ).toBeNull();
     });
   });
 
   describe("by family name and year", () => {
-    const cited = ref({ authors: ["Smith, J.", "Jones, K."], year: 2020 });
+    const cited = scannedReference({ authors: ["Smith, J.", "Jones, K."], year: 2020 });
 
     it("matches a file stem naming an author and the year", () => {
       const named = ["Smith_et_al_2020.pdf", "Smith2020.pdf", "smith-2020-water.pdf", "Jones_2020.pdf"];
@@ -208,7 +208,7 @@ describe("alreadyAdded", () => {
     });
 
     it("matches a multi-word family name written together or apart", () => {
-      const berg = ref({ authors: ["van der Berg, A."], year: 2019 });
+      const berg = scannedReference({ authors: ["van der Berg, A."], year: 2019 });
       expect(alreadyAdded(berg, ["vanderBerg2019.pdf"], [])).toBe("vanderBerg2019.pdf");
       expect(alreadyAdded(berg, ["van_der_Berg_2019.pdf"], [])).toBe("van_der_Berg_2019.pdf");
     });
@@ -218,13 +218,13 @@ describe("alreadyAdded", () => {
       expect(alreadyAdded(cited, ["Smithson_2020.pdf"], [])).toBeNull();
       expect(alreadyAdded(cited, ["Smith_20201.pdf"], [])).toBeNull();
       expect(alreadyAdded(cited, ["2020_report.pdf"], [])).toBeNull();
-      expect(alreadyAdded(ref({ authors: ["Smith, J."], year: null }), ["Smith_2020.pdf"], [])).toBeNull();
-      expect(alreadyAdded(ref({ authors: [], year: 2020 }), ["Smith_2020.pdf"], [])).toBeNull();
+      expect(alreadyAdded(scannedReference({ authors: ["Smith, J."], year: null }), ["Smith_2020.pdf"], [])).toBeNull();
+      expect(alreadyAdded(scannedReference({ authors: [], year: 2020 }), ["Smith_2020.pdf"], [])).toBeNull();
     });
   });
 
   it("takes the rules in order and answers with the first match", () => {
-    const cited = ref({
+    const cited = scannedReference({
       doi: "10.1000/abc",
       title: "Water scarcity in the Mediterranean basin",
       authors: ["Smith, J."],
