@@ -47,7 +47,7 @@ from html import unescape
 from html.parser import HTMLParser
 from multiprocessing import connection, resource_tracker
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
@@ -233,7 +233,7 @@ def extract_web_bounded(
 
 def in_bounded_child(
     target, args: tuple, *, payload_path: str, url: str, timeout: float
-) -> tuple[str, object]:
+) -> tuple[str, Any]:
     """Run `target(sender, payload_path, *args, cpu_seconds)` in a spawned
     child under a wall-clock budget and return the (kind, payload) pair it
     sent back. The one bounded-reader primitive: extract_web_bounded reads a
