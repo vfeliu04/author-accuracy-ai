@@ -57,13 +57,20 @@ export function normalizeTitle(title: string): string {
 // "Smith, J." → Smith; "J. Smith", "Jane Smith", "Smith JP" → Smith; "et al."
 // is not a name. An initial is a lone letter, letters with periods ("J.-P."),
 // or a run of up to three capitals ("JP").
-const ET_AL = /[,\s]*\bet\s+al\.?\s*$/iu;
+// The "et al." rule matches the words alone: the separators before them are
+// dropped by the trim and the name's own trailing strip, and a `[,\s]*` in
+// front of `\b` would backtrack from every position of a long separator run
+// (quadratic: seconds on a 60,000-character author). An author comes from
+// the model with no length bound of its own, so one is set here before any
+// pattern runs; no printed name comes near it.
+const AUTHOR_MAX_CHARS = 500;
+const ET_AL = /\bet\s+al\.?\s*$/iu;
 const INITIAL = /^(?:\p{L}\.?(?:-\p{L}\.?)*|\p{Lu}{1,3})$/u;
 
 export function familyNames(authors: readonly string[]): string[] {
   const names: string[] = [];
   for (const author of authors) {
-    const printed = author.replace(ET_AL, "").trim();
+    const printed = author.slice(0, AUTHOR_MAX_CHARS).replace(ET_AL, "").trim();
     if (!printed) continue;
     const comma = printed.indexOf(",");
     const family =

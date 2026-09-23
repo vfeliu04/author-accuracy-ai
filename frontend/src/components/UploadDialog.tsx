@@ -27,8 +27,19 @@ function uploadError(err: unknown): string {
     : err.message;
 }
 
-// A cited work with its place in the scan, which is what a tick refers to.
-type Cited = { ref: ScannedReference; index: number };
+// A cited work with its place in the scan, which is what a tick refers to,
+// and why the dialog would refuse its suggested address, if it would.
+type Cited = { ref: ScannedReference; index: number; refused: string | null };
+
+// The dialog's own link gate over the suggested address alone (a YouTube
+// page, say — the server's offer gate and the dialog's do not agree on every
+// address). A refused one is listed with the reason and can never be ticked,
+// rather than ticked and then dropped in silence by the Add click.
+function refusal(ref: ScannedReference): string | null {
+  if (ref.suggested_url === null) return null;
+  const result = checkLink(ref.suggested_url, []);
+  return "error" in result ? result.error : null;
+}
 
 // A free copy the lookup found is worth adding; an address the entry merely
 // printed was validated but never visited, so it waits for a tick.
@@ -67,6 +78,18 @@ function scanMessage(error: Error | null): string | null {
   return error !== null && error.name !== "AbortError" ? error.message : null;
 }
 
+// What the scan's caps cut, in one line: a list read or kept in part must not
+// pass for the whole one, since the works past the cut are unread, not absent.
+function limitsNote({ text_truncated, references_dropped }: ReferenceScan["limits"]): string | null {
+  const parts = [
+    text_truncated ? "Read the first part of a long reference list" : null,
+    references_dropped > 0
+      ? `${references_dropped === 1 ? "1 entry" : `${references_dropped} entries`} not shown`
+      : null
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? null : parts.join(" — ");
+}
+
 export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const create = useCreateRun();
@@ -86,19 +109,25 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   // is ignored and the defaults for this one stand, with no frame in between.
   const scan = useReferenceScan(report);
   const [ticks, setTicks] = useState<{ of: ReferenceScan; set: ReadonlySet<number> } | null>(null);
-  const [addNote, setAddNote] = useState<string | null>(null);
+  // What the last Add click could not do, about this scan's rows: gone with
+  // the report it was about, like the ticks.
+  const [addNote, setAddNote] = useState<{ of: ReferenceScan; text: string } | null>(null);
   const defaults = useMemo(() => defaultTicks(scan.data), [scan.data]);
   const checked = ticks !== null && ticks.of === scan.data ? ticks.set : defaults;
+  const note = addNote !== null && addNote.of === scan.data ? addNote.text : null;
 
   // Matched on every render: sources arrive after the report, so the answer
   // is always taken against what is in the dialog now.
   const missing = useMemo<Cited[]>(() => {
     const names = sources.map((file) => file.name);
     return (scan.data?.references ?? [])
-      .map((ref, index) => ({ ref, index }))
+      .map((ref, index) => ({ ref, index, refused: refusal(ref) }))
       .filter(({ ref }) => alreadyAdded(ref, names, links) === null);
   }, [scan.data, sources, links]);
-  const addable = useMemo(() => missing.filter(({ ref }) => ref.suggested_url !== null), [missing]);
+  const addable = useMemo(
+    () => missing.filter(({ ref, refused }) => ref.suggested_url !== null && refused === null),
+    [missing]
+  );
   const ticked = addable.filter(({ index }) => checked.has(index));
 
   useEffect(() => {
@@ -131,15 +160,16 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
-  // Adds the link in the box and returns the new list. A rejected link stays in
-  // the box, with the reason, so it can be corrected in place.
-  const commitLink = (): string[] | null => {
-    const result = checkLink(linkText, links);
+  // Adds the link in the box to `base` (the links held, or those plus what
+  // the same click added before it) and returns the new list. A rejected
+  // link stays in the box, with the reason, so it can be corrected in place.
+  const commitLink = (base: string[]): string[] | null => {
+    const result = checkLink(linkText, base);
     if ("error" in result) {
       setLinkError(result.error);
       return null;
     }
-    const next = [...links, result.link];
+    const next = [...base, result.link];
     setLinks(next);
     setLinkText("");
     setLinkError(null);
@@ -147,7 +177,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   };
 
   const addLink = () => {
-    if (linkText.trim() !== "") commitLink();
+    if (linkText.trim() !== "") commitLink(links);
   };
 
   const removeReport = () => {
@@ -172,30 +202,45 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   };
 
   // The only way a suggestion becomes a source: the ticked rows, each through
-  // the same checks a typed link gets, up to the source cap. A duplicate is
-  // skipped (its row goes once the first copy is in); the cap stops the rest
-  // and says so, with what got in.
-  const addSuggested = () => {
+  // the same checks a typed link gets, up to the source cap, added to `base`
+  // and returned with whether the cap stopped any. A tick that did not get
+  // in is never dropped in silence: the cap stops the rest and says so, with
+  // what got in, and a row the checks refuse against the links now held (a
+  // duplicate of one ticked just before it — its row goes once the first
+  // copy is in) is counted, with the reason.
+  const addSuggested = (base: string[]): { next: string[]; capped: boolean } => {
+    if (!scan.data) return { next: base, capped: false };
     const wanted = ticked.map(({ ref }) => ref.suggested_url as string);
-    let next = links;
+    let next = base;
     let added = 0;
     let capped = false;
+    const refused: string[] = [];
     for (const url of wanted) {
       if (sources.length + next.length >= MAX_SOURCES) {
         capped = true;
         break;
       }
       const result = checkLink(url, next);
-      if ("error" in result) continue;
+      if ("error" in result) {
+        refused.push(result.error);
+        continue;
+      }
       next = [...next, result.link];
       added += 1;
     }
     setLinks(next);
-    setAddNote(
-      capped
-        ? `Added ${added} of ${wanted.length} — at most ${MAX_SOURCES} sources per verification.`
+    const why = [
+      capped ? `at most ${MAX_SOURCES} sources per verification.` : null,
+      refused.length > 0
+        ? `${refused.length} couldn't be added: ${Array.from(new Set(refused)).join(" ")}`
         : null
+    ].filter((part): part is string => part !== null);
+    setAddNote(
+      why.length === 0
+        ? null
+        : { of: scan.data, text: `Added ${added} of ${wanted.length} — ${why.join(" ")}` }
     );
+    return { next, capped };
   };
 
   const handleDrop = (event: DragEvent) => {
@@ -226,11 +271,18 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
 
   const submit = () => {
     if (!report) return;
-    // A link still in the box was meant to go too, so it is added first; one
-    // that can't be added, or that passes the limit, holds the upload.
+    // Ticked rows and a link still in the box were meant to go too, so they
+    // are added first, the ticks then the box; a tick the limit stops, or a
+    // typed link that can't be added or passes the limit, holds the upload
+    // and says why.
     let submitted = links;
+    if (ticked.length > 0) {
+      const { next, capped } = addSuggested(submitted);
+      if (capped) return;
+      submitted = next;
+    }
     if (linkText.trim() !== "") {
-      const next = commitLink();
+      const next = commitLink(submitted);
       if (next === null || sources.length + next.length > MAX_SOURCES) return;
       submitted = next;
     }
@@ -246,8 +298,13 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     );
   };
 
-  const scanError = scanMessage(scan.error);
+  // While a scan runs — the first, or one asked for again after a failure —
+  // the last failure is not the news; TanStack keeps `error` set until the
+  // new answer lands.
+  const scanning = scan.isFetching;
+  const scanError = scanning ? null : scanMessage(scan.error);
   const lookup = scan.data?.lookup;
+  const cut = scan.data ? limitsNote(scan.data.limits) : null;
 
   return (
     <div
@@ -438,10 +495,15 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               {scan.data ? ` (${missing.length})` : ""}
             </span>
           ) : null}
-          {scan.isLoading ? (
-            <p className="modal__count">Scanning the report's references…</p>
+          {scanning ? <p className="modal__count">Scanning the report's references…</p> : null}
+          {scanError !== null ? (
+            <>
+              <p className="modal__error">{scanError}</p>
+              <button type="button" className="btn btn--ghost" onClick={() => void scan.refetch()}>
+                Try again
+              </button>
+            </>
           ) : null}
-          {scanError !== null ? <p className="modal__error">{scanError}</p> : null}
           {scan.data && scan.data.references.length === 0 ? (
             <p className="modal__count">No reference list found in this report</p>
           ) : null}
@@ -453,20 +515,30 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               Free copies could not be looked up{lookup.detail ? `: ${lookup.detail}` : "."}
             </p>
           ) : null}
-          {missing.map(({ ref, index }) => {
-            const label = ref.title ?? ref.entry;
+          {cut !== null ? <p className="modal__count">{cut}</p> : null}
+          {missing.map(({ ref, index, refused }) => {
+            // The title, else the printed text; a row the scan kept for its
+            // DOI or address alone, with no text, is named by that. Never a
+            // blank label or tooltip.
+            const label = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
+            const tooltip = ref.entry || label;
             const tag = copyTag(ref, lookup?.status ?? "ok");
-            if (ref.suggested_url === null) {
+            if (ref.suggested_url === null || refused !== null) {
               return (
-                <div className="file-row" key={index} title={ref.entry}>
+                <div className="file-row" key={index} title={tooltip}>
                   <span className="file-row__check" aria-hidden />
                   <span className="file-row__name">{label}</span>
-                  <span className="file-row__size">{tag}</span>
+                  {ref.suggested_url !== null ? (
+                    <span className="file-row__host" title={ref.suggested_url}>
+                      {linkHost(ref.suggested_url)}
+                    </span>
+                  ) : null}
+                  <span className="file-row__size">{refused ?? tag}</span>
                 </div>
               );
             }
             return (
-              <label className="file-row" key={index} title={ref.entry}>
+              <label className="file-row" key={index} title={tooltip}>
                 <input
                   type="checkbox"
                   className="file-row__check"
@@ -486,12 +558,12 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               type="button"
               className="btn btn--ghost"
               disabled={ticked.length === 0}
-              onClick={addSuggested}
+              onClick={() => addSuggested(links)}
             >
               Add {plural(ticked.length, "link")}
             </button>
           ) : null}
-          {addNote ? <p className="modal__error">{addNote}</p> : null}
+          {note !== null ? <p className="modal__count">{note}</p> : null}
 
           {error ? <p className="modal__error">{error}</p> : null}
           {tooManySources ? (

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { queryKeys, useDeleteRun, useRuns, useSnapshot } from "./queries";
+import { queryKeys, useDeleteRun, useReferenceScan, useRuns, useSnapshot } from "./queries";
 import * as v2 from "./v2";
 
 function makeWrapper(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
@@ -100,5 +100,32 @@ describe("useSnapshot", () => {
     expect(second.result.current.data?.document.title).toBe("Water in Crisis");
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(read).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useReferenceScan", () => {
+  // Every other test here turns retries off for the whole client, which
+  // would hide the hook's own setting. This client keeps TanStack's default
+  // (three retries) and only removes the backoff, so a hook that retried
+  // would fail in milliseconds with four calls, not after seven seconds.
+  it("asks once and never retries: a refusal names the file, which won't change", async () => {
+    const scan = vi
+      .spyOn(v2, "scanReferences")
+      .mockRejectedValue(new Error("“report.pdf” is not a PDF."));
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+    const file = new File([new Uint8Array(4)], "report.pdf", { type: "application/pdf" });
+
+    const { result } = renderHook(() => useReferenceScan(file), { wrapper: makeWrapper(client) });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(result.current.error?.message).toBe("“report.pdf” is not a PDF.");
+    expect(scan).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing without a report", () => {
+    const scan = vi.spyOn(v2, "scanReferences");
+    const { result } = renderHook(() => useReferenceScan(null), { wrapper: makeWrapper() });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(scan).not.toHaveBeenCalled();
   });
 });

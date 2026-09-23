@@ -6,7 +6,8 @@ import {
   fetchDocumentJson,
   getReport,
   listRuns,
-  parsePageSnapshot
+  parsePageSnapshot,
+  scanReferences
 } from "./v2";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -102,6 +103,40 @@ describe("v2 fetchers", () => {
   it("throws the server error text on a non-2xx response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no such run", { status: 404 })));
     await expect(getReport("x")).rejects.toThrow("no such run");
+  });
+
+  // The dialog tests replace scanReferences with a spy, so only this test
+  // sees what the fetcher itself sends.
+  it("scanReferences posts the report as multipart with the key, and hands fetch the signal", async () => {
+    vi.stubEnv("VITE_API_KEY", "secret-key");
+    vi.resetModules();
+    const { scanReferences: freshScan } = await import("./v2");
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ text_source: "none", lookup: { status: "ok", detail: null }, references: [] })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const scan = await freshScan(pdf("report.pdf"), controller.signal);
+
+    expect(scan.references).toEqual([]);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/api\/references\/scan$/);
+    expect(init.method).toBe("POST");
+    expect(init.signal).toBe(controller.signal);
+    expect((init.headers as Headers).get("X-API-Key")).toBe("secret-key");
+    const form = init.body as FormData;
+    expect(form).toBeInstanceOf(FormData);
+    expect((form.get("report") as File).name).toBe("report.pdf");
+    expect(Array.from(form.keys())).toEqual(["report"]);
+  });
+
+  it("scanReferences raises the server's sentence on a refusal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "“report.pdf” is not a PDF." }, 400))
+    );
+    await expect(scanReferences(pdf("report.pdf"))).rejects.toThrow(/^“report.pdf” is not a PDF\.$/);
   });
 
   it("surfaces the sentence in a JSON error body instead of the raw JSON", async () => {

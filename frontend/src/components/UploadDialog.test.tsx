@@ -10,9 +10,12 @@ function pdf(name: string, bytes = 100): File {
   return new File([new Uint8Array(bytes)], name, { type: "application/pdf" });
 }
 
+const noLimits: ReferenceScan["limits"] = { text_truncated: false, references_dropped: 0 };
+
 const emptyScan: ReferenceScan = {
   text_source: "none",
   lookup: { status: "ok", detail: null },
+  limits: noLimits,
   references: []
 };
 
@@ -32,9 +35,10 @@ function cited(over: Partial<ScannedReference> = {}): ScannedReference {
 
 function scanOf(
   references: ScannedReference[],
-  lookup: ReferenceScan["lookup"] = { status: "ok", detail: null }
+  lookup: ReferenceScan["lookup"] = { status: "ok", detail: null },
+  limits: ReferenceScan["limits"] = noLimits
 ): ReferenceScan {
-  return { text_source: "heading", lookup, references };
+  return { text_source: "heading", lookup, limits, references };
 }
 
 // Every report picked in a test is scanned; one quiet answer keeps the tests
@@ -563,7 +567,11 @@ describe("UploadDialog reference checklist", () => {
     expect(screen.getByRole("checkbox", { name: /Work two/ })).not.toBeChecked();
     expect(screen.getByText("Work four")).toBeInTheDocument();
     expect(heading(2)).toBeInTheDocument();
-    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+    // The duplicate's tick is not dropped in silence: the row goes, covered
+    // by the first copy, and the note says why the count is one short.
+    expect(
+      screen.getByText("Added 1 of 2 — 1 couldn't be added: That link is already added.")
+    ).toHaveClass("modal__count");
   });
 
   it("stops adding at the source limit and says how many went in", async () => {
@@ -661,5 +669,224 @@ describe("UploadDialog reference checklist", () => {
       screen.getByText("Free copies could not be looked up: Unpaywall answered 503 three times")
     ).toBeInTheDocument();
     expect(addLinks()).toHaveTextContent("Add 1 link");
+  });
+
+  it("forgets the ticks made for one report's scan when another report's scan arrives", async () => {
+    const scanA = scanOf([
+      cited({ title: "A one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+      cited({ title: "A two", retrievability: "pdf", suggested_url: "https://a.org/two" })
+    ]);
+    const scanB = scanOf([
+      cited({ title: "B one", retrievability: "pdf", suggested_url: "https://b.org/one" }),
+      cited({ title: "B printed", url: "https://b.org/printed", suggested_url: "https://b.org/printed" })
+    ]);
+    vi.spyOn(v2, "scanReferences").mockImplementation((file) =>
+      Promise.resolve(file.name === "a.pdf" ? scanA : scanB)
+    );
+    renderDialog();
+    await addReport("a.pdf");
+    // Untick row 0; row 1 stays ticked. Under a set not keyed to its scan,
+    // B's row 0 (a free copy) would come up unticked and B's row 1 (an
+    // address never checked) ticked: the shape of A's choices, not B's.
+    fireEvent.click(await screen.findByRole("checkbox", { name: /A one/ }));
+    expect(screen.getByRole("checkbox", { name: /A one/ })).not.toBeChecked();
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove a.pdf" }));
+    await addReport("b.pdf");
+    expect(await screen.findByRole("checkbox", { name: /B one/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /B printed/ })).not.toBeChecked();
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+  });
+
+  it("says, in one muted line, when the scan read or kept only part of the list", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([cited({ title: "Work one" })], { status: "ok", detail: null }, {
+        text_truncated: true,
+        references_dropped: 12
+      })
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    const line = screen.getByText("Read the first part of a long reference list — 12 entries not shown");
+    expect(line).toHaveClass("modal__count");
+    expect(line).not.toHaveClass("modal__error");
+  });
+
+  it("names one dropped entry alone, and says nothing when nothing was cut", async () => {
+    const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([cited({ title: "Work one" })], { status: "ok", detail: null }, {
+        text_truncated: false,
+        references_dropped: 1
+      })
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.getByText("1 entry not shown")).toHaveClass("modal__count");
+    expect(screen.queryByText(/first part of a long reference list/)).not.toBeInTheDocument();
+
+    cleanup();
+    scan.mockResolvedValue(scanOf([cited({ title: "Work one" })]));
+    renderDialog();
+    await addReport("other.pdf");
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.queryByText(/not shown|reference list/)).not.toBeInTheDocument();
+  });
+
+  it("styles the Add note as a note, and drops it with the report it was about", async () => {
+    const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf(
+        ["one", "two", "three"].map((n) =>
+          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+        )
+      )
+    );
+    renderDialog();
+    const files = [pdf("report.pdf"), ...Array.from({ length: 18 }, (_, i) => pdf(`doc${i}.pdf`))];
+    fireEvent.change(fileInput(), { target: { files } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    fireEvent.click(addLinks());
+    const note = screen.getByText("Added 2 of 3 — at most 20 sources per verification.");
+    expect(note).toHaveClass("modal__count");
+    expect(note).not.toHaveClass("modal__error");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove report.pdf" }));
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+
+    // Another report's scan: still no note, even though 20 sources remain.
+    scan.mockResolvedValue(emptyScan);
+    await addReport("other.pdf");
+    expect(await screen.findByText("No reference list found in this report")).toBeInTheDocument();
+    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+  });
+
+  it("names a row with no title by what it prints, and never by nothing", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        cited({ entry: "", doi: "10.1000/blank" }),
+        cited({ entry: "", url: "https://c.org/blank", suggested_url: "https://c.org/blank" }),
+        cited({ entry: "" })
+      ])
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    const byDoi = screen.getByText("10.1000/blank").closest(".file-row");
+    expect(byDoi).toHaveAttribute("title", "10.1000/blank");
+    const byUrl = screen.getByRole("checkbox", { name: /c\.org\/blank/ }).closest(".file-row");
+    expect(byUrl).toHaveAttribute("title", "https://c.org/blank");
+    const bare = screen.getByText("(untitled entry)").closest(".file-row");
+    expect(bare).toHaveAttribute("title", "(untitled entry)");
+    for (const row of document.querySelectorAll(".file-row[title]")) {
+      expect(row.getAttribute("title")).not.toBe("");
+    }
+  });
+
+  it("lists a suggested address the dialog would refuse without a tick, saying why", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        cited({
+          title: "A recorded webinar",
+          url: "https://www.youtube.com/watch?v=abc",
+          suggested_url: "https://www.youtube.com/watch?v=abc"
+        }),
+        cited({
+          title: "A record whose copy is a video",
+          retrievability: "pdf",
+          suggested_url: "https://youtu.be/abc"
+        }),
+        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" })
+      ])
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    expect(screen.getAllByText("YouTube links aren't supported yet.")).toHaveLength(2);
+    expect(screen.queryByRole("checkbox", { name: /webinar/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /video/ })).not.toBeInTheDocument();
+    expect(screen.getByText("www.youtube.com")).toBeInTheDocument();
+    expect(screen.getByText("youtu.be")).toBeInTheDocument();
+    // The refusal replaces the copy tag: only Work one reads "free PDF".
+    expect(screen.getAllByText("free PDF")).toHaveLength(1);
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+
+    fireEvent.click(addLinks());
+    expect(screen.getByText("Sources (1)")).toBeInTheDocument();
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("YouTube links aren't supported yet.")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /^Add \d+ links?$/ })).not.toBeInTheDocument();
+    expect(heading(2)).toBeInTheDocument();
+  });
+
+  it("sends the ticked free copies with Verify, added first like a typed link", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+        cited({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two" }),
+        cited({ title: "Work three", retrievability: "paywalled" })
+      ])
+    );
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), pdf("s.pdf")] } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    expect(addLinks()).toHaveTextContent("Add 2 links");
+    typeLink("https://c.org/typed");
+
+    fireEvent.click(verify());
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const [, sourcesArg, linksArg] = create.mock.calls[0];
+    expect((sourcesArg as File[]).map((f) => f.name)).toEqual(["s.pdf"]);
+    expect(linksArg).toEqual(["https://a.org/one", "https://b.org/two", "https://c.org/typed"]);
+  });
+
+  it("holds Verify when the ticked copies pass the source limit, and says what got in", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf(
+        ["one", "two", "three"].map((n) =>
+          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+        )
+      )
+    );
+    renderDialog();
+    const files = [pdf("report.pdf"), ...Array.from({ length: 18 }, (_, i) => pdf(`doc${i}.pdf`))];
+    fireEvent.change(fileInput(), { target: { files } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+
+    fireEvent.click(verify());
+    expect(screen.getByText("Added 2 of 3 — at most 20 sources per verification.")).toBeInTheDocument();
+    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Work three/ })).toBeChecked();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(create).not.toHaveBeenCalled();
+
+    // Unticking the one that did not fit lets the upload go, with the two.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work three/ }));
+    fireEvent.click(verify());
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(create.mock.calls[0][2]).toEqual(["https://a.org/one", "https://a.org/two"]);
+  });
+
+  it("offers to try a failed scan again, and lists the works when it answers", async () => {
+    const scan = vi
+      .spyOn(v2, "scanReferences")
+      .mockRejectedValueOnce(new Error("The model did not answer."))
+      .mockResolvedValue(scanOf([cited({ title: "Work one" })]));
+    renderDialog();
+    await addReport();
+    expect(await screen.findByText("The model did not answer.")).toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.getByText("Work one")).toBeInTheDocument();
+    expect(screen.queryByText("The model did not answer.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(scan.mock.calls[1][0].name).toBe("report.pdf");
   });
 });
