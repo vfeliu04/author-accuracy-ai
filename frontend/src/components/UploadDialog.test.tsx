@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReferenceScan, ScannedReference } from "../api/types";
 import * as v2 from "../api/v2";
+import { scannedReference } from "../test/fixtures";
 import UploadDialog from "./UploadDialog";
 
 function pdf(name: string, bytes = 100): File {
@@ -19,19 +20,6 @@ const emptyScan: ReferenceScan = {
   references: []
 };
 
-function cited(over: Partial<ScannedReference> = {}): ScannedReference {
-  return {
-    title: null,
-    authors: [],
-    year: null,
-    doi: null,
-    url: null,
-    entry: "An entry as printed.",
-    retrievability: "unknown",
-    suggested_url: null,
-    ...over
-  };
-}
 
 function scanOf(
   references: ScannedReference[],
@@ -415,7 +403,7 @@ describe("UploadDialog reference checklist", () => {
 
   it("scans the report once it is picked, with that file, and not before", async () => {
     const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
-      scanOf([cited({ title: "Water scarcity in the Mediterranean basin" })])
+      scanOf([scannedReference({ title: "Water scarcity in the Mediterranean basin" })])
     );
     renderDialog();
     expect(scan).not.toHaveBeenCalled();
@@ -472,19 +460,19 @@ describe("UploadDialog reference checklist", () => {
   it("lists only the cited works not among the sources, and updates as sources are added", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({
+        scannedReference({
           title: "Water scarcity in the Mediterranean basin",
           doi: "10.1000/abc",
           retrievability: "paywalled"
         }),
-        cited({
+        scannedReference({
           title: "Drought hotspots of the twenty-first century",
           authors: ["Smith, J."],
           year: 2020,
           retrievability: "pdf",
           suggested_url: "https://europepmc.org/articles/PMC1?pdf=render"
         }),
-        cited({ entry: "Anon. (n.d.). A note without a title." })
+        scannedReference({ entry: "Anon. (n.d.). A note without a title." })
       ])
     );
     renderDialog();
@@ -512,7 +500,7 @@ describe("UploadDialog reference checklist", () => {
   it("removes a row live when a PDF named after the cited title is added", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({
+        scannedReference({
           title: "Water scarcity in the Mediterranean basin",
           retrievability: "pdf",
           suggested_url: "https://europepmc.org/articles/PMC1?pdf=render"
@@ -539,10 +527,10 @@ describe("UploadDialog reference checklist", () => {
   it("adds the ticked free copies as links, skipping a duplicate, and shows them as links", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
-        cited({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two#sec" }),
-        cited({ title: "Work one again", retrievability: "pdf", suggested_url: "https://a.org/one#dup" }),
-        cited({ title: "Work four", retrievability: "paywalled" })
+        scannedReference({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+        scannedReference({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two#sec" }),
+        scannedReference({ title: "Work one again", retrievability: "pdf", suggested_url: "https://a.org/one#dup" }),
+        scannedReference({ title: "Work four", retrievability: "paywalled" })
       ])
     );
     renderDialog();
@@ -578,7 +566,7 @@ describe("UploadDialog reference checklist", () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf(
         ["one", "two", "three"].map((n) =>
-          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+          scannedReference({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
         )
       )
     );
@@ -608,7 +596,7 @@ describe("UploadDialog reference checklist", () => {
   it("offers an address printed in the entry unticked, labelled as never checked", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({
+        scannedReference({
           title: "A working paper on the web",
           url: "https://c.org/printed",
           suggested_url: "https://c.org/printed"
@@ -644,7 +632,7 @@ describe("UploadDialog reference checklist", () => {
 
   it("tags every row when no lookup was configured", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
-      scanOf([cited({ title: "Work one" }), cited({ title: "Work two" })], {
+      scanOf([scannedReference({ title: "Work one" }), scannedReference({ title: "Work two" })], {
         status: "unconfigured",
         detail: null
       })
@@ -660,8 +648,8 @@ describe("UploadDialog reference checklist", () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf(
         [
-          cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
-          cited({ title: "Work two" })
+          scannedReference({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+          scannedReference({ title: "Work two" })
         ],
         { status: "unavailable", detail: "Unpaywall answered 503 three times" }
       )
@@ -679,12 +667,12 @@ describe("UploadDialog reference checklist", () => {
 
   it("forgets the ticks made for one report's scan when another report's scan arrives", async () => {
     const scanA = scanOf([
-      cited({ title: "A one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
-      cited({ title: "A two", retrievability: "pdf", suggested_url: "https://a.org/two" })
+      scannedReference({ title: "A one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+      scannedReference({ title: "A two", retrievability: "pdf", suggested_url: "https://a.org/two" })
     ]);
     const scanB = scanOf([
-      cited({ title: "B one", retrievability: "pdf", suggested_url: "https://b.org/one" }),
-      cited({ title: "B printed", url: "https://b.org/printed", suggested_url: "https://b.org/printed" })
+      scannedReference({ title: "B one", retrievability: "pdf", suggested_url: "https://b.org/one" }),
+      scannedReference({ title: "B printed", url: "https://b.org/printed", suggested_url: "https://b.org/printed" })
     ]);
     vi.spyOn(v2, "scanReferences").mockImplementation((file) =>
       Promise.resolve(file.name === "a.pdf" ? scanA : scanB)
@@ -707,7 +695,7 @@ describe("UploadDialog reference checklist", () => {
 
   it("says, in one muted line, when the scan read or kept only part of the list", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
-      scanOf([cited({ title: "Work one" })], { status: "ok", detail: null }, {
+      scanOf([scannedReference({ title: "Work one" })], { status: "ok", detail: null }, {
         text_truncated: true,
         references_dropped: 12
       })
@@ -722,7 +710,7 @@ describe("UploadDialog reference checklist", () => {
 
   it("names one dropped entry alone, and says nothing when nothing was cut", async () => {
     const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
-      scanOf([cited({ title: "Work one" })], { status: "ok", detail: null }, {
+      scanOf([scannedReference({ title: "Work one" })], { status: "ok", detail: null }, {
         text_truncated: false,
         references_dropped: 1
       })
@@ -734,7 +722,7 @@ describe("UploadDialog reference checklist", () => {
     expect(screen.queryByText(/first part of a long reference list/)).not.toBeInTheDocument();
 
     cleanup();
-    scan.mockResolvedValue(scanOf([cited({ title: "Work one" })]));
+    scan.mockResolvedValue(scanOf([scannedReference({ title: "Work one" })]));
     renderDialog();
     await addReport("other.pdf");
     await waitFor(() => expect(heading(1)).toBeInTheDocument());
@@ -745,7 +733,7 @@ describe("UploadDialog reference checklist", () => {
     const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf(
         ["one", "two", "three"].map((n) =>
-          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+          scannedReference({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
         )
       )
     );
@@ -772,9 +760,9 @@ describe("UploadDialog reference checklist", () => {
   it("names a row with no title by what it prints, and never by nothing", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({ entry: "", doi: "10.1000/blank" }),
-        cited({ entry: "", url: "https://c.org/blank", suggested_url: "https://c.org/blank" }),
-        cited({ entry: "" })
+        scannedReference({ entry: "", doi: "10.1000/blank" }),
+        scannedReference({ entry: "", url: "https://c.org/blank", suggested_url: "https://c.org/blank" }),
+        scannedReference({ entry: "" })
       ])
     );
     renderDialog();
@@ -794,17 +782,17 @@ describe("UploadDialog reference checklist", () => {
   it("lists a suggested address the dialog would refuse without a tick, saying why", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({
+        scannedReference({
           title: "A recorded webinar",
           url: "https://www.youtube.com/watch?v=abc",
           suggested_url: "https://www.youtube.com/watch?v=abc"
         }),
-        cited({
+        scannedReference({
           title: "A record whose copy is a video",
           retrievability: "pdf",
           suggested_url: "https://youtu.be/abc"
         }),
-        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" })
+        scannedReference({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" })
       ])
     );
     renderDialog();
@@ -831,9 +819,9 @@ describe("UploadDialog reference checklist", () => {
     const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([
-        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
-        cited({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two" }),
-        cited({ title: "Work three", retrievability: "paywalled" })
+        scannedReference({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+        scannedReference({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two" }),
+        scannedReference({ title: "Work three", retrievability: "paywalled" })
       ])
     );
     renderDialog();
@@ -854,7 +842,7 @@ describe("UploadDialog reference checklist", () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf(
         ["one", "two", "three"].map((n) =>
-          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+          scannedReference({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
         )
       )
     );
@@ -889,7 +877,7 @@ describe("UploadDialog reference checklist", () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf(
         ["one", "two", "three"].map((n) =>
-          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+          scannedReference({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
         )
       )
     );
@@ -916,7 +904,7 @@ describe("UploadDialog reference checklist", () => {
     const scan = vi
       .spyOn(v2, "scanReferences")
       .mockRejectedValueOnce(new Error("The model did not answer."))
-      .mockResolvedValue(scanOf([cited({ title: "Work one" })]));
+      .mockResolvedValue(scanOf([scannedReference({ title: "Work one" })]));
     renderDialog();
     await addReport();
     expect(await screen.findByText("The model did not answer.")).toBeInTheDocument();

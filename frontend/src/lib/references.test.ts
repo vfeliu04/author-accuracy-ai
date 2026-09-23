@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ScannedReference } from "../api/types";
+import { scannedReference } from "../test/fixtures";
 import {
   alreadyAdded,
   cleanDoi,
@@ -9,19 +9,6 @@ import {
   stem
 } from "./references";
 
-function ref(over: Partial<ScannedReference> = {}): ScannedReference {
-  return {
-    title: null,
-    authors: [],
-    year: null,
-    doi: null,
-    url: null,
-    entry: "An entry as printed.",
-    retrievability: "unknown",
-    suggested_url: null,
-    ...over
-  };
-}
 
 describe("stem", () => {
   it("drops the last extension only", () => {
