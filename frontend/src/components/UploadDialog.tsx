@@ -254,7 +254,13 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const sourceCount = sources.length + links.length;
   // A link still in the box counts: submit() adds it first, or holds and says why.
   const hasTypedLink = linkText.trim() !== "";
-  const tooManySources = sourceCount > MAX_SOURCES;
+  // A ticked row counts toward the limit now, not on the click: submit() adds
+  // the ticks first, and each has already passed the dialog's link gate, so
+  // what the limit would stop is known before Verify. The hold shows as the
+  // limit's own message, with Verify disabled, until a tick or a source goes
+  // — never as a click that adds what fits and asks for another. A typed link
+  // is checked only on Add or Verify, so it is committed first and counted then.
+  const tooManySources = sourceCount + ticked.length > MAX_SOURCES;
   const tooBig = totalBytes > MAX_TOTAL_BYTES;
   const canSubmit =
     report !== null &&
@@ -272,9 +278,10 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const submit = () => {
     if (!report) return;
     // Ticked rows and a link still in the box were meant to go too, so they
-    // are added first, the ticks then the box; a tick the limit stops, or a
-    // typed link that can't be added or passes the limit, holds the upload
-    // and says why.
+    // are added first, the ticks then the box; a typed link that can't be
+    // added or passes the limit holds the upload and says why. Ticks past the
+    // limit held Verify before this click (tooManySources), so every tick
+    // gets in here; should one not, the upload holds rather than go short.
     let submitted = links;
     if (ticked.length > 0) {
       const { next, capped } = addSuggested(submitted);
