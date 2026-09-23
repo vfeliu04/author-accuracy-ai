@@ -47,7 +47,7 @@ from authorai.references import (
     split_reference_text,
 )
 from authorai.web import ExtractionTimeoutError, handover_file, in_bounded_child
-from tests.conftest import FakeLLM, pdf_from_objects, pdf_with_pages
+from tests.conftest import FakeLLM, pdf_from_objects, pdf_with_pages, reader_that_never_answers
 
 ENTRY = "Smith, J. (2020). Water stress and cities. Journal of Hydrology, 12(3), 1-9."
 
@@ -496,11 +496,6 @@ def test_a_lone_surrogate_from_a_broken_font_is_replaced_so_the_text_can_be_sent
     assert page.strip() == "\U0001f600AA"
 
 
-def _reader_that_never_answers(sender, path, *_args):
-    """A reader holding its whole budget: a file pypdf never finishes with."""
-    threading.Event().wait(60)
-
-
 def _reader_the_kernel_ends(sender, path, *_args, signum: int):
     """A reader the kernel ends by signal: the CPU limit's SIGXCPU, an
     out-of-memory kill."""
@@ -558,7 +553,7 @@ def test_a_page_tree_at_the_ceiling_still_reads_its_last_pages():
 
 
 def test_a_reader_that_overruns_its_budget_is_stopped_and_reads_as_too_costly(monkeypatch):
-    monkeypatch.setattr(references, "_read_in_child", _reader_that_never_answers)
+    monkeypatch.setattr(references, "_read_in_child", reader_that_never_answers)
     before = set(multiprocessing.active_children())
     started = time.perf_counter()
     with pytest.raises(ValueError, match="could not read the PDF: it was too costly to read") as c:

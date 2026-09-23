@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Callable
 
 import pytest
@@ -119,6 +120,14 @@ def pdf_with_pages(pages: list[str]) -> bytes:
             b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
         )
     return pdf_from_objects(objects)
+
+
+def reader_that_never_answers(sender, path, *_args):
+    """A bounded-child target (web.in_bounded_child) holding its whole
+    budget: a file pypdf never finishes with. At module level here so the
+    reference tests and the API tests spawn one stub — a spawn target must
+    be importable by the child."""
+    threading.Event().wait(60)
 
 
 def poison_providers(monkeypatch):

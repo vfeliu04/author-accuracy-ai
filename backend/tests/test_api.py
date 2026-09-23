@@ -6,7 +6,7 @@ against an app that can't actually start.
 """
 
 import json
-import threading
+
 import time
 from pathlib import Path
 
@@ -22,7 +22,7 @@ from authorai.config import Settings
 from authorai.jobs import Worker
 from authorai.main import create_app
 from authorai.references import UNPAYWALL_BASE, Reference, ReferenceList
-from tests.conftest import DIM, FakeLLM, pdf_with_pages, poison_providers
+from tests.conftest import DIM, FakeLLM, pdf_with_pages, poison_providers, reader_that_never_answers
 
 # Routes that are intentionally open (no API key). Everything else must 401.
 OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
@@ -1516,11 +1516,6 @@ def test_reference_scan_rejects_what_it_cannot_read(
     _nothing_written(settings)
 
 
-def _reader_that_never_answers(sender, path, *_args):
-    """A reader holding its whole budget: a file pypdf never finishes with."""
-    threading.Event().wait(60)
-
-
 def test_reference_scan_of_a_report_too_costly_to_read_is_a_400_not_a_500(tmp_path, monkeypatch):
     """The PDF is read in a bounded child (references.read_pages); a file
     that holds the reader past Settings.extract_timeout_seconds is refused
@@ -1529,7 +1524,7 @@ def test_reference_scan_of_a_report_too_costly_to_read_is_a_400_not_a_500(tmp_pa
     from authorai import api as apimod
     from authorai import references as refsmod
 
-    monkeypatch.setattr(refsmod, "_read_in_child", _reader_that_never_answers)
+    monkeypatch.setattr(refsmod, "_read_in_child", reader_that_never_answers)
     monkeypatch.setattr(
         apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
     )
