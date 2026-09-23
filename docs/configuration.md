@@ -56,7 +56,7 @@ How the ingest step fetches links added as sources (`backend/authorai/fetch.py`)
 
 ## Pipeline models
 
-The split is deliberate: the accuracy-critical judgments (extraction, verdicts, validity) run on the frontier model; cheap bounded tasks (captions, bibliographic metadata) run on Haiku.
+The split is deliberate: the accuracy-critical judgments (extraction, verdicts, validity) run on the frontier model; cheap bounded tasks (captions, bibliographic metadata, the upload dialog's reference scan) run on Haiku.
 
 | Env var | Default | What it does |
 |---|---|---|
@@ -65,6 +65,7 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | `AUTHORAI_VALIDITY_MODEL` | `claude-opus-5` | The validity rubric over the whole report |
 | `AUTHORAI_CAPTION_MODEL` | `claude-haiku-4-5` | Figure descriptions (vision) baked into chunk text |
 | `AUTHORAI_METADATA_MODEL` | `claude-haiku-4-5` | Bibliographic metadata extraction for source credibility. A web page uses it only when its markup declares nothing beyond a title |
+| `AUTHORAI_REFERENCES_MODEL` | `claude-haiku-4-5` | The upload dialog's reference scan (`POST /api/references/scan`): reads the report's printed reference list into fields — title, authors, year, and the DOI or address the entry prints. The same kind of bounded task as metadata extraction |
 
 ## Scoring
 
@@ -73,7 +74,7 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | `AUTHORAI_VALIDITY_WEIGHTS` | `coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1` | `name:weight` pairs for the validity components. Parsed loudly: unknown names, duplicates, non-finite/negative weights, or a sum ≠ 1 raise instead of falling back |
 | `AUTHORAI_AUTHORITY_TIER1` | `FAO,Fao,Food and Agriculture Organization,UN,United Nations,World Bank,IMF,WHO,World Health Organization,UNICEF,Unicef,OECD,Oecd,Welthungerhilfe,WMO,World Meteorological Organization,UNCCD` | Publishers granted top authority points. Matched as consecutive word-boundary phrases (`UN` matches `U.N.` but never `University`); keep needles as specific as the real names allow. A needle written entirely in capitals is an acronym and matches only in capitals (`WHO` matches `WHO` but not `Who What Wear`; `UN` not the article in `Un Mundo`); other needles ignore case. To accept another spelling of an acronym, add it as its own needle: the defaults carry the mixed-case spellings sites use for `FAO`, `UNICEF`, and `OECD` (`Fao`, `Unicef`, `Oecd`) and, in tier 2, `BBC` (`Bbc`), which ignore case like any needle not written in capitals. `Who` and `Un` are never added, since they would match the ordinary words. Known residual: a publisher styled entirely in capitals (`WHO WHAT WEAR`) still matches |
 | `AUTHORAI_AUTHORITY_TIER2` | `Reuters,Associated Press,BBC,Bbc,Nature,Science,Lancet,Elsevier,National Drought Mitigation Center,NDMC,International Water Management Institute,IWMI,CGIAR,World Climate Research Programme,WCRP` | Second-tier publishers, same matching rules |
-| `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers) |
+| `AUTHORAI_CROSSREF_MAILTO` | unset | Contact email for polite Crossref access (source verification tiers). Also the contact email Unpaywall requires: the reference scan looks up free copies of the works a report cites only when it is set — unset, the scan still lists them, with `lookup.status` `unconfigured` and every reference `unknown` |
 
 ## Jobs
 

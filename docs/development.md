@@ -12,7 +12,7 @@ cd backend
 pip install -e ".[dev]"        # after any dependency change (deps are pinned in pyproject.toml)
 ```
 
-Python ≥ 3.11 (CI uses 3.11). Notable pins in `pyproject.toml`: `torch`/`torchvision` are declared explicitly because Docling's default layout engine needs them at runtime but does not declare them; `python-multipart` is required by FastAPI for the upload endpoint; `trafilatura==2.2.0` extracts the main content of web pages. Docling's HTML backend was rejected for web pages because it keeps `<footer>` as content and treats `<nav>`/`<aside>` only as paragraph breaks, so site chrome would reach chunks and the credibility imprint scan. The trafilatura pin is exact on purpose: `web.py` also imports trafilatura's Markdown writer from an internal module (`trafilatura.xml.xmltotxt`), so a version bump means re-running the `tests/test_web*.py` suites before trusting it. `lxml==6.1.1` is declared although trafilatura already installs it, because `web.py` imports `lxml.etree` directly to apply its tree edits in one linear pass. The dev extra pins `cryptography` for tests only: it makes a throwaway loopback TLS certificate at test time, so the fetch watchdog's HTTPS path is tested without committing a private key.
+Python ≥ 3.11 (CI uses 3.11). Notable pins in `pyproject.toml`: `torch`/`torchvision` are declared explicitly because Docling's default layout engine needs them at runtime but does not declare them; `python-multipart` is required by FastAPI for the upload endpoint; `trafilatura==2.2.0` extracts the main content of web pages. Docling's HTML backend was rejected for web pages because it keeps `<footer>` as content and treats `<nav>`/`<aside>` only as paragraph breaks, so site chrome would reach chunks and the credibility imprint scan. The trafilatura pin is exact on purpose: `web.py` also imports trafilatura's Markdown writer from an internal module (`trafilatura.xml.xmltotxt`), so a version bump means re-running the `tests/test_web*.py` suites before trusting it. `lxml==6.1.1` is declared although trafilatura already installs it, because `web.py` imports `lxml.etree` directly to apply its tree edits in one linear pass. `pypdf==3.17.4` reads the closing pages of a report for the upload dialog's reference scan: Docling's layout pipeline is seconds per page, far too slow for a dialog, and pypdf is not a Docling dependency (Docling reads PDFs through pypdfium2), so it is declared. The dev extra pins `cryptography` for tests only: it makes a throwaway loopback TLS certificate at test time, so the fetch watchdog's HTTPS path is tested without committing a private key.
 
 Required environment variables (put them in `backend/.env` — settings are anchored to that file regardless of CWD; prefix is `AUTHORAI_` except the provider keys, which are read unprefixed):
 
@@ -21,7 +21,7 @@ Required environment variables (put them in `backend/.env` — settings are anch
 | `ANTHROPIC_API_KEY` | All Claude calls — the client refuses to construct without it |
 | `OPENAI_API_KEY` | Embeddings — same refusal |
 | `AUTHORAI_API_KEY` | The HTTP API's shared secret; **the server refuses to start without it** (fail-closed) |
-| `AUTHORAI_CROSSREF_MAILTO` | Optional but polite — anonymous Crossref is slower |
+| `AUTHORAI_CROSSREF_MAILTO` | Optional but polite — anonymous Crossref is slower. Also the contact email Unpaywall requires: without it the upload dialog's reference scan lists the report's cited works but looks up no free copies |
 
 Everything else (models, paths, weights, limits) has defaults in `backend/authorai/config.py`.
 
@@ -118,6 +118,8 @@ Also: the server is **single-process by design** — startup recovery re-queues 
 Sample PDFs live in `example_sources/`, one folder per test set. From `example source one/`, upload `World_Hunger_Fake.pdf` as the report and the real PDFs (`2025_world_hunger.pdf`, `disruptions_in_the_food_supply_chain.pdf`, …) as sources — via the UI at `:5173`, or `POST /api/runs` directly. `example source two/` holds a second set (six real water/drought sources for `Water_Stress_Fake_Report.pdf`, which sits at the `example_sources/` root next to its answer key). The pipeline runs as one background job; the dashboard polls the progress feed and flips to the full report on DONE. A real run makes paid Anthropic + OpenAI calls proportional to document size.
 
 A source can also be a link to a public web page: paste it into the dialog's **Add a link** field, or send it as a `source_urls` part. The ingest step fetches the links before it processes any document and stops at the first one that can't be read, so a bad link fails the run within seconds; the error names the link as added and, when the link redirected, the address it ended up at. Reading a fetched page is capped at `AUTHORAI_EXTRACT_TIMEOUT_SECONDS` (60 s).
+
+Picking the report in the dialog also runs the reference scan (`POST /api/references/scan`): the dialog lists the works the report cites that are not among your sources and offers the free copies as links. The scan stores nothing; the free-copy lookup needs `AUTHORAI_CROSSREF_MAILTO`, and without it every cited work is listed as unknown.
 
 ## Related docs
 

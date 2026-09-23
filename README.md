@@ -5,6 +5,8 @@
 
 Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its sources — PDF files, links to web pages, or both; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
 
+When you pick the report in the upload dialog, the app reads its own reference list and shows the works it cites that are not among your sources, offering the ones with a free copy online (looked up through Unpaywall) as links you can add with a click — nothing is stored until you start the verification.
+
 ![Run view: sources with credibility tiers, grounded chat, score rings](docs/screenshots/run.png)
 
 ## How it works
