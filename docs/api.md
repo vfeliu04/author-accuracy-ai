@@ -27,7 +27,7 @@ curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 | Limit | Default | Enforced |
 |---|---|---|
 | Whole request (`Content-Length`) | 220,000,000 bytes (`max_request_bytes`) | In the middleware, before the body is read → 413 |
-| Per uploaded file | 50,000,000 bytes (`max_upload_bytes`) | In `POST /api/runs`, from the spooled part's size → 413 |
+| Per uploaded file | 50,000,000 bytes (`max_upload_bytes`) | In `POST /api/runs` and `POST /api/references/scan`, from the spooled part's size → 413 |
 | Sources per run, files and links together | 20 (`max_source_files`) | In `POST /api/runs` → 400 |
 | Link length | 2048 characters, as given and once encoded | In `POST /api/runs` → 400 |
 | Run title | 200 characters | In `POST /api/runs` → 400 |
@@ -80,7 +80,7 @@ All errors are JSON with a `detail` key.
 
 ### `POST /api/references/scan` → 200
 
-A pre-upload aid: the upload dialog sends the report PDF the moment it is picked, and shows the works the report cites that are not among the user's sources, offering the ones with a free copy online as links. Multipart form with one part, `report`, under the same rules as the report of `POST /api/runs` (`.pdf` extension, `%PDF-` magic bytes, ≤ `max_upload_bytes`; 413 over the cap, 422 when the part is missing). The middleware's 401 and whole-request 413 apply as to every `/api` route.
+A pre-upload aid: the upload dialog sends the report PDF the moment it is picked, and shows the works the report cites that are not among the user's sources, offering the ones with a free copy online as links. Multipart form with one part, `report`, under the same rules as the report of `POST /api/runs` (`.pdf` extension, `%PDF-` magic bytes, ≤ `max_upload_bytes`; 413 over the cap, 422 when the part is missing). The middleware's 401 and whole-request 413 apply as to every `/api` route. As in `POST /api/runs`, the per-file cap is checked from the spooled part's size, so a report between 50 MB and the 220 MB whole-request cap is received and spooled to disk before its 413 is answered — accepted, since the scan then reads nothing and stores nothing.
 
 **The scan stores nothing.** It creates no run, upload or job row (the handler has no database dependency, so it cannot), writes no file under `uploads_dir` (the uploaded part is read in place), never fetches a cited work, and caches nothing — a second scan of the same file reads it and asks the model again. Only the PDF's closing pages are read: at most the last 600 pages, with pypdf rather than the ingest pipeline's layout parser, so the answer arrives while the user is still choosing sources. The text the model reads starts at the report's **last** reference-list heading (a line reading `References`, `Bibliography`, `Works Cited`, `Reference list` or `Literature cited`, optionally numbered) — or at the earliest such heading within 30,000 characters before it, since a bibliography that spans several pages prints its heading on each page as a running header, while a contents-page mention farther back stays excluded — and is capped at 30,000 characters; a report without such a heading gets the last 30,000 characters of the document instead. A file with no extractable text at all (a scanned PDF) is answered without a model call, so no bibliography can be invented for it. The model that reads the printed entries into fields is `references_model` (`AUTHORAI_REFERENCES_MODEL`, default `claude-haiku-4-5`; see [configuration.md](configuration.md)).
 
