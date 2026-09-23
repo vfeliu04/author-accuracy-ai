@@ -870,4 +870,23 @@ describe("UploadDialog reference checklist", () => {
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     expect(create.mock.calls[0][2]).toEqual(["https://a.org/one", "https://a.org/two"]);
   });
+
+  it("offers to try a failed scan again, and lists the works when it answers", async () => {
+    const scan = vi
+      .spyOn(v2, "scanReferences")
+      .mockRejectedValueOnce(new Error("The model did not answer."))
+      .mockResolvedValue(scanOf([cited({ title: "Work one" })]));
+    renderDialog();
+    await addReport();
+    expect(await screen.findByText("The model did not answer.")).toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.getByText("Work one")).toBeInTheDocument();
+    expect(screen.queryByText("The model did not answer.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(scan.mock.calls[1][0].name).toBe("report.pdf");
+  });
 });

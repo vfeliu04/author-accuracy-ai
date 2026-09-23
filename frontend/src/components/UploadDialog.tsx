@@ -298,7 +298,11 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     );
   };
 
-  const scanError = scanMessage(scan.error);
+  // While a scan runs — the first, or one asked for again after a failure —
+  // the last failure is not the news; TanStack keeps `error` set until the
+  // new answer lands.
+  const scanning = scan.isFetching;
+  const scanError = scanning ? null : scanMessage(scan.error);
   const lookup = scan.data?.lookup;
   const cut = scan.data ? limitsNote(scan.data.limits) : null;
 
@@ -491,10 +495,15 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               {scan.data ? ` (${missing.length})` : ""}
             </span>
           ) : null}
-          {scan.isLoading ? (
-            <p className="modal__count">Scanning the report's references…</p>
+          {scanning ? <p className="modal__count">Scanning the report's references…</p> : null}
+          {scanError !== null ? (
+            <>
+              <p className="modal__error">{scanError}</p>
+              <button type="button" className="btn btn--ghost" onClick={() => void scan.refetch()}>
+                Try again
+              </button>
+            </>
           ) : null}
-          {scanError !== null ? <p className="modal__error">{scanError}</p> : null}
           {scan.data && scan.data.references.length === 0 ? (
             <p className="modal__count">No reference list found in this report</p>
           ) : null}
