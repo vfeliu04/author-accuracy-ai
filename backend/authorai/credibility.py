@@ -205,7 +205,7 @@ def _same_isbn(ours: str, theirs: str) -> bool:
     return our_core is not None and our_core == their_core
 
 
-def _get_json_with_retries(
+def get_json_with_retries(
     client: httpx.Client, url: str, params: dict | None, *, retries: int, provider: str
 ) -> dict | None:
     """The one registry-GET policy, shared by every provider client: 200 is a
@@ -213,7 +213,9 @@ def _get_json_with_retries(
     429/5xx and transport failures retry with backoff and then RAISE —
     treating a throttled or down registry as "not found" would silently
     downgrade verification tiers and make credibility scores non-reproducible
-    between runs of identical inputs."""
+    between runs of identical inputs. Public because the bibliography scan's
+    Unpaywall client (references.py) is a registry client too: one policy,
+    not a second copy that can drift."""
     failure = ""
     for attempt in range(retries + 1):
         try:
@@ -242,6 +244,10 @@ def _get_json_with_retries(
         if attempt < retries:
             time.sleep(1.0 * (attempt + 1))
     raise RuntimeError(f"{provider} gave no answer after {retries + 1} attempts ({url}): {failure}")
+
+
+# The original private name, kept for the clients in this module.
+_get_json_with_retries = get_json_with_retries
 
 
 class IsbnClient:

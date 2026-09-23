@@ -11,14 +11,27 @@ decides where the bibliography is, caps what the model sees and returns, and
 checks every address before it is offered. The prompt is the mirror image of
 credibility.METADATA_SYSTEM, which tells the model to IGNORE reference lists:
 here every entry describes a work the report CITES, never the report.
+
+Retrievability comes from Unpaywall, keyed by the DOI an entry PRINTS: a free
+copy (a PDF, or a landing page — for many genuinely open works Unpaywall's
+`url_for_pdf` is null and `url` is the landing page) is offered as a link the
+user may add; a closed work is listed as paywalled; a work without a DOI, or
+one the registry does not know, is unknown. Nothing is fetched here: an
+address is checked for syntax only, by the same gate a pasted link passes.
 """
 
 import re
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import BinaryIO, Literal
+from urllib.parse import quote
 
+import httpx
 from pydantic import BaseModel, Field, field_validator
 from pypdf import PdfReader
 
+from authorai.credibility import clean_doi, get_json_with_retries
+from authorai.fetch import validate_source_url
 from authorai.llm import LLM
 from authorai.log import setup_logger
 
@@ -170,3 +183,182 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> ReferenceList
         )
         result = ReferenceList(references=result.references[:MAX_REFERENCES])
     return result
+
+
+# --- Unpaywall ------------------------------------------------------------------
+
+UNPAYWALL_BASE = "https://api.unpaywall.org"
+UNPAYWALL_TIMEOUT = 10.0
+UNPAYWALL_RETRIES = 2
+# httpx.Client is thread-safe; four lookups at a time keep a long list to
+# seconds instead of a serial ten-per-second crawl, without leaning on the
+# registry (Unpaywall asks for polite use, not a rate).
+LOOKUP_WORKERS = 4
+
+Retrievability = Literal["pdf", "landing", "paywalled", "unknown"]
+Resolved = tuple[Retrievability, str | None]
+
+NOT_RESOLVED: Resolved = ("unknown", None)
+
+
+class UnpaywallClient:
+    """DOI → Unpaywall record, under the registry-GET policy credibility.py
+    established: 200 is a payload; 404 (an HTML page, live) is an answer,
+    None; 429/5xx and transport failures retry, then raise. A contact email
+    is required, not polite: Unpaywall answers HTTP 422 without one, so an
+    empty address is refused at construction rather than on every request."""
+
+    def __init__(self, mailto: str, timeout: float = UNPAYWALL_TIMEOUT):
+        if not mailto or not mailto.strip():
+            raise ValueError(
+                "Unpaywall needs a contact email (AUTHORAI_CROSSREF_MAILTO) — "
+                "it refuses requests without one"
+            )
+        self._mailto = mailto.strip()
+        self._client = httpx.Client(
+            base_url=UNPAYWALL_BASE,
+            timeout=timeout,
+            headers={"User-Agent": f"AuthorAI/2.0 (mailto:{self._mailto})"},
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def by_doi(self, doi: str) -> dict | None:
+        # clean_doi rejects anything not DOI-shaped BEFORE it enters the path:
+        # the DOI is model-extracted text, and an unvalidated string would
+        # look up something else (a `?` starts the query string).
+        cleaned = clean_doi(doi)
+        if cleaned is None:
+            return None
+        return get_json_with_retries(
+            self._client,
+            f"/v2/{quote(cleaned, safe='/')}",
+            {"email": self._mailto},
+            retries=UNPAYWALL_RETRIES,
+            provider="Unpaywall",
+        )
+
+
+def _usable(url: str, *, what: str) -> str | None:
+    """The address in the form a pasted link takes, or None when the syntax
+    gate refuses it — an address the app would not accept as a link is not
+    offered as one."""
+    try:
+        return validate_source_url(url)
+    except ValueError as exc:
+        logger.warning("dropping the %s address Unpaywall offered: %s", what, exc)
+        return None
+
+
+def retrievability(record: dict | None) -> Resolved:
+    """What the record lets us offer: the kind of free copy and its address.
+
+    A PDF beats a landing page; a landing page is still a free copy. A record
+    that does not say whether the work is open is unknown, not paywalled —
+    paywalled is a claim about the work, made only when the registry makes it.
+    An open work whose every address fails the gate is unknown too, since an
+    offer needs an address.
+    """
+    if record is None:
+        return NOT_RESOLVED
+    is_oa = record.get("is_oa")
+    if is_oa is False:
+        return ("paywalled", None)
+    if is_oa is not True:
+        return NOT_RESOLVED
+    best = record.get("best_oa_location") or {}
+    candidates: list[tuple[Retrievability, str | None]] = [
+        ("pdf", best.get("url_for_pdf")),
+        ("landing", best.get("url_for_landing_page")),
+        ("landing", best.get("url")),
+    ]
+    for kind, url in candidates:
+        if not url:
+            continue
+        usable = _usable(url, what=kind)
+        if usable is not None:
+            return (kind, usable)
+    return NOT_RESOLVED
+
+
+def printed_url(reference: Reference) -> str | None:
+    """The address a DOI-less entry prints, syntax-checked, or None.
+
+    Only without a DOI: with one, the registry's verdict rules (a paywalled
+    work is never offered, whatever its entry prints). The address is not
+    checked against anything — the frontend labels it "printed in the entry,
+    not checked" — so it passes exactly the gate a pasted link passes.
+    """
+    if reference.doi or not reference.url:
+        return None
+    try:
+        return validate_source_url(reference.url)
+    except ValueError as exc:
+        logger.info("not offering the printed address: %s", exc)
+        return None
+
+
+class RegistryUnavailable(RuntimeError):
+    """Unpaywall gave no answer for a DOI (throttled, down, or unreachable
+    after retries). Carries what WAS resolved before the failure, aligned with
+    the references given, so the caller can still show the list — the
+    citations are useful without retrievability — under an explicit flag,
+    never as a silent "unknown"."""
+
+    def __init__(self, message: str, resolved: list[Resolved]):
+        super().__init__(message)
+        self.resolved = resolved
+
+
+class _Skipped(Exception):
+    """A lookup that never ran: the registry had already failed."""
+
+
+def lookup_retrievability(client: UnpaywallClient, references: list[Reference]) -> list[Resolved]:
+    """Retrievability for every reference, in order — a lookup for each
+    printed DOI, LOOKUP_WORKERS at a time, the rest NOT_RESOLVED.
+
+    Capped at MAX_REFERENCES (extract_references already trims; this is the
+    second wall). The first registry failure ends the whole lookup: pending
+    lookups are cancelled, in-flight ones finish (no request is abandoned
+    mid-way, and nothing runs on after the caller has the answer), and
+    RegistryUnavailable carries every verdict that was reached.
+    """
+    results: list[Resolved] = [NOT_RESOLVED] * len(references)
+    # Raised by the failing lookup itself, before its worker returns to the
+    # queue: a worker that then dequeues a pending lookup sees it and makes
+    # no request. Cancelling from this thread alone is a race the worker wins.
+    failed = threading.Event()
+
+    def lookup(doi: str) -> dict | None:
+        if failed.is_set():
+            raise _Skipped()
+        try:
+            return client.by_doi(doi)
+        except RuntimeError:
+            failed.set()
+            raise
+
+    pool = ThreadPoolExecutor(max_workers=LOOKUP_WORKERS)
+    futures: dict[Future, int] = {
+        pool.submit(lookup, reference.doi): index
+        for index, reference in enumerate(references[:MAX_REFERENCES])
+        if reference.doi
+    }
+    try:
+        for future in as_completed(futures):
+            try:
+                record = future.result()
+            except _Skipped:
+                continue
+            results[futures[future]] = retrievability(record)
+    except RuntimeError as exc:
+        pool.shutdown(wait=True, cancel_futures=True)
+        for future, index in futures.items():
+            if future.done() and not future.cancelled() and future.exception() is None:
+                results[index] = retrievability(future.result())
+        raise RegistryUnavailable(str(exc), results) from exc
+    finally:
+        pool.shutdown(wait=True)
+    return results

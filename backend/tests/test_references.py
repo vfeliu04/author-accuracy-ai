@@ -4,19 +4,28 @@ for HTTP, FakeLLM for the model, a hand-built PDF for pypdf)."""
 
 import io
 import json
+import threading
 
+import httpx
 import pytest
+import respx
 
 from authorai import references
 from authorai.references import (
     MAX_REFERENCES,
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
+    UNPAYWALL_BASE,
     Reference,
     ReferenceList,
+    RegistryUnavailable,
+    UnpaywallClient,
     extract_references,
+    lookup_retrievability,
+    printed_url,
     read_pages,
     reference_text,
+    retrievability,
 )
 from tests.conftest import FakeLLM, pdf_with_pages
 
@@ -208,3 +217,281 @@ def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():
         assert keyword not in dumped, keyword
     assert references.MAX_REFERENCES == 80
     assert references.REFERENCE_MAX_PAGES == 600
+
+
+# --- Unpaywall: the one registry-GET policy, on a second registry --------------
+
+MAILTO = "checker@example.org"
+
+
+def _unpaywall() -> UnpaywallClient:
+    return UnpaywallClient(MAILTO)
+
+
+def _record(is_oa=True, url_for_pdf=None, url_for_landing_page=None, url=None) -> dict:
+    """An Unpaywall v2 record in the shape the live API answers with: a
+    closed work has `best_oa_location: null`; an open one names its best copy
+    with `url_for_pdf` NULL for many genuinely open works (the heliyon case)
+    and `url` the landing page."""
+    if not is_oa:
+        return {"is_oa": False, "best_oa_location": None}
+    return {
+        "is_oa": True,
+        "best_oa_location": {
+            "url_for_pdf": url_for_pdf,
+            "url_for_landing_page": url_for_landing_page,
+            "url": url,
+        },
+    }
+
+
+def _no_sleep(monkeypatch):
+    # The retry policy is credibility's; its backoff sleeps through that module.
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+
+
+@respx.mock
+def test_unpaywall_timeout_retries_then_raises_loudly(monkeypatch):
+    """An unreachable Unpaywall is an outage, not 'paywalled' — silently
+    listing every cited work as unretrievable would hide the failure."""
+    _no_sleep(monkeypatch)
+    route = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/slow")
+    route.side_effect = httpx.ConnectTimeout("slow")
+    with pytest.raises(RuntimeError, match="no answer after 3 attempts"):
+        _unpaywall().by_doi("10.1000/slow")
+    assert route.call_count == 3  # initial + 2 retries
+
+
+@respx.mock
+def test_unpaywall_throttling_retries_then_succeeds(monkeypatch):
+    _no_sleep(monkeypatch)
+    route = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/busy")
+    route.side_effect = [
+        httpx.Response(429),
+        httpx.Response(200, json=_record(url_for_pdf="https://x.org/busy.pdf")),
+    ]
+    assert _unpaywall().by_doi("10.1000/busy") == _record(url_for_pdf="https://x.org/busy.pdf")
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_unpaywall_server_errors_raise_after_retries(monkeypatch):
+    _no_sleep(monkeypatch)
+    route = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/down").mock(return_value=httpx.Response(503))
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        _unpaywall().by_doi("10.1000/down")
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_unpaywall_malformed_200_body_raises_instead_of_reading_as_not_found():
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/xyz").mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(RuntimeError, match="non-object body"):
+        _unpaywall().by_doi("10.1000/xyz")
+
+
+@respx.mock
+def test_an_unknown_doi_is_an_html_404_and_reads_as_not_found():
+    """Live: Unpaywall answers an unknown DOI with HTTP 404 and an HTML body.
+    That is an answer — None — and the body is never parsed as JSON (which
+    would raise on the HTML)."""
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/nope").mock(
+        return_value=httpx.Response(
+            404,
+            text="<html><body><h1>Not Found</h1></body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    assert _unpaywall().by_doi("10.1000/nope") is None
+
+
+@respx.mock
+def test_the_request_names_the_operator_and_cleans_the_doi():
+    route = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/abc").mock(
+        return_value=httpx.Response(200, json=_record())
+    )
+    _unpaywall().by_doi("https://doi.org/10.1000/abc")  # the URL prefix is stripped first
+    request = route.calls.last.request
+    assert request.url.params["email"] == MAILTO
+    assert request.headers["User-Agent"] == f"AuthorAI/2.0 (mailto:{MAILTO})"
+
+
+@respx.mock
+def test_a_malformed_doi_makes_no_request():
+    # No route mocked: any HTTP call would make respx raise.
+    for bad in ("not-a-doi", "10.1/x", "https://doi.org/nope", "10.1000/with space"):
+        assert _unpaywall().by_doi(bad) is None
+
+
+@respx.mock
+def test_an_empty_mailto_is_refused_before_any_request():
+    """Unpaywall answers HTTP 422 without an email; refusing at construction
+    is the loud version, and no route is mocked so a request would fail."""
+    for empty in ("", "   "):
+        with pytest.raises(ValueError, match="contact email"):
+            UnpaywallClient(empty)
+
+
+# --- retrievability: what the record lets us offer -------------------------------
+
+
+def test_no_record_is_unknown():
+    assert retrievability(None) == ("unknown", None)
+
+
+def test_a_closed_work_is_paywalled():
+    assert retrievability(_record(is_oa=False)) == ("paywalled", None)
+
+
+def test_a_record_that_does_not_say_is_unknown_not_paywalled():
+    assert retrievability({}) == ("unknown", None)
+    assert retrievability({"is_oa": None}) == ("unknown", None)
+
+
+def test_a_free_pdf_wins_over_the_landing_page():
+    record = _record(url_for_pdf="https://x.org/a.pdf", url_for_landing_page="https://x.org/a")
+    assert retrievability(record) == ("pdf", "https://x.org/a.pdf")
+
+
+def test_the_heliyon_shape_offers_the_landing_page():
+    """Live: 10.1016/j.heliyon.2024.e34730 is open access with url_for_pdf
+    null and `url` the doi.org link — a landing page, still a free copy."""
+    record = _record(url="https://doi.org/10.1016/j.heliyon.2024.e34730")
+    assert retrievability(record) == ("landing", "https://doi.org/10.1016/j.heliyon.2024.e34730")
+
+
+def test_an_open_work_with_no_address_is_unknown():
+    assert retrievability(_record()) == ("unknown", None)
+
+
+def test_an_unusable_address_is_dropped_and_the_next_one_tried(references_log):
+    """Every suggested address passes the same syntax gate a pasted link does;
+    one the gate refuses is never offered, and the record's other address is."""
+    assert retrievability(_record(url_for_pdf="ftp://x.org/a.pdf")) == ("unknown", None)
+    assert "ftp://x.org/a.pdf" in references_log.text
+    record = _record(url_for_pdf="javascript:alert(1)", url_for_landing_page="https://x.org/a")
+    assert retrievability(record) == ("landing", "https://x.org/a")
+
+
+def test_a_suggested_address_is_the_normalized_form():
+    record = _record(url_for_pdf="HTTPS://X.org/a.pdf#page=3")
+    assert retrievability(record) == ("pdf", "https://x.org/a.pdf")
+
+
+def test_printed_url_is_offered_only_when_there_is_no_doi_to_check():
+    """A reference with no DOI but a printed address is addable but UNCHECKED
+    (the frontend labels it so); with a DOI the lookup's verdict rules."""
+    assert printed_url(Reference(entry="e", url="https://x.org/r#top")) == "https://x.org/r"
+    assert printed_url(Reference(entry="e", url="https://x.org/r", doi="10.1000/x")) is None
+    assert printed_url(Reference(entry="e")) is None
+    assert printed_url(Reference(entry="e", url="not a url")) is None
+
+
+# --- the pooled lookup ----------------------------------------------------------
+
+
+@respx.mock
+def test_lookups_run_only_for_dois_and_stay_aligned_with_the_references():
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/open").mock(
+        return_value=httpx.Response(200, json=_record(url_for_pdf="https://x.org/open.pdf"))
+    )
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/closed").mock(
+        return_value=httpx.Response(200, json=_record(is_oa=False))
+    )
+    refs = [
+        Reference(entry="closed", doi="10.1000/closed"),
+        Reference(entry="no doi", url="https://x.org/p"),
+        Reference(entry="open", doi="10.1000/open"),
+        Reference(entry="bad doi", doi="nope"),
+    ]
+    client = _unpaywall()
+    try:
+        resolved = lookup_retrievability(client, refs)
+    finally:
+        client.close()
+    assert resolved == [
+        ("paywalled", None),
+        ("unknown", None),
+        ("pdf", "https://x.org/open.pdf"),
+        ("unknown", None),
+    ]
+
+
+@respx.mock
+def test_the_lookup_is_capped_at_max_references(monkeypatch):
+    monkeypatch.setattr(references, "MAX_REFERENCES", 2)
+    for name in ("one", "two"):
+        respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/{name}").mock(
+            return_value=httpx.Response(200, json=_record(is_oa=False))
+        )
+    # No route for the third: a request for it would make respx raise.
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("one", "two", "three")]
+    assert lookup_retrievability(_unpaywall(), refs) == [
+        ("paywalled", None),
+        ("paywalled", None),
+        ("unknown", None),
+    ]
+
+
+@respx.mock
+def test_the_first_outage_cancels_the_rest_and_keeps_what_was_resolved(monkeypatch):
+    """One DOI's registry failure ends the lookup: lookups not yet started
+    are never requested, in-flight ones are allowed to finish, and the error
+    carries every verdict that was reached so the caller can still show the
+    list — flagged, never silently 'unknown'.
+
+    The failing lookup is held until every other worker has a lookup in
+    flight, so the failure lands with the pool full and two lookups queued.
+    """
+    _no_sleep(monkeypatch)
+    in_flight = references.LOOKUP_WORKERS - 1
+    started = 0
+    lock = threading.Lock()
+    all_started = threading.Event()
+
+    def slow(request):
+        nonlocal started
+        with lock:
+            started += 1
+            if started == in_flight:
+                all_started.set()
+        # Hold the worker while the failure lands; not time.sleep, which the
+        # retry backoff patch has replaced.
+        threading.Event().wait(0.5)
+        return httpx.Response(200, json=_record(url_for_pdf="https://x.org/slow.pdf"))
+
+    def fail(request):
+        assert all_started.wait(2), "the slow lookups never started"
+        return httpx.Response(503)
+
+    down = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/down").mock(side_effect=fail)
+    slow_route = respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/10\.1000/slow\d").mock(
+        side_effect=slow
+    )
+    late = respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/10\.1000/late\d").mock(
+        return_value=httpx.Response(200, json=_record(is_oa=False))
+    )
+    names = ["down", *(f"slow{i}" for i in range(in_flight)), "late1", "late2"]
+    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in names]
+    client = _unpaywall()
+    try:
+        with pytest.raises(RegistryUnavailable, match="HTTP 503") as caught:
+            lookup_retrievability(client, refs)
+    finally:
+        client.close()
+    assert down.call_count == 3  # initial + 2 retries, then the outage
+    assert slow_route.call_count == in_flight
+    assert late.call_count == 0  # queued behind the failure: never requested
+    assert caught.value.resolved == [
+        ("unknown", None),
+        *[("pdf", "https://x.org/slow.pdf")] * in_flight,
+        ("unknown", None),
+        ("unknown", None),
+    ]
+
+
+def test_registry_unavailable_is_a_runtime_error_carrying_the_partial_result():
+    exc = RegistryUnavailable("Unpaywall gave no answer", [("unknown", None)])
+    assert isinstance(exc, RuntimeError)
+    assert str(exc) == "Unpaywall gave no answer"
+    assert exc.resolved == [("unknown", None)]
