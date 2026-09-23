@@ -312,10 +312,6 @@ def get_json_with_retries(
     raise RuntimeError(f"{provider} gave no answer after {retries + 1} attempts ({url}): {failure}")
 
 
-# The original private name, kept for the clients in this module.
-_get_json_with_retries = get_json_with_retries
-
-
 class IsbnClient:
     """ISBN resolution: Open Library first, Google Books as fallback.
 
@@ -341,7 +337,7 @@ class IsbnClient:
         self._client.close()
 
     def _get_json(self, url: str, params: dict) -> dict | None:
-        return _get_json_with_retries(
+        return get_json_with_retries(
             self._client, url, params, retries=ISBN_RETRIES, provider="ISBN provider"
         )
 
@@ -437,7 +433,7 @@ class CrossrefClient:
         self._client.close()
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
-        payload = _get_json_with_retries(
+        payload = get_json_with_retries(
             self._client, path, params, retries=CROSSREF_RETRIES, provider="Crossref"
         )
         return payload.get("message") if payload else None
