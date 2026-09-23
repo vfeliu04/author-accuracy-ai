@@ -1123,6 +1123,35 @@ def test_an_open_work_with_no_address_is_unknown():
     assert retrievability(_record()) == ("unknown", None)
 
 
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"is_oa": True, "best_oa_location": "https://x.org/a.pdf"},
+        {"is_oa": True, "best_oa_location": [{"url_for_pdf": "https://x.org/a.pdf"}]},
+        {"is_oa": True, "best_oa_location": {"url_for_pdf": 123}},
+        {"is_oa": True, "best_oa_location": {"url_for_pdf": True}},
+        {"is_oa": True, "best_oa_location": {"url_for_pdf": ["https://x.org/a.pdf"]}},
+        {"is_oa": True, "best_oa_location": {"url_for_pdf": {"url": "https://x.org/a.pdf"}}},
+    ],
+    ids=["location-str", "location-list", "url-int", "url-bool", "url-list", "url-dict"],
+)
+def test_a_record_of_the_wrong_shape_is_unknown_never_an_exception(record, references_log):
+    """The registry's record is trusted for its VALUES, never its types: a
+    best_oa_location that is not an object, or an address that is not a
+    string, reads as no address — with a warning — rather than raising in
+    the caller's thread, where an exception is the scan's 500."""
+    assert retrievability(record) == ("unknown", None)
+    assert "WARNING" in references_log.text
+
+
+def test_a_wrong_shaped_address_does_not_hide_the_next_one():
+    record = {
+        "is_oa": True,
+        "best_oa_location": {"url_for_pdf": 123, "url_for_landing_page": "https://x.org/a"},
+    }
+    assert retrievability(record) == ("landing", "https://x.org/a")
+
+
 def test_an_unusable_address_is_dropped_and_the_next_one_tried(references_log):
     """Every suggested address passes the same syntax gate a pasted link does;
     one the gate refuses is never offered, and the record's other address is."""

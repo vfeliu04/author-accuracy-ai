@@ -656,7 +656,11 @@ def retrievability(record: dict | None) -> Resolved:
     that does not say whether the work is open is unknown, not paywalled —
     paywalled is a claim about the work, made only when the registry makes it.
     An open work whose every address fails the gate is unknown too, since an
-    offer needs an address.
+    offer needs an address. The record is trusted for its values, never its
+    types: get_json_with_retries guarantees an object at the top, and here a
+    `best_oa_location` that is not one, or an address that is not a string,
+    is no address (a warning) — this runs in the caller's thread, where an
+    exception would be the scan's 500.
     """
     if record is None:
         return NOT_RESOLVED
@@ -665,14 +669,21 @@ def retrievability(record: dict | None) -> Resolved:
         return ("paywalled", None)
     if is_oa is not True:
         return NOT_RESOLVED
-    best = record.get("best_oa_location") or {}
-    candidates: list[tuple[Retrievability, str | None]] = [
+    best = record.get("best_oa_location")
+    if best is not None and not isinstance(best, dict):
+        logger.warning("Unpaywall's best_oa_location is a %s, not an object", type(best).__name__)
+        best = None
+    best = best or {}
+    candidates: list[tuple[Retrievability, object]] = [
         ("pdf", best.get("url_for_pdf")),
         ("landing", best.get("url_for_landing_page")),
         ("landing", best.get("url")),
     ]
     for kind, url in candidates:
         if not url:
+            continue
+        if not isinstance(url, str):
+            logger.warning("Unpaywall's %s address is a %s, not a string", kind, type(url).__name__)
             continue
         usable = _usable(url, what=kind)
         if usable is not None:
