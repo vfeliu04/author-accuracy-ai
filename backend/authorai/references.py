@@ -37,7 +37,7 @@ from typing import BinaryIO, Literal, NamedTuple
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pypdf import PdfReader
 from pypdf.generic import IndirectObject
 
@@ -226,7 +226,13 @@ LABEL_MAX_CHARS = 40
 # answer of exactly half the starts passes. The degenerate line sits well
 # above the longest real entry and well below a merged one: nine Drought
 # entries run 481-759 characters raw (a wrapped author list, a long title
-# and a DOI), and the merged answer that was measured ran ~20,000.
+# and a DOI), and the merged answer that was measured ran ~20,000. An
+# answer that cannot be read at all — the loop reaching max_tokens, so the
+# JSON never closes — is the same failure one step further: the SDK's parse
+# raises pydantic's ValidationError (anthropic 0.84.0 validates the text
+# with TypeAdapter.validate_json and has no error type of its own for it),
+# which used to escape as the endpoint's 500; it now takes the same one
+# retry, and a part unreadable twice raises ModelAnswerError (a 502).
 ENTRY_STARTS_FLOOR = 4
 COMPLETE_FRACTION = 0.5
 DEGENERATE_FIELD_CHARS = 1_000
@@ -884,6 +890,13 @@ def _incomplete(starts: int, answer: ReferenceList) -> str | None:
     return None
 
 
+class ModelAnswerError(RuntimeError):
+    """A part's answer could not be read twice: the model's text was not
+    the JSON the schema asked for (a string looped on until max_tokens,
+    live), on the call and on its one retry. A model failure the endpoint
+    can name — 502 — rather than the ValidationError's 500."""
+
+
 class Extraction(NamedTuple):
     """The references kept, how many rows were dropped on the way — blank
     rows and the rows past MAX_REFERENCES — reported to the dialog as the
@@ -912,8 +925,13 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     incomplete flags the whole scan as possibly incomplete — a warning
     either way, never silently.
 
-    A chunk whose call fails fails the scan — the endpoint's 500, as for any
-    model failure. The other chunks' entries are not returned in its place:
+    An answer the SDK cannot read (pydantic's ValidationError from
+    llm.parse: invalid JSON, live a string the model looped on until
+    max_tokens) is a model failure with the same one retry, and a chunk
+    unreadable twice raises ModelAnswerError — the endpoint's 502. A chunk
+    whose call fails otherwise fails the scan — the endpoint's 500, as for
+    any model failure. The other chunks' entries are not returned in its
+    place:
     a bibliography with a silent hole would tell the dialog that the unread
     works are absent from the user's sources, and the user would go looking
     for works that were merely unread. Chunks not yet started are cancelled;
@@ -926,34 +944,73 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
         prompt = _chunk_prompt(index, total, chunks[index])
         starts = entry_starts(chunks[index])
 
-        def ask() -> ReferenceList:
+        def ask() -> ReferenceList | ValidationError:
+            """The model's answer, or the failure the SDK raised for one it
+            could not read."""
             # Temperature 0: the reading is a transcription, and six
             # identical live calls on one 37-entry list answered 37 / 1 /
             # 37 / 37 / 1 / 1 (MISTAKES 2026-09-23). Haiku 4.5, the pinned
             # references model, accepts the parameter; Sonnet 5 and Opus
             # 4.7+ refuse it with a 400, so `references_model` must stay a
             # model that takes it.
-            return llm.parse(
-                model=model,
-                system=REFERENCES_SYSTEM,
-                prompt=prompt,
-                output_type=ReferenceList,
-                temperature=0.0,
-            )
+            try:
+                return llm.parse(
+                    model=model,
+                    system=REFERENCES_SYSTEM,
+                    prompt=prompt,
+                    output_type=ReferenceList,
+                    temperature=0.0,
+                )
+            except ValidationError as exc:
+                # The SDK parsed the model's text against the schema and
+                # could not (anthropic 0.84.0: TypeAdapter.validate_json,
+                # with nothing around it) — invalid JSON, live a string
+                # looped on until max_tokens. A model failure with the
+                # same one retry as an incomplete answer.
+                return exc
 
-        answer = ask()
-        why = _incomplete(starts, answer)
-        if why is None:
-            return answer, False
+        def wrong(result: ReferenceList | ValidationError) -> str | None:
+            """Why `result` is not the part's answer — the SDK could not
+            read it (its summary; the error's text quotes the answer), or
+            _incomplete's reason — or None for an answer that passes."""
+            if isinstance(result, ValidationError):
+                return (
+                    f"the model's answer could not be read: {result.error_count()} validation "
+                    f"error(s), {result.errors()[0]['type']}"
+                )
+            return _incomplete(starts, result)
+
+        first = ask()
+        why = wrong(first)
+        if isinstance(first, ReferenceList) and why is None:
+            return first, False
         logger.warning(
             "part %d of %d looks incomplete (%s) — asking once more", index + 1, total, why
         )
-        retry = ask()
-        retry_why = _incomplete(starts, retry)
+        second = ask()
+        second_why = wrong(second)
         # The answer that passes the check, whichever is larger; when
-        # neither does, the larger (a short answer is the live failure).
-        if retry_why is None or len(retry.references) > len(answer.references):
-            answer, why = retry, retry_why
+        # neither does, the larger (a short answer is the live failure);
+        # one that was read beats one that could not be.
+        if isinstance(second, ReferenceList) and (
+            not isinstance(first, ReferenceList)
+            or second_why is None
+            or len(second.references) > len(first.references)
+        ):
+            answer, why = second, second_why
+        else:
+            answer = first
+        if not isinstance(answer, ReferenceList):
+            logger.warning(
+                "part %d of %d: the model's answer could not be read on the retry either (%s)",
+                index + 1,
+                total,
+                second_why,
+            )
+            raise ModelAnswerError(
+                f"part {index + 1} of {total}: the model's answer could not be read, "
+                "on the call and on its retry"
+            ) from answer
         if why is None:
             return answer, False
         logger.warning(

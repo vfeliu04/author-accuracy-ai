@@ -1623,6 +1623,75 @@ def test_reference_scan_reports_an_answer_that_still_looks_incomplete(
     _nothing_written(settings)
 
 
+def _unreadable_answer():
+    """The SDK's own failure for an answer it cannot read (anthropic 0.84.0
+    parses the text with pydantic's TypeAdapter.validate_json and nothing
+    catches it): a pydantic ValidationError, for a string the model looped
+    on until max_tokens."""
+    from pydantic import TypeAdapter, ValidationError
+
+    try:
+        TypeAdapter(ReferenceList).validate_json('{"references": [{"label": "\ufeff\ufeff')
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("the truncated JSON parsed")
+
+
+def test_reference_scan_retries_an_answer_it_cannot_read_once(tmp_path, monkeypatch):
+    """The model's first answer is invalid JSON (the live U+FEFF loop); the
+    part is asked once more and the readable answer is the scan's: 200,
+    one retry, nothing stored."""
+    from authorai import api as apimod
+
+    settings = _settings(tmp_path)
+    calls = []
+
+    def answer(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise _unreadable_answer()
+        return CITED
+
+    fake = FakeLLM({ReferenceList: answer})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    assert [r["label"] for r in resp.json()["references"]] == [
+        "Open 2021",
+        "Closed 2019",
+        "Web 2020",
+        "Plain 2018",
+    ]
+    assert len(fake.parse_calls) == 2
+    _nothing_written(settings)
+
+
+def test_reference_scan_answers_502_when_the_model_answer_cannot_be_read_twice(
+    tmp_path, monkeypatch
+):
+    """Twice unreadable: 502 with a message the dialog can show, nothing
+    stored, and no other exception type escapes — the TestClient raises
+    server exceptions by default, so a ValidationError or ModelAnswerError
+    leaking out of the handler would fail the test here rather than show
+    as a status code."""
+    from authorai import api as apimod
+
+    settings = _settings(tmp_path)
+
+    def answer(prompt):
+        raise _unreadable_answer()
+
+    fake = FakeLLM({ReferenceList: answer})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 502, resp.text
+    assert resp.json() == {"detail": "the model's answer could not be read — try the scan again"}
+    assert len(fake.parse_calls) == 2
+    _nothing_written(settings)
+
+
 def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypatch):
     """A scanned (image-only) PDF has no text to read: the answer is 'none'
     and an empty list — the model is never asked, so it cannot invent a

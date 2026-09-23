@@ -21,6 +21,7 @@ from concurrent.futures import wait
 import httpx
 import pytest
 import respx
+from pydantic import TypeAdapter, ValidationError
 
 from authorai import references
 from authorai.fetch import MAX_URL_LENGTH
@@ -43,6 +44,7 @@ from authorai.references import (
     TITLE_MAX_CHARS,
     UNPAYWALL_BASE,
     URL_FIELD_MAX_CHARS,
+    ModelAnswerError,
     Reference,
     ReferenceList,
     RegistryUnavailable,
@@ -1158,6 +1160,92 @@ def test_a_boundary_inside_an_entry_yields_two_fragments_never_a_merged_entry():
     result = extract_references(llm, "m", text)
     entries = [r.title for r in result.references]
     assert entries == ["Ref 0138.", head, tail, "Ref 0140.", "Ref 0339."]
+
+
+def _unreadable_answer() -> ValidationError:
+    """The failure the SDK raises for an answer it cannot read, made the way
+    the SDK makes it (anthropic 0.84.0, lib/_parse/_response.py parse_text:
+    `TypeAdapter(output_format).validate_json(text)`, called by the
+    response's post_parser with nothing around it) — a pydantic
+    ValidationError, here for the live shape: a string the model looped
+    on until max_tokens, so the JSON never closes."""
+    try:
+        TypeAdapter(ReferenceList).validate_json('{"references": [{"label": "\ufeff\ufeff')
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("the truncated JSON parsed")
+
+
+def test_an_unreadable_answer_is_asked_once_more_and_the_retry_kept(references_log):
+    """Live, the model sometimes loops on U+FEFF inside a string until
+    max_tokens: invalid JSON, which the SDK's parse raises as a pydantic
+    ValidationError that used to escape as the endpoint's 500. It is a
+    model failure like an incomplete answer, with the same one retry: the
+    part is asked again with the same prompt, the readable answer is kept
+    and the scan is not flagged."""
+
+    def answer(prompt: str) -> ReferenceList:
+        if len(llm.parse_calls) == 1:
+            raise _unreadable_answer()
+        return _list(*"abcdef")
+
+    llm = FakeLLM({ReferenceList: answer})
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert [r.title for r in result.references] == list("abcdef")
+    assert result.possibly_incomplete is False
+    assert len(llm.parse_calls) == 2
+    assert llm.parse_calls[0]["prompt"] == llm.parse_calls[1]["prompt"]
+    assert "could not be read" in references_log.text
+    assert "asking once more" in references_log.text
+    assert "possibly incomplete" not in references_log.text
+
+
+def test_an_answer_unreadable_twice_is_a_model_answer_error(references_log):
+    """Twice unreadable, the part has no answer at all: ModelAnswerError, a
+    RuntimeError the endpoint maps to 502 — never the ValidationError
+    itself, which is a 500 the dialog cannot explain. The other parts'
+    entries are not returned in its place (no silent hole), and the one
+    retry is the whole budget: two calls for the part."""
+
+    def answer(prompt: str) -> ReferenceList:
+        raise _unreadable_answer()
+
+    llm = FakeLLM({ReferenceList: answer})
+    with pytest.raises(ModelAnswerError, match="could not be read") as caught:
+        extract_references(llm, "m", SIX_ENTRIES)
+    assert isinstance(caught.value, RuntimeError)
+    assert isinstance(caught.value.__cause__, ValidationError)
+    assert len(llm.parse_calls) == 2
+    assert references_log.text.count("could not be read") >= 2
+
+
+def test_an_unreadable_answer_shares_the_one_retry_with_the_completeness_guard(references_log):
+    """One retry per part, whatever the reason. Unreadable, then an answer
+    short of the six starts: the short answer is kept and the scan flagged,
+    with no third call. Short, then unreadable: the short answer is kept
+    and the scan flagged too — an answer that exists beats none."""
+
+    def scripted(*answers) -> FakeLLM:
+        queue = list(answers)
+
+        def answer(prompt: str) -> ReferenceList:
+            result = queue.pop(0)
+            if isinstance(result, ValidationError):
+                raise result
+            return result
+
+        return FakeLLM({ReferenceList: answer})
+
+    llm = scripted(_unreadable_answer(), _list("one"))
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert ([r.title for r in result.references], result.possibly_incomplete) == (["one"], True)
+    assert len(llm.parse_calls) == 2
+
+    llm = scripted(_list("one"), _unreadable_answer())
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert ([r.title for r in result.references], result.possibly_incomplete) == (["one"], True)
+    assert len(llm.parse_calls) == 2
+    assert references_log.text.count("still looks incomplete") == 2
 
 
 def test_a_failing_part_fails_the_whole_extraction():

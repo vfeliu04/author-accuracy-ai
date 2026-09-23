@@ -497,8 +497,11 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     ("unconfigured"); a registry failure part-way keeps the list and flags
     it ("unavailable") rather than failing the scan, because the citations
     are useful without retrievability (references.resolve_retrievability
-    holds that rule, and suggested_url which address a row offers). A model
-    failure is not caught: 500, like chat. Sync, so its blocking reads run
+    holds that rule, and suggested_url which address a row offers). A
+    model answer that cannot be read twice — invalid JSON where the schema
+    was asked for — is a 502 with a message the dialog can show
+    (references.ModelAnswerError); any other model failure is not caught:
+    500, like chat. Sync, so its blocking reads run
     on the threadpool — and bounded to SCAN_CONCURRENCY at once (see the
     constant): past that, 429 before any reader or model work.
     """
@@ -526,9 +529,15 @@ def _scan(report: UploadFile, settings: Settings) -> ReferenceScan:
     possibly_incomplete = False
     if text_source != "none":
         llm = AnthropicClient(settings.anthropic_api_key)
-        references, dropped, possibly_incomplete = refsmod.extract_references(
-            llm, settings.references_model, text
-        )
+        try:
+            references, dropped, possibly_incomplete = refsmod.extract_references(
+                llm, settings.references_model, text
+            )
+        except refsmod.ModelAnswerError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="the model's answer could not be read — try the scan again",
+            ) from exc
 
     lookup = refsmod.resolve_retrievability(references, settings.crossref_mailto)
     if lookup.status == "unavailable":
