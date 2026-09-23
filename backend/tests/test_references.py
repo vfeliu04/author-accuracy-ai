@@ -26,12 +26,12 @@ from authorai import references
 from authorai.fetch import MAX_URL_LENGTH
 from authorai.llm import PARSE_MAX_TOKENS
 from authorai.references import (
+    DEGENERATE_FIELD_CHARS,
     DOI_FIELD_MAX_CHARS,
-    ENTRY_PREFIX_CHARS,
     ENTRY_STARTS_FLOOR,
     HEADING_RUN_PAGES,
+    LABEL_MAX_CHARS,
     MAX_REFERENCES,
-    MERGED_ENTRY_CHARS,
     PAGE_TEXT_MAX_CHARS,
     PAGE_TREE_CEILING,
     READER_ADDRESS_SPACE_BYTES,
@@ -40,6 +40,7 @@ from authorai.references import (
     REFERENCE_CHUNK_CHARS,
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
+    TITLE_MAX_CHARS,
     UNPAYWALL_BASE,
     URL_FIELD_MAX_CHARS,
     Reference,
@@ -942,15 +943,17 @@ def test_the_watchdog_does_not_hold_the_reader_open_after_a_clean_finish(web_log
 # --- the models and the call ----------------------------------------------------
 
 
-def _list(*entries: str) -> ReferenceList:
-    return ReferenceList(references=[Reference(entry=entry) for entry in entries])
+def _list(*titles: str) -> ReferenceList:
+    """Rows told apart by title — the anchor a row needs to be kept (see
+    `actionable`): a label alone names nothing the dialog can check."""
+    return ReferenceList(references=[Reference(title=title) for title in titles])
 
 
 def _cited(*names: str) -> list[Reference]:
-    """References that each print a DOI, told apart by name: entry `n`, DOI
+    """References that each print a DOI, told apart by name: label `n`, DOI
     `10.1000/n` — the spelling _FakeUnpaywall.by_doi reads the name back
     from."""
-    return [Reference(entry=name, doi=f"10.1000/{name}") for name in names]
+    return [Reference(label=name, doi=f"10.1000/{name}") for name in names]
 
 
 def _lines(count: int) -> str:
@@ -1011,7 +1014,10 @@ def test_a_short_list_is_one_call_under_the_references_contract():
     wanted = ReferenceList(
         references=[
             Reference(
-                entry=ENTRY, title="Water stress and cities", authors=["Smith, J."], year=2020
+                label="Smith 2020",
+                title="Water stress and cities",
+                authors=["Smith, J."],
+                year=2020,
             )
         ]
     )
@@ -1125,7 +1131,7 @@ def test_a_long_list_is_read_in_parts_and_concatenated_in_part_order():
     answers = {1: _list("a1", "a2"), 2: _list("b1"), 3: _list("c1", "c2", "c3")}
     llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
     result = extract_references(llm, "m", text)
-    assert [r.entry for r in result.references] == ["a1", "a2", "b1", "c1", "c2", "c3"]
+    assert [r.title for r in result.references] == ["a1", "a2", "b1", "c1", "c2", "c3"]
     assert len(llm.parse_calls) == 3
     assert all(call["system"] == REFERENCES_SYSTEM for call in llm.parse_calls)
     assert all(call["model"] == "m" for call in llm.parse_calls)
@@ -1150,7 +1156,7 @@ def test_a_boundary_inside_an_entry_yields_two_fragments_never_a_merged_entry():
     answers = {1: _list("Ref 0138.", head), 2: _list(tail, "Ref 0140."), 3: _list("Ref 0339.")}
     llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
     result = extract_references(llm, "m", text)
-    entries = [r.entry for r in result.references]
+    entries = [r.title for r in result.references]
     assert entries == ["Ref 0138.", head, tail, "Ref 0140.", "Ref 0339."]
 
 
@@ -1188,7 +1194,7 @@ def test_a_long_lists_parts_are_read_four_at_a_time():
     result = extract_references(llm, "m", text)
     assert not barrier.broken
     assert len(llm.parse_calls) == 4
-    assert [r.entry for r in result.references] == ["ok"] * 4
+    assert [r.title for r in result.references] == ["ok"] * 4
 
 
 # --- the completeness guard --------------------------------------------------
@@ -1246,7 +1252,7 @@ def test_a_short_answer_is_retried_once_and_the_full_retry_kept(references_log):
     retry's six are kept, and the scan is not flagged."""
     llm = FakeLLM({ReferenceList: [_list("one"), _list(*"abcdef")]})
     result = extract_references(llm, "m", SIX_ENTRIES)
-    assert [r.entry for r in result.references] == list("abcdef")
+    assert [r.title for r in result.references] == list("abcdef")
     assert result.possibly_incomplete is False
     assert len(llm.parse_calls) == 2
     assert llm.parse_calls[0]["prompt"] == llm.parse_calls[1]["prompt"]
@@ -1262,7 +1268,7 @@ def test_an_answer_short_twice_keeps_the_larger_and_flags_the_scan(answers, refe
     first, second = (_list(*answers), _list(*(["one"] if answers != ["one"] else ["a", "b"])))
     llm = FakeLLM({ReferenceList: [first, second]})
     result = extract_references(llm, "m", SIX_ENTRIES)
-    assert [r.entry for r in result.references] == ["a", "b"]
+    assert [r.title for r in result.references] == ["a", "b"]
     assert result.possibly_incomplete is True
     assert len(llm.parse_calls) == 2
     assert "WARNING" in references_log.text
@@ -1270,38 +1276,64 @@ def test_an_answer_short_twice_keeps_the_larger_and_flags_the_scan(answers, refe
     assert "2 references for about 6 entry starts" in references_log.text
 
 
-def test_a_merged_answer_is_retried_whatever_the_text_shows(references_log):
-    """The live '5,117 tokens, 1 reference' shape: one object whose entry text
-    holds the whole list. Its RAW entry, before the prefix cut, runs past
-    MERGED_ENTRY_CHARS, which reads as merged even where the text shows
-    fewer than four entry starts; a full retry is kept, and a second merged
-    answer flags the scan. The line sits above the longest real entry: nine
-    Drought entries run 481-759 characters raw, and the merged answer that
-    was measured ran ~20,000."""
-    assert MERGED_ENTRY_CHARS == 1_000
+def test_a_degenerate_answer_is_retried_whatever_the_text_shows(references_log):
+    """The live '5,117 tokens, 1 reference' shape: one object whose text
+    holds the whole list. A string field of the RAW answer, before the
+    cuts, that runs past DEGENERATE_FIELD_CHARS reads as degenerate even
+    where the text shows fewer than four entry starts; a clean retry is
+    kept, and a second degenerate answer flags the scan. The line sits
+    above the longest real entry: nine Drought entries run 481-759
+    characters raw, and the merged answer that was measured ran ~20,000."""
+    assert DEGENERATE_FIELD_CHARS == 1_000
     merged = _list(("Smith, J. (2020). A title. " * 40).strip())
-    assert len(merged.references[0].entry) > MERGED_ENTRY_CHARS
-    assert len(_list(("Smith, J. (2020). A title. " * 28).strip()).references[0].entry) < 760
+    assert len(merged.references[0].title) > DEGENERATE_FIELD_CHARS
+    assert len(_list(("Smith, J. (2020). A title. " * 28).strip()).references[0].title) < 760
     llm = FakeLLM({ReferenceList: [merged, _list("a", "b")]})
     result = extract_references(llm, "m", "References\n" + ENTRY)
-    assert [r.entry for r in result.references] == ["a", "b"]
+    assert [r.title for r in result.references] == ["a", "b"]
     assert result.possibly_incomplete is False
     assert len(llm.parse_calls) == 2
-    assert "entries merged into one object" in references_log.text
+    assert "the title field runs 1079 characters, over 1000" in references_log.text
+    assert "a degenerate answer" in references_log.text
 
     llm = FakeLLM({ReferenceList: [merged, merged]})
     result = extract_references(llm, "m", "References\n" + ENTRY)
     assert len(result.references) == 1
-    assert len(result.references[0].entry) == ENTRY_PREFIX_CHARS
+    assert len(result.references[0].title) == TITLE_MAX_CHARS
     assert result.possibly_incomplete is True
     assert len(llm.parse_calls) == 2
 
 
-def test_a_real_entry_of_the_longest_measured_length_is_not_read_as_merged(references_log):
-    """An entry as long as the longest real one measured (759 characters
+@pytest.mark.parametrize("field", ["label", "title", "doi", "url", "authors"])
+def test_the_degenerate_check_reads_every_string_field(field, references_log):
+    """Where a merged list or a looping model lands its text can be any
+    string field — the live loop repeated U+FEFF inside the one verbatim
+    field the schema then had — so every one is read: label, title, DOI,
+    address and each author name. One character over the line is asked
+    again; exactly the line is not."""
+    over = "x" * (DEGENERATE_FIELD_CHARS + 1)
+    at = "x" * DEGENERATE_FIELD_CHARS
+    as_field = (lambda value: [value]) if field == "authors" else (lambda value: value)
+    bad = ReferenceList(references=[Reference(**({"title": "T"} | {field: as_field(over)}))])
+    llm = FakeLLM({ReferenceList: [bad, _list("a")]})
+    result = extract_references(llm, "m", "References")
+    assert [r.title for r in result.references] == ["a"]
+    assert result.possibly_incomplete is False
+    assert len(llm.parse_calls) == 2
+    assert f"the {field} field runs {DEGENERATE_FIELD_CHARS + 1} characters" in references_log.text
+
+    fine = ReferenceList(references=[Reference(**({"title": "T"} | {field: as_field(at)}))])
+    llm = FakeLLM({ReferenceList: fine})
+    result = extract_references(llm, "m", "References")
+    assert (len(result.references), result.possibly_incomplete) == (1, False)
+    assert len(llm.parse_calls) == 1
+
+
+def test_a_real_entry_of_the_longest_measured_length_is_not_read_as_degenerate(references_log):
+    """A field as long as the longest real entry measured (759 characters
     raw, a Drought entry) is one entry: no retry, no flag."""
     real = _list("Zkhiri, W., Y. Tramblay, et al. (2019). " + "A long title. " * 51)
-    assert 700 < len(real.references[0].entry) < MERGED_ENTRY_CHARS
+    assert 700 < len(real.references[0].title) < DEGENERATE_FIELD_CHARS
     llm = FakeLLM({ReferenceList: real})
     result = extract_references(llm, "m", "References\n" + ENTRY)
     assert (len(result.references), result.possibly_incomplete) == (1, False)
@@ -1319,7 +1351,7 @@ def test_the_retry_prefers_the_answer_that_passes_the_check_over_the_larger_one(
     retry = _list("x", "y", "z")
     llm = FakeLLM({ReferenceList: [first, retry]})
     result = extract_references(llm, "m", SIX_ENTRIES)
-    assert [r.entry for r in result.references] == ["x", "y", "z"]
+    assert [r.title for r in result.references] == ["x", "y", "z"]
     assert result.possibly_incomplete is False
     assert len(llm.parse_calls) == 2
     assert "still looks incomplete" not in references_log.text
@@ -1380,43 +1412,47 @@ def test_one_short_part_flags_the_whole_scan_after_its_own_retry(references_log)
     llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
     result = extract_references(llm, "m", text)
     assert len(result.references) == 241
-    assert result.references[120].entry == "one"
+    assert result.references[120].title == "one"
     assert result.possibly_incomplete is True
     assert len(llm.parse_calls) == 4
     assert sum("part 2 of 3" in call["prompt"] for call in llm.parse_calls) == 2
     assert references_log.text.count("still looks incomplete") == 1
 
 
-def test_entries_are_cut_to_the_prefix_length_verbatim(references_log):
-    """The prompt asks for the first ENTRY_PREFIX_CHARS characters; a model
-    that returns more is cut to exactly that prefix in code, without a
-    warning (the prefix is the contract), and a shorter entry is untouched."""
-    printed = "Long, A., Longer, B., & Longest, C. (2020). " + "A title that runs on. " * 12
-    assert len(printed) > ENTRY_PREFIX_CHARS
-    result = extract_references(FakeLLM({ReferenceList: _list(printed, "short")}), "m", "R")
-    assert result.references[0].entry == printed[:ENTRY_PREFIX_CHARS]
-    assert len(result.references[0].entry) == ENTRY_PREFIX_CHARS
-    assert result.references[1].entry == "short"
+def test_labels_are_cut_to_the_key_length_in_code(references_log):
+    """The prompt asks for a short key — the first author's surname or the
+    organisation, plus the year — and a model that writes more is cut to
+    LABEL_MAX_CHARS in code, without a warning (the label is a key, not
+    evidence), while a short one is untouched. The cut is not in the
+    schema, where structured outputs may not honour it."""
+    long = "Intergovernmental Panel on Climate Change Working Group II 2022"
+    assert len(long) > LABEL_MAX_CHARS
+    answer = ReferenceList(
+        references=[Reference(label=long, title="A"), Reference(label="Adler 2011", title="B")]
+    )
+    result = extract_references(FakeLLM({ReferenceList: answer}), "m", "R")
+    assert result.references[0].label == long[:LABEL_MAX_CHARS]
+    assert len(result.references[0].label) == LABEL_MAX_CHARS == 40
+    assert result.references[1].label == "Adler 2011"
     assert references_log.text == ""
-    assert f"first {ENTRY_PREFIX_CHARS} characters" in REFERENCES_SYSTEM
 
 
-def test_titles_and_authors_are_cut_in_code_after_parsing_like_the_entry():
+def test_titles_and_authors_are_cut_in_code_after_parsing_like_the_label():
     """Bounds are code, not schema (see the constants): a title or an author
     name is model output with no length the schema may enforce, and it is
-    shown in the dialog and matched against the user's sources. The entry's
-    prefix rule already existed; title and authors get the same treatment,
-    and a name list is cut to MAX_AUTHORS."""
-    from authorai.references import AUTHOR_MAX_CHARS, MAX_AUTHORS, TITLE_MAX_CHARS
+    shown in the dialog and matched against the user's sources. Title and
+    authors get the label's treatment, and a name list is cut to
+    MAX_AUTHORS."""
+    from authorai.references import AUTHOR_MAX_CHARS, MAX_AUTHORS
 
     answer = ReferenceList(
         references=[
             Reference(
-                entry="e",
+                label="e",
                 title="T" * (TITLE_MAX_CHARS + 100),
                 authors=[f"A{i}" + "a" * AUTHOR_MAX_CHARS for i in range(MAX_AUTHORS + 10)],
             ),
-            Reference(entry="short", title="Short", authors=["One, A.", "Two, B."]),
+            Reference(label="short", title="Short", authors=["One, A.", "Two, B."]),
         ]
     )
     result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References\n" + ENTRY)
@@ -1440,8 +1476,8 @@ def test_a_printed_address_and_doi_are_cut_in_code_like_the_other_fields():
     long = "x" * 60_000
     answer = ReferenceList(
         references=[
-            Reference(entry="", url="https://x.org/" + long),
-            Reference(entry="", doi="10.1000/" + long),
+            Reference(url="https://x.org/" + long),
+            Reference(doi="10.1000/" + long),
         ]
     )
     result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
@@ -1458,11 +1494,11 @@ def test_extract_references_caps_the_list_in_code_with_a_warning(references_log)
     max_length, and a client-side validation failure would 500 the scan): the
     model may return more, and code keeps the first MAX_REFERENCES, loudly."""
     too_many = ReferenceList(
-        references=[Reference(entry=f"entry {i}") for i in range(MAX_REFERENCES + 5)]
+        references=[Reference(title=f"work {i}") for i in range(MAX_REFERENCES + 5)]
     )
     result = extract_references(FakeLLM({ReferenceList: too_many}), "m", "References")
     assert len(result.references) == MAX_REFERENCES
-    assert result.references[-1].entry == f"entry {MAX_REFERENCES - 1}"
+    assert result.references[-1].title == f"work {MAX_REFERENCES - 1}"
     assert f"{MAX_REFERENCES + 5} references" in references_log.text
     assert "WARNING" in references_log.text
 
@@ -1473,7 +1509,7 @@ def test_the_cap_applies_to_the_parts_concatenated(references_log):
     text = _lines(340)
     answers = {n: _list(*(f"p{n}-{i}" for i in range(120))) for n in (1, 2, 3)}
     result = extract_references(FakeLLM({ReferenceList: _answer_by_part(answers)}), "m", text)
-    entries = [r.entry for r in result.references]
+    entries = [r.title for r in result.references]
     assert len(entries) == MAX_REFERENCES == 300
     assert entries[0] == "p1-0"
     assert entries[119] == "p1-119"
@@ -1483,7 +1519,7 @@ def test_the_cap_applies_to_the_parts_concatenated(references_log):
 
 
 def test_extract_references_returns_a_short_list_untouched(references_log):
-    two = ReferenceList(references=[Reference(entry="a"), Reference(entry="b")])
+    two = ReferenceList(references=[Reference(title="a"), Reference(title="b")])
     result = extract_references(FakeLLM({ReferenceList: two}), "m", "References")
     assert (result.references, result.dropped, result.possibly_incomplete) == (
         two.references,
@@ -1494,78 +1530,78 @@ def test_extract_references_returns_a_short_list_untouched(references_log):
 
 
 def test_extract_references_counts_every_row_it_dropped(monkeypatch, references_log):
-    """Blank rows and the rows past MAX_REFERENCES alike: the count the scan
-    reports as `references_dropped`."""
+    """Rows that name no work and the rows past MAX_REFERENCES alike: the
+    count the scan reports as `references_dropped`."""
     monkeypatch.setattr(references, "MAX_REFERENCES", 2)
     answer = ReferenceList(
-        references=[Reference(entry=""), *[Reference(entry=f"r{i}") for i in range(5)]]
+        references=[Reference(label="Blank 2020"), *[Reference(title=f"r{i}") for i in range(5)]]
     )
     result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
-    assert [r.entry for r in result.references] == ["r0", "r1"]
+    assert [r.title for r in result.references] == ["r0", "r1"]
     assert result.dropped == 1 + 3
 
 
 def test_blank_optional_fields_read_as_absent():
     """The model sometimes prints '' for a field it was told to leave null;
-    downstream code (the DOI lookup, the printed-URL rule) keys on absence.
-    `entry` is a str, not optional: a blank one stays "" (never None, which
-    the field's own type rejects on re-validation) and is judged by the
-    actionable rule instead."""
-    reference = Reference(entry="  x  ", title="  ", doi="", url=" \n", authors=["A", "  ", "B"])
-    assert reference.entry == "x"
+    downstream code (the DOI lookup, the printed-URL rule, the actionable
+    rule) keys on absence. The label is optional like the others: a blank
+    one is None, and the row is judged by what else it names."""
+    reference = Reference(label="  x  ", title="  ", doi="", url=" \n", authors=["A", "  ", "B"])
+    assert reference.label == "x"
     assert reference.title is None
     assert reference.doi is None
     assert reference.url is None
     assert reference.authors == ["A", "B"]
-    assert Reference(entry="").entry == ""
-    assert Reference(entry=" \n\t ").entry == ""
+    assert Reference(label="").label is None
+    assert Reference(label=" \n\t ").label is None
+    assert Reference().label is None
 
 
-def test_a_blank_entry_is_dropped_loudly_unless_the_row_names_the_work(references_log):
-    """A model slip: `entry` printed as "" or whitespace where the prompt
-    asked for the entry's first characters. The rule, stated once in
-    `actionable`: with no title, DOI or address either, the row is not a
-    reference the user can act on and is dropped — counted in a WARNING,
-    never silently; with any of those it is kept, its entry "", since the
-    dialog can still show the title and check the work. Authors and a year
-    alone name nothing the dialog can show, so that row is dropped too."""
+def test_a_row_is_kept_only_when_it_names_a_title_doi_or_address(references_log):
+    """The rule, stated once in `actionable`: a row the user can act on
+    names its work by title, DOI or address — what the dialog can show,
+    match against the user's sources and look up. A label alone ("Adler
+    2011", a key) names nothing the dialog can check, and neither do
+    authors and a year, so those rows are dropped — counted in a WARNING,
+    never silently. A row with a blank label and a title is kept, its
+    label None."""
     answer = ReferenceList(
         references=[
-            Reference(entry=""),
-            Reference(entry="   ", title="Titled work"),
-            Reference(entry="\n\t", doi="10.1000/x"),
-            Reference(entry="", url="https://x.org/p"),
-            Reference(entry="  ", authors=["Only, A."], year=2020),
-            Reference(entry="kept as printed"),
+            Reference(label=""),
+            Reference(label="   ", title="Titled work"),
+            Reference(label="Doi 2020", doi="10.1000/x"),
+            Reference(url="https://x.org/p"),
+            Reference(label="Only 2020", authors=["Only, A."], year=2020),
+            Reference(label="Adler 2011"),
         ]
     )
     result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
-    assert [(r.entry, r.title, r.doi, r.url) for r in result.references] == [
-        ("", "Titled work", None, None),
-        ("", None, "10.1000/x", None),
-        ("", None, None, "https://x.org/p"),
-        ("kept as printed", None, None, None),
+    assert [(r.label, r.title, r.doi, r.url) for r in result.references] == [
+        (None, "Titled work", None, None),
+        ("Doi 2020", None, "10.1000/x", None),
+        (None, None, None, "https://x.org/p"),
     ]
-    assert all(isinstance(r.entry, str) for r in result.references)
+    assert result.dropped == 3
     assert "WARNING" in references_log.text
-    assert "dropping 2 of 6 references" in references_log.text
+    assert "dropping 3 of 6 references" in references_log.text
 
 
-def test_a_null_entry_is_a_parse_failure_not_a_blank_row():
-    """`entry` is a required string in the schema the model decodes under,
-    so the constrained answer cannot carry a null there; a hand-built one
-    fails validation at parse time — the model-failure 500, like any
-    unparseable answer — and never reaches the actionable rule."""
+def test_a_null_label_is_an_ordinary_row_not_a_parse_failure():
+    """`label` is optional in the schema the model decodes under, like every
+    other field, and nothing in the schema asks for the entry's text: a null
+    label is a row the actionable rule judges, never a validation failure
+    (the earlier required `entry` made a null one a 500)."""
     from anthropic import transform_schema
-    from pydantic import ValidationError
 
     schema = transform_schema(ReferenceList)["$defs"]["Reference"]
-    assert "entry" in schema["required"]
-    assert schema["properties"]["entry"]["type"] == "string"
-    with pytest.raises(ValidationError):
-        Reference(entry=None)  # type: ignore[arg-type]
-    with pytest.raises(ValidationError):
-        ReferenceList.model_validate({"references": [{"entry": None}]})
+    assert "entry" not in schema["properties"]
+    assert "label" in schema["properties"]
+    assert "label" not in schema.get("required", [])
+    assert Reference(label=None).label is None
+    parsed = ReferenceList.model_validate({"references": [{"label": None, "title": "T"}]})
+    assert parsed.references[0].label is None
+    assert references.actionable(parsed.references[0])
+    assert not references.actionable(Reference(label="Adler 2011"))
 
 
 def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():
@@ -1588,7 +1624,7 @@ def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():
     assert references.MAX_REFERENCES == 300
     assert references.REFERENCE_MAX_CHARS == 65_000
     assert references.REFERENCE_CHUNK_CHARS == 12_000
-    assert references.ENTRY_PREFIX_CHARS == 160
+    assert references.LABEL_MAX_CHARS == 40
     assert references.HEADING_RUN_PAGES == 2
     assert references.REFERENCE_MAX_PAGES == 600
 
@@ -1596,11 +1632,11 @@ def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():
 def test_a_chunks_worst_case_output_fits_the_parse_budget_with_margin():
     """The output budget is the design constraint (MISTAKES 2026-09-23): a
     dense list prints an entry every ~120 characters, and one entry with a
-    160-character `entry`, title, authors, year, DOI and JSON keys is ~100
+    40-character `label`, title, authors, year, DOI and JSON keys is ~70
     output tokens, so a chunk's worst case must sit well under
     PARSE_MAX_TOKENS. Raising REFERENCE_CHUNK_CHARS re-runs this arithmetic."""
     entries_per_chunk = REFERENCE_CHUNK_CHARS // 120
-    tokens_per_entry = ENTRY_PREFIX_CHARS // 4 + 60
+    tokens_per_entry = LABEL_MAX_CHARS // 4 + 60
     assert entries_per_chunk * tokens_per_entry <= PARSE_MAX_TOKENS * 2 // 3
 
 
@@ -1615,19 +1651,23 @@ def test_the_prompt_asks_for_every_entry_of_a_long_list():
     assert "never completed" in contract
 
 
-def test_the_prompt_opens_with_the_one_object_per_entry_rule():
-    """Measured live (MISTAKES 2026-09-23): six identical calls on a 37-entry
-    list answered 37 / 1 / 37 / 37 / 1 / 1 — the model either closed the
-    list after one short object or put the whole list into one object's
-    text. The structural rule is therefore the FIRST thing the prompt says,
-    in one unmistakable sentence pair, before any field is described."""
+def test_the_prompt_asks_for_a_short_label_never_the_entrys_text():
+    """Measured live (MISTAKES 2026-09-24): with a required verbatim `entry`
+    field Haiku 4.5 returned ONE entry for a 37-entry list at temperature 0
+    (1, 1, 1) and sometimes looped on U+FEFF inside it until max_tokens;
+    with a short `label` instead, 37 / 37 / 37 with and without a count
+    hint. The field was the cause, so no field asks for the entry's
+    characters, and the round-7 opening sentence ("Return ONE object per
+    entry…"), which did not help, is gone: the prompt starts with what the
+    model reads."""
     contract = " ".join(REFERENCES_SYSTEM.split())  # the prompt wraps at 80 columns
-    rule = (
-        "Return ONE object per entry. A reference list of N entries yields exactly N "
-        "objects — never combine entries into one object, never stop before the last "
-        "entry of the text you were given."
-    )
-    assert contract.startswith(rule)
+    assert contract.startswith("You read the closing pages of a report")
+    assert "Return ONE object per entry" not in contract
+    assert "`entry`" not in contract
+    assert "characters of the entry" not in contract
+    assert "`label`: a short key for the entry as printed" in contract
+    assert "first author's surname or the organisation, plus the year" in contract
+    assert '(e.g. "Adler 2011")' in contract
 
 
 # --- Unpaywall: the one registry-GET policy, on a second registry --------------
@@ -1917,7 +1957,7 @@ def test_an_address_the_fetcher_would_refuse_is_never_offered(bad, references_lo
     assert retrievability(record) == ("landing", "https://x.org/a"), bad
     assert "WARNING" in references_log.text
     assert "dropping the pdf address" in references_log.text
-    assert printed_url(Reference(entry="e", url=bad)) is None, bad
+    assert printed_url(Reference(url=bad)) is None, bad
 
 
 @pytest.mark.parametrize(
@@ -1940,7 +1980,7 @@ def test_a_youtube_address_is_never_offered_because_the_dialog_would_refuse_it(
     record = _record(url_for_pdf=video, url_for_landing_page="https://x.org/a")
     assert retrievability(record) == ("landing", "https://x.org/a"), video
     assert "YouTube" in references_log.text
-    assert printed_url(Reference(entry="e", url=video)) is None, video
+    assert printed_url(Reference(url=video)) is None, video
 
 
 def test_a_host_that_merely_contains_youtube_is_offered():
@@ -1960,7 +2000,7 @@ def test_a_public_literal_address_or_a_name_is_offered():
         "https://internal.example.org/a.pdf",
     ):
         assert retrievability(_record(url_for_pdf=url)) == ("pdf", url), url
-        assert printed_url(Reference(entry="e", url=url)) == url, url
+        assert printed_url(Reference(url=url)) == url, url
 
 
 def test_a_suggested_address_is_the_normalized_form():
@@ -1971,10 +2011,10 @@ def test_a_suggested_address_is_the_normalized_form():
 def test_printed_url_is_offered_only_when_there_is_no_doi_to_check():
     """A reference with no DOI but a printed address is addable but UNCHECKED
     (the frontend labels it so); with a DOI the lookup's verdict rules."""
-    assert printed_url(Reference(entry="e", url="https://x.org/r#top")) == "https://x.org/r"
-    assert printed_url(Reference(entry="e", url="https://x.org/r", doi="10.1000/x")) is None
-    assert printed_url(Reference(entry="e")) is None
-    assert printed_url(Reference(entry="e", url="not a url")) is None
+    assert printed_url(Reference(url="https://x.org/r#top")) == "https://x.org/r"
+    assert printed_url(Reference(url="https://x.org/r", doi="10.1000/x")) is None
+    assert printed_url(Reference()) is None
+    assert printed_url(Reference(url="not a url")) is None
 
 
 # --- the pooled lookup ----------------------------------------------------------
@@ -1989,10 +2029,10 @@ def test_lookups_run_only_for_dois_and_stay_aligned_with_the_references():
         return_value=httpx.Response(200, json=_record(is_oa=False))
     )
     refs = [
-        Reference(entry="closed", doi="10.1000/closed"),
-        Reference(entry="no doi", url="https://x.org/p"),
-        Reference(entry="open", doi="10.1000/open"),
-        Reference(entry="bad doi", doi="nope"),
+        Reference(label="closed", doi="10.1000/closed"),
+        Reference(label="no doi", url="https://x.org/p"),
+        Reference(label="open", doi="10.1000/open"),
+        Reference(label="bad doi", doi="nope"),
     ]
     client = _unpaywall()
     try:
@@ -2018,11 +2058,11 @@ def test_the_same_doi_printed_by_several_entries_is_looked_up_once():
         return_value=httpx.Response(200, json=_record(is_oa=False))
     )
     refs = [
-        Reference(entry="a", doi="10.1000/twice"),
-        Reference(entry="b", doi="10.1000/other"),
-        Reference(entry="c", doi="10.1000/twice"),
-        Reference(entry="d"),
-        Reference(entry="e", doi="10.1000/twice"),
+        Reference(label="a", doi="10.1000/twice"),
+        Reference(label="b", doi="10.1000/other"),
+        Reference(label="c", doi="10.1000/twice"),
+        Reference(label="d"),
+        Reference(label="e", doi="10.1000/twice"),
     ]
     client = _unpaywall()
     try:

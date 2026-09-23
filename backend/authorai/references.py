@@ -161,12 +161,12 @@ READER_MEMORY_BYTES = 768 * 1024 * 1024
 READER_MEMORY_EXIT_CODE = 75
 READER_WATCH_INTERVAL_SECONDS = 0.25
 
-# Every other model-written field is bounded in code after parsing too
-# (extract_references), for the same reason the entry is: a title or an
-# author name is shown in the dialog and matched against the user's
-# sources, and the schema cannot enforce a length. Real values are far
-# below — a long title is ~200 characters, an author list of 50 names is
-# a consortium paper's — so a cut changes nothing real.
+# Every model-written field is bounded in code after parsing
+# (extract_references), for one reason: a title or an author name is shown
+# in the dialog and matched against the user's sources, and the schema
+# cannot enforce a length. Real values are far below — a long title is
+# ~200 characters, an author list of 50 names is a consortium paper's — so
+# a cut changes nothing real.
 TITLE_MAX_CHARS = 500
 MAX_AUTHORS = 50
 AUTHOR_MAX_CHARS = 200
@@ -183,18 +183,30 @@ DOI_FIELD_MAX_CHARS = 300
 
 # The output budget, not the input, bounds one call: PARSE_MAX_TOKENS
 # (16,000) cannot carry a whole long list — the Drought list's ~224 entries
-# with a verbatim `entry` would need 20-32k output tokens, so one call would
-# be cut off and 500 the scan on the very report the caps were sized for.
-# The text is therefore split into chunks of at most this many characters
-# (~3k tokens in, ~45 entries, ~5k tokens out with the prefix `entry`), each
-# its own call, LOOKUP_WORKERS at a time. A cut falls on a line break, never
-# inside a line, so an entry is split between at most two chunks, and the
-# model is told to list such a fragment as printed. `entry` is a short
-# verbatim PREFIX — enough to find the entry on the page, and otherwise the
-# field that dominates the output — cut to ENTRY_PREFIX_CHARS in code after
-# parsing (the prompt asks for that many; the cap is not in the schema).
+# would need ~15k output tokens as fields alone (20-32k with the verbatim
+# `entry` the schema once had), so one call would be cut off and 500 the
+# scan on the very report the caps were sized for. The text is therefore
+# split into chunks of at most this many characters (~3k tokens in, ~45
+# entries, ~3k tokens out), each its own call, LOOKUP_WORKERS at a time. A
+# cut falls on a line break, never inside a line, so an entry is split
+# between at most two chunks, and the model is told to list such a fragment
+# as printed.
+#
+# No field asks for verbatim text. `label` is a short KEY for the entry as
+# printed — the first author's surname or the organisation, plus the year
+# ("Adler 2011") — cut to LABEL_MAX_CHARS in code after parsing (the cap is
+# not in the schema). The schema's earlier required `entry` field, the
+# entry's first 160 characters exactly as printed, was the cause of the
+# scan's live failures (MISTAKES 2026-09-24): measured on the 10-page
+# article with 37 printed entries, three calls per variant, Haiku 4.5
+# returned ONE entry at temperature 0 (1, 1, 1) and 1 / 37 / 37 at the
+# default, and sometimes looped on U+FEFF inside the entry string until
+# max_tokens (invalid JSON); with the label instead, 37 / 37 / 37 at
+# temperature 0, with or without a count hint, and 37 / 37 / 37 at the
+# default. Traceability comes from title + year + identifier, which code
+# verifies (the lookup keys on the DOI; the dialog matches the title).
 REFERENCE_CHUNK_CHARS = 12_000
-ENTRY_PREFIX_CHARS = 160
+LABEL_MAX_CHARS = 40
 
 # The completeness guard (extract_references). Measured live, six identical
 # calls on a 37-entry list answered 37 / 1 / 37 / 37 / 1 / 1 references:
@@ -204,19 +216,20 @@ ENTRY_PREFIX_CHARS = 160
 # count of the lines that look like the START of an entry (entry_starts):
 # an answer under COMPLETE_FRACTION of that count, where the text shows at
 # least ENTRY_STARTS_FLOOR starts (under four, prose alone shows one or two
-# and an empty list is the right answer), or any entry whose RAW text runs
-# past MERGED_ENTRY_CHARS (entries merged into one object) — is asked for
-# once more with the same prompt; the answer that passes the check is
-# kept, else the one with more references, and one that still looks
-# incomplete flags the scan (Extraction.possibly_incomplete, the
+# and an empty list is the right answer), or any string field of the RAW
+# answer longer than DEGENERATE_FIELD_CHARS (a degenerate answer: entries
+# merged into one object's text, or a field the model looped on) — is
+# asked for once more with the same prompt; the answer that passes the
+# check is kept, else the one with more references, and one that still
+# looks incomplete flags the scan (Extraction.possibly_incomplete, the
 # response's limits field) instead of passing for the whole list. An
-# answer of exactly half the starts passes. The merged line sits well
+# answer of exactly half the starts passes. The degenerate line sits well
 # above the longest real entry and well below a merged one: nine Drought
 # entries run 481-759 characters raw (a wrapped author list, a long title
 # and a DOI), and the merged answer that was measured ran ~20,000.
 ENTRY_STARTS_FLOOR = 4
 COMPLETE_FRACTION = 0.5
-MERGED_ENTRY_CHARS = 1_000
+DEGENERATE_FIELD_CHARS = 1_000
 
 # How far apart, in PAGES, two heading matches may sit and still be one
 # section: a bibliography that spans several pages repeats its heading on
@@ -674,13 +687,14 @@ def split_reference_text(text: str, *, chunk_chars: int = REFERENCE_CHUNK_CHARS)
 
 
 class Reference(BaseModel):
-    """One printed reference entry, as fields. `entry` is the anchor: the
-    start of the text as printed, shown to the user when the title is null
-    and the proof that the row came from the page rather than from memory.
-    A prefix, not the whole entry: the whole would dominate the output
-    budget (see REFERENCE_CHUNK_CHARS), and the first line finds the entry
-    on the page just as well. A blank `entry` is a model slip; whether the
-    row survives it is `actionable`'s rule."""
+    """One printed reference entry, as fields. The anchor that ties a row to
+    the page is title + year + identifier (DOI or address), verified in
+    code: the lookup keys on the DOI and the dialog matches the title
+    against the user's sources. `label` is a short key for the entry as
+    printed — the first author's surname or the organisation, plus the
+    year — shown when the title is null; a key, never evidence, because a
+    verbatim field made the model fail (see LABEL_MAX_CHARS). Whether a row
+    is kept is `actionable`'s rule."""
 
     title: str | None = Field(default=None, description="The cited work's title, as printed")
     authors: list[str] = Field(
@@ -691,29 +705,22 @@ class Reference(BaseModel):
         default=None, description="The DOI printed in the entry (10.xxxx/...), without a URL prefix"
     )
     url: str | None = Field(default=None, description="A web address printed in the entry")
-    entry: str = Field(
+    label: str | None = Field(
+        default=None,
         description=(
-            f"The first {ENTRY_PREFIX_CHARS} characters of the reference entry exactly as "
-            "printed (line breaks joined)"
-        )
+            "A short key for the entry as printed: the first author's surname or the "
+            'organisation, plus the year (e.g. "Adler 2011")'
+        ),
     )
 
-    @field_validator("title", "doi", "url", mode="after")
+    @field_validator("title", "doi", "url", "label", mode="after")
     @classmethod
     def _blank_is_absent(cls, value: str | None) -> str | None:
         # The model sometimes prints '' where it was told to leave null; the
-        # DOI lookup and the printed-URL rule key on absence.
+        # DOI lookup, the printed-URL rule and `actionable` key on absence.
         if value is None:
             return None
         return value.strip() or None
-
-    @field_validator("entry", mode="after")
-    @classmethod
-    def _entry_stripped(cls, value: str) -> str:
-        # Stripped, never None: `entry` is a str, and a value the field's own
-        # type rejects would fail the endpoint's re-validation (a 500 for a
-        # blank the model printed). A blank one is judged by `actionable`.
-        return value.strip()
 
     @field_validator("authors", mode="after")
     @classmethod
@@ -727,31 +734,24 @@ class ReferenceList(BaseModel):
 
 def actionable(reference: Reference) -> bool:
     """Whether the row is one the user can act on — the rule, in this one
-    place. A reference prints text (`entry`, the proof it came from the
-    page) or names its work by title, DOI or address, which the dialog can
-    show, match against the user's sources and look up without the text. A
-    row with none of these — a model slip, `entry` printed as "" where the
-    prompt asked for the entry's first characters — is not a reference:
-    extract_references drops it and counts the drops in a warning. Authors
-    and a year alone name nothing the dialog can show, so they do not keep
-    a row."""
-    return bool(reference.entry or reference.title or reference.doi or reference.url)
+    place. A reference names its work by title, DOI or address, which the
+    dialog can show, match against the user's sources and look up. A row
+    with none of these is not a reference: a label alone ("Adler 2011") is
+    a key, not a work the dialog can check, and authors and a year alone
+    name nothing it can show. extract_references drops such rows and
+    counts the drops in a warning."""
+    return bool(reference.title or reference.doi or reference.url)
 
 
-REFERENCES_SYSTEM = f"""\
-Return ONE object per entry. A reference list of N entries yields exactly N
-objects — never combine entries into one object, never stop before the last
-entry of the text you were given.
-
+REFERENCES_SYSTEM = """\
 You read the closing pages of a report and list the works its reference list
 cites. Every entry you return describes a work the report CITES — never the
 report itself. Report ONLY what the text actually prints — never guess, never
 complete an entry from world knowledge. A field the entry does not print is
 null.
 
-- `entry`: the first {ENTRY_PREFIX_CHARS} characters of the entry exactly as
-  printed (line breaks joined) — enough for a reader to find it on the page.
-  Never the whole of a longer entry.
+- `label`: a short key for the entry as printed — the first author's surname
+  or the organisation, plus the year (e.g. "Adler 2011").
 - `title`: the cited work's title as printed. Null when the entry prints none.
 - `authors`: the names as printed, personal or organizational. Empty list if
   none are printed.
@@ -785,12 +785,13 @@ def _chunk_prompt(index: int, total: int, chunk: str) -> str:
 
 
 def _bounded(reference: Reference) -> Reference:
-    """The reference with `entry` cut to ENTRY_PREFIX_CHARS — the prompt asks
-    for that many, and the model does not always count — and the title,
-    author names, address and DOI to their caps (see the constants)."""
+    """The reference with `label` cut to LABEL_MAX_CHARS — the prompt asks
+    for a short key, and the model does not always keep it short — and the
+    title, author names, address and DOI to their caps (see the
+    constants)."""
     return reference.model_copy(
         update={
-            "entry": reference.entry[:ENTRY_PREFIX_CHARS],
+            "label": reference.label[:LABEL_MAX_CHARS] if reference.label else reference.label,
             "title": reference.title[:TITLE_MAX_CHARS] if reference.title else reference.title,
             "authors": [name[:AUTHOR_MAX_CHARS] for name in reference.authors[:MAX_AUTHORS]],
             "url": reference.url[:URL_FIELD_MAX_CHARS] if reference.url else reference.url,
@@ -845,19 +846,40 @@ def entry_starts(text: str) -> int:
     return count
 
 
+def _longest_field(reference: Reference) -> tuple[str, int]:
+    """The longest string field of the RAW row, named by its schema key:
+    where a merged list or a looping model lands its text can be any of
+    them, an author name included."""
+    fields = [
+        ("label", reference.label),
+        ("title", reference.title),
+        ("doi", reference.doi),
+        ("url", reference.url),
+        *(("authors", name) for name in reference.authors),
+    ]
+    return max(((name, len(value or "")) for name, value in fields), key=lambda pair: pair[1])
+
+
 def _incomplete(starts: int, answer: ReferenceList) -> str | None:
-    """Why `answer` looks like one of the two live failure shapes — fewer
-    objects than COMPLETE_FRACTION of the entry starts in the text, or an
-    entry holding merged entries — worded with both counts, or None for an
-    answer that passes. One predicate, so the retry and the flag agree."""
+    """Why `answer` looks like one of the live failure shapes — fewer
+    objects than COMPLETE_FRACTION of the entry starts in the text, or a
+    degenerate answer (a string field over DEGENERATE_FIELD_CHARS: entries
+    merged into one object's text, or a field the model looped on) —
+    worded with both counts, or None for an answer that passes. One
+    predicate, so the retry and the flag agree."""
     returned = len(answer.references)
     if starts >= ENTRY_STARTS_FLOOR and returned < COMPLETE_FRACTION * starts:
         return f"{returned} references for about {starts} entry starts in the text"
-    longest = max((len(reference.entry) for reference in answer.references), default=0)
-    if longest > MERGED_ENTRY_CHARS:
+    field, longest = max(
+        (_longest_field(reference) for reference in answer.references),
+        key=lambda pair: pair[1],
+        default=("label", 0),
+    )
+    if longest > DEGENERATE_FIELD_CHARS:
         return (
-            f"an entry of {longest} characters, over {MERGED_ENTRY_CHARS}: "
-            "entries merged into one object"
+            f"the {field} field runs {longest} characters, over {DEGENERATE_FIELD_CHARS}: "
+            "a degenerate answer (entries merged into one object, or a field the model "
+            "looped on)"
         )
     return None
 
@@ -876,12 +898,12 @@ class Extraction(NamedTuple):
 def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     """The model's reading of the closing text: one structured call per
     REFERENCE_CHUNK_CHARS chunk, LOOKUP_WORKERS at a time, the answers
-    concatenated in chunk order, every `entry` cut to ENTRY_PREFIX_CHARS
-    (title and authors to their caps, likewise), rows that are not
-    `actionable` dropped (counted in a warning), and the
-    list cut to MAX_REFERENCES in code. The caps are deliberately NOT in the
-    schema, where structured outputs may not honour them and a validation
-    failure would fail the whole scan instead of trimming it.
+    concatenated in chunk order, every field cut to its cap (`_bounded`:
+    the label to LABEL_MAX_CHARS, title and authors to theirs), rows that
+    are not `actionable` dropped (counted in a warning), and the list cut
+    to MAX_REFERENCES in code. The caps are deliberately NOT in the schema,
+    where structured outputs may not honour them and a validation failure
+    would fail the whole scan instead of trimming it.
 
     Each chunk's answer is held against the text it read (the completeness
     guard, see ENTRY_STARTS_FLOOR): one that looks incomplete is asked for
@@ -954,7 +976,7 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     references = [reference for reference in answered if actionable(reference)]
     if len(references) < len(answered):
         logger.warning(
-            "dropping %d of %d references with no printed entry and no title, DOI or address",
+            "dropping %d of %d references that name no title, DOI or address",
             len(answered) - len(references),
             len(answered),
         )

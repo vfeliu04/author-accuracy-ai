@@ -1417,10 +1417,10 @@ def test_links_count_toward_the_source_cap(tmp_path):
 SCAN = "/api/references/scan"
 CITED = ReferenceList(
     references=[
-        Reference(entry="Open, A. (2021). Free paper. J. 1.", doi="10.1000/open", year=2021),
-        Reference(entry="Closed, B. (2019). Paid paper. J. 2.", doi="10.1000/closed", year=2019),
-        Reference(entry="Web, C. (2020). A page. https://x.org/page", url="https://x.org/page#top"),
-        Reference(entry="Plain, D. (2018). A book.", title="A book", authors=["Plain, D."]),
+        Reference(label="Open 2021", doi="10.1000/open", year=2021),
+        Reference(label="Closed 2019", doi="10.1000/closed", year=2019),
+        Reference(label="Web 2020", url="https://x.org/page#top"),
+        Reference(label="Plain 2018", title="A book", authors=["Plain, D."]),
     ]
 )
 
@@ -1487,7 +1487,7 @@ def test_reference_scan_lists_cited_works_and_writes_nothing(tmp_path, monkeypat
         "year": 2021,
         "doi": "10.1000/open",
         "url": None,
-        "entry": "Open, A. (2021). Free paper. J. 1.",
+        "label": "Open 2021",
         "retrievability": "pdf",
         "suggested_url": "https://x.org/o.pdf",
     }
@@ -1603,7 +1603,7 @@ def test_reference_scan_reports_an_answer_that_still_looks_incomplete(
     page = "References\n" + "\n".join(
         f"{name}, A. ({year}). A paper. J. {i}." for i, (name, year) in enumerate(cited)
     )
-    one = ReferenceList(references=[Reference(entry="Open, A. (2021). A paper. J. 0.")])
+    one = ReferenceList(references=[Reference(label="Open 2021", title="A paper")])
     settings = _settings(tmp_path, crossref_mailto="checker@example.org")
     fake = FakeLLM({ReferenceList: [one, one]})
     monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
@@ -1616,7 +1616,7 @@ def test_reference_scan_reports_an_answer_that_still_looks_incomplete(
         "references_dropped": 0,
         "possibly_incomplete": True,
     }
-    assert [r["entry"] for r in body["references"]] == ["Open, A. (2021). A paper. J. 0."]
+    assert [r["label"] for r in body["references"]] == ["Open 2021"]
     assert len(fake.parse_calls) == 2
     assert "1 references for about 4 entry starts" in references_log.text
     assert "still looks incomplete after a retry" in references_log.text
@@ -1668,22 +1668,22 @@ def test_reference_scan_without_a_contact_email_looks_nothing_up(tmp_path, monke
     ]
 
 
-def test_reference_scan_survives_a_blank_entry(tmp_path, monkeypatch):
-    """A model slip — `entry` "" or whitespace where the prompt asked for
-    the entry's first characters — is an ordinary answer, not a 500: the
-    handler re-validates each reference as a ScannedReference, and a blank
-    entry must arrive there as "" (a str), never as None. The row with a
-    title is listed with entry "", the row with nothing to act on is
-    dropped. raise_server_exceptions=False so a handler failure shows as
-    the HTTP 500 the dialog would see."""
+def test_reference_scan_survives_a_blank_label(tmp_path, monkeypatch):
+    """A model slip — `label` "" or whitespace where the prompt asked for a
+    short key — is an ordinary answer, not a 500: the handler re-validates
+    each reference as a ScannedReference, and a blank label arrives there
+    as null. The row with a title is listed with label null; the rows that
+    name no title, DOI or address — a blank one, and one with a label
+    alone — are dropped and counted. raise_server_exceptions=False so a
+    handler failure shows as the HTTP 500 the dialog would see."""
     from authorai import api as apimod
 
     settings = _settings(tmp_path)  # crossref_mailto unset: no lookup, no network
     answer = ReferenceList(
         references=[
-            Reference(entry=""),
-            Reference(entry="   ", title="Titled work", authors=["Titled, T."], year=2020),
-            Reference(entry="Printed, P. (2019). As printed."),
+            Reference(label=""),
+            Reference(label="   ", title="Titled work", authors=["Titled, T."], year=2020),
+            Reference(label="Printed 2019"),
         ]
     )
     fake = FakeLLM({ReferenceList: answer})
@@ -1693,13 +1693,10 @@ def test_reference_scan_survives_a_blank_entry(tmp_path, monkeypatch):
         resp = client.post(SCAN, headers=AUTH, files=_scan_report())
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert [(r["entry"], r["title"]) for r in body["references"]] == [
-        ("", "Titled work"),
-        ("Printed, P. (2019). As printed.", None),
-    ]
+    assert [(r["label"], r["title"]) for r in body["references"]] == [(None, "Titled work")]
     assert body["limits"] == {
         "text_truncated": False,
-        "references_dropped": 1,
+        "references_dropped": 2,
         "possibly_incomplete": False,
     }
     assert body["references"][0] == {
@@ -1708,7 +1705,7 @@ def test_reference_scan_survives_a_blank_entry(tmp_path, monkeypatch):
         "year": 2020,
         "doi": None,
         "url": None,
-        "entry": "",
+        "label": None,
         "retrievability": "unknown",
         "suggested_url": None,
     }
