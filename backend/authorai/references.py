@@ -41,7 +41,7 @@ from pypdf import PdfReader
 from pypdf.generic import IndirectObject
 
 from authorai.credibility import clean_doi, get_json_with_retries
-from authorai.fetch import is_public_address, url_host, validate_source_url
+from authorai.fetch import is_public_address, is_youtube_url, url_host, validate_source_url
 from authorai.llm import LLM
 from authorai.log import setup_logger
 from authorai.web import ExtractionTimeoutError, end_with_parent, handover_file, in_bounded_child
@@ -606,15 +606,20 @@ class UnpaywallClient:
 
 def offerable_url(url: str) -> str:
     """The address in the form a pasted link takes, or ValueError when the
-    app would refuse the link: the syntax gate a pasted link passes, then the
-    one refusal the fetcher would make that needs no network. A LITERAL
-    address host must pass fetch.is_public_address — the gate the fetcher
-    applies to every resolved hop — and `localhost`, or any name under it,
-    is the local machine by definition. A NAME that resolves to private
-    space is deliberately not caught here: a pre-upload aid does no DNS,
-    and the fetch gate resolves and pins every hop at ingest, where such a
-    link is refused. An offer is only ever as good as that gate."""
+    app would refuse the link: every refusal the upload dialog's own link
+    check makes (lib/links.ts checkLink) — the syntax gate a pasted link
+    passes and the YouTube refusal `POST /api/runs` makes, so the scan never
+    suggests a link the dialog then refuses to add — then the one refusal
+    the fetcher would make that needs no network. A LITERAL address host
+    must pass fetch.is_public_address — the gate the fetcher applies to
+    every resolved hop — and `localhost`, or any name under it, is the local
+    machine by definition. A NAME that resolves to private space is
+    deliberately not caught here: a pre-upload aid does no DNS, and the
+    fetch gate resolves and pins every hop at ingest, where such a link is
+    refused. An offer is only ever as good as that gate."""
     normalized = validate_source_url(url)
+    if is_youtube_url(normalized):
+        raise ValueError(f"Source URL {normalized!r}: YouTube links are not supported yet")
     host = url_host(normalized) or ""
     if host == "localhost" or host.endswith(".localhost"):
         raise ValueError(f"Source URL {normalized!r} names the local machine")

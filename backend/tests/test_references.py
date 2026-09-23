@@ -1158,6 +1158,34 @@ def test_an_address_the_fetcher_would_refuse_is_never_offered(bad, references_lo
     assert printed_url(Reference(entry="e", url=bad)) is None, bad
 
 
+@pytest.mark.parametrize(
+    "video",
+    [
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://youtu.be/dQw4w9WgXcQ",
+        "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+    ],
+)
+def test_a_youtube_address_is_never_offered_because_the_dialog_would_refuse_it(
+    video, references_log
+):
+    """The offer gate applies every refusal the dialog's own link check
+    applies (lib/links.ts checkLink), YouTube included: a suggested link the
+    dialog then refuses is a row the user can tick but never add. A record's
+    next address is tried; a printed one is not offered."""
+    record = _record(url_for_pdf=video, url_for_landing_page="https://x.org/a")
+    assert retrievability(record) == ("landing", "https://x.org/a"), video
+    assert "YouTube" in references_log.text
+    assert printed_url(Reference(entry="e", url=video)) is None, video
+
+
+def test_a_host_that_merely_contains_youtube_is_offered():
+    for url in ("https://notyoutube.com/x", "https://youtube.com.example.org/x"):
+        assert retrievability(_record(url_for_pdf=url)) == ("pdf", url), url
+
+
 def test_a_public_literal_address_or_a_name_is_offered():
     """Only the address forms that can be judged without a network are
     judged: a public literal passes, and a NAME is offered as it is — a name
