@@ -1428,6 +1428,16 @@ def _scan_report(pages=("Body.", "References\nOpen, A. (2021). Free paper. J. 1.
     return {"report": ("report.pdf", pdf_with_pages(list(pages)), "application/pdf")}
 
 
+def _no_llm(monkeypatch) -> None:
+    """The scan under test never reaches the model: constructing a client
+    is already the failure."""
+    from authorai import api as apimod
+
+    monkeypatch.setattr(
+        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
+    )
+
+
 def _nothing_written(settings) -> None:
     """The scan is structurally unable to write rows (no DB dependency) and
     must leave nothing on disk either — it reads the spooled part in place."""
@@ -1500,11 +1510,7 @@ def test_reference_scan_rejects_what_it_cannot_read(
     """The same validation an upload gets, plus pypdf's verdict: a file that
     passes the magic check but cannot be opened is a 400 naming the file,
     never a 500 — and no model is constructed for any of them."""
-    from authorai import api as apimod
-
-    monkeypatch.setattr(
-        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
-    )
+    _no_llm(monkeypatch)
     settings = _settings(tmp_path, max_upload_bytes=1000)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
         resp = client.post(
@@ -1520,13 +1526,10 @@ def test_reference_scan_of_a_report_too_costly_to_read_is_a_400_not_a_500(tmp_pa
     that holds the reader past Settings.extract_timeout_seconds is refused
     like any file pypdf cannot open — a 400 naming the file and saying it
     was too costly, never a 500 — and no model is constructed."""
-    from authorai import api as apimod
     from authorai import references as refsmod
 
     monkeypatch.setattr(refsmod, "_read_in_child", reader_that_never_answers)
-    monkeypatch.setattr(
-        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
-    )
+    _no_llm(monkeypatch)
     settings = _settings(tmp_path, extract_timeout_seconds=0.5)
     app = create_app(settings, worker=_NoopWorker())
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -1542,11 +1545,7 @@ def test_reference_scan_reads_the_last_pages_of_a_long_report_promptly(tmp_path,
     """5,000 textless pages: the page-tree bound is linear in the tree, the
     read covers the last 600 pages, and the answer is 'none' without a
     model call — in seconds, not the minutes a hostile tree would take."""
-    from authorai import api as apimod
-
-    monkeypatch.setattr(
-        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
-    )
+    _no_llm(monkeypatch)
     settings = _settings(tmp_path)
     started = time.perf_counter()
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
@@ -1581,11 +1580,7 @@ def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypa
     """A scanned (image-only) PDF has no text to read: the answer is 'none'
     and an empty list — the model is never asked, so it cannot invent a
     bibliography."""
-    from authorai import api as apimod
-
-    monkeypatch.setattr(
-        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
-    )
+    _no_llm(monkeypatch)
     settings = _settings(tmp_path, crossref_mailto="checker@example.org")
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
         resp = client.post(SCAN, headers=AUTH, files=_scan_report(pages=["", ""]))
