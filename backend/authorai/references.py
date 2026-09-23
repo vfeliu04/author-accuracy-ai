@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field, field_validator
 from pypdf import PdfReader
 from pypdf.generic import IndirectObject
 
-from authorai.credibility import clean_doi, get_json_with_retries
+from authorai.credibility import clean_doi, get_json_with_retries, registry_client
 from authorai.fetch import (
     is_public_address,
     is_youtube_url,
@@ -747,11 +747,7 @@ class UnpaywallClient:
                 "it refuses requests without one"
             )
         self._mailto = mailto.strip()
-        self._client = httpx.Client(
-            base_url=UNPAYWALL_BASE,
-            timeout=timeout,
-            headers={"User-Agent": f"AuthorAI/2.0 (mailto:{self._mailto})"},
-        )
+        self._client = registry_client(self._mailto, base_url=UNPAYWALL_BASE, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()

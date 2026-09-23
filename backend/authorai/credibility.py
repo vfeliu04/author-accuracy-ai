@@ -312,6 +312,18 @@ def get_json_with_retries(
     raise RuntimeError(f"{provider} gave no answer after {retries + 1} attempts ({url}): {failure}")
 
 
+def registry_client(
+    mailto: str | None, *, base_url: str | None = None, timeout: float
+) -> httpx.Client:
+    """The one httpx client shape for every registry (Crossref and the ISBN
+    catalogues here, Unpaywall in references.py): the operator's contact in
+    the User-Agent, as the registries ask, and the caller's timeout. Whether
+    a contact is required (Unpaywall) or merely polite (Crossref) is each
+    client's own rule, decided before this is called."""
+    agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
+    return httpx.Client(base_url=base_url or "", timeout=timeout, headers={"User-Agent": agent})
+
+
 class IsbnClient:
     """ISBN resolution: Open Library first, Google Books as fallback.
 
@@ -330,8 +342,7 @@ class IsbnClient:
     """
 
     def __init__(self, mailto: str | None, timeout: float = ISBN_TIMEOUT):
-        agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
-        self._client = httpx.Client(timeout=timeout, headers={"User-Agent": agent})
+        self._client = registry_client(mailto, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
@@ -424,10 +435,7 @@ class CrossrefClient:
                 "CROSSREF_MAILTO is not set — using Crossref's anonymous pool "
                 "(slower, and impolite for sustained use)"
             )
-        agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
-        self._client = httpx.Client(
-            base_url=CROSSREF_BASE, timeout=timeout, headers={"User-Agent": agent}
-        )
+        self._client = registry_client(mailto, base_url=CROSSREF_BASE, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
