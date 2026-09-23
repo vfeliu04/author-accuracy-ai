@@ -47,6 +47,7 @@ from datetime import date
 from html import unescape
 from html.parser import HTMLParser
 from multiprocessing import connection, resource_tracker
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -95,6 +96,13 @@ class ExtractionTimeoutError(RuntimeError):
     """Reading the page exceeded its wall-clock budget and was stopped."""
 
 
+class ResultTooLargeError(RuntimeError):
+    """The reader process reported a result longer than RESULT_MAX_BYTES; it
+    was refused on its length header, unread. A bound of the reader's, like
+    the deadline: the message names the reader's input, as every reader
+    failure does."""
+
+
 class ReaderExitedError(RuntimeError):
     """The reader process exited without sending a result. `exitcode` is
     its status: negative for a signal (the CPU limit's SIGXCPU, an
@@ -108,6 +116,22 @@ class ReaderExitedError(RuntimeError):
     def __init__(self, message: str, exitcode: int | None) -> None:
         super().__init__(message)
         self.exitcode = exitcode
+
+
+# The most a reader may REPORT, as opposed to cost. The child's deadline,
+# CPU limit and memory watchdog bound its work, and each reader caps the
+# text it builds (references.PAGE_TEXT_MAX_CHARS and READER_MAX_TEXT_CHARS
+# for a PDF; a fetched page is at most its body cap), but a parent that
+# received an unbounded frame held the frame, the unpickled value and its
+# own copies at once, in the request thread, for as long as they took to
+# process. recv_bytes refuses a frame on its length header, before a byte
+# of the body is read (the connection is then no longer readable, as
+# documented), and in_bounded_child reports the refusal as a bound of the
+# reader's. 64 MiB is twice the largest result either reader can send: the
+# PDF reader's 8,000,000 characters pickle as at most 32 MiB of UTF-8 (~8
+# MiB for the Latin text of a real report), and a page's sections are at
+# most the 10 MB body they came from.
+RESULT_MAX_BYTES = 64 * 1024 * 1024
 
 
 @dataclass
@@ -287,9 +311,27 @@ def in_bounded_child(
                     "(the page is too large or complex)"
                 )
             try:
-                outcome = receiver.recv()
-            except (EOFError, OSError):  # the child died before reporting (EOF) or
-                pass  # while reporting (a frame cut short): killed, out of memory
+                frame = receiver.recv_bytes(RESULT_MAX_BYTES)
+            except EOFError:  # the child died before reporting
+                pass
+            except OSError:
+                # A frame cut short (the child died while reporting: killed,
+                # out of memory) — or one refused on its length header, which
+                # leaves the connection closed: the reader's result was past
+                # the bound, and that is a bound's verdict, not an exit's.
+                if receiver.closed:
+                    logger.warning(
+                        "the reader process for %s reported a result larger than %d bytes "
+                        "— refused unread",
+                        url,
+                        RESULT_MAX_BYTES,
+                    )
+                    raise ResultTooLargeError(
+                        f"{url} could not be read: the reader reported a result larger than "
+                        f"{RESULT_MAX_BYTES} bytes"
+                    ) from None
+            else:
+                outcome = ForkingPickler.loads(frame)  # what recv() does, after its own read
             if outcome is None:
                 # A child that reported nothing is judged by its exit status
                 # (a bound or a bug — the caller's call), so let it end by

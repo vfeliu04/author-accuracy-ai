@@ -53,6 +53,7 @@ from authorai.log import setup_logger
 from authorai.web import (
     ExtractionTimeoutError,
     ReaderExitedError,
+    ResultTooLargeError,
     end_with_parent,
     handover_file,
     in_bounded_child,
@@ -109,6 +110,27 @@ REFERENCE_MAX_PAGES = 600
 # the reader's bounds.
 PAGE_TREE_CEILING = 10_000
 READER_ADDRESS_SPACE_BYTES = 1 << 30
+
+# What bounds the RESULT, as opposed to the read: the child's bounds cap
+# what pypdf may cost, not what it may return. A ToUnicode CMap may map one
+# glyph code to a destination of any length, and pypdf expands each glyph
+# by dict lookup at memcpy speed, so a 1.3 KB file yielded 240 MB of page
+# text in a second — under the deadline and the watchdog — which the
+# parent then held three times over (the frame, the unpickled list, the
+# join) for 30 seconds of the request thread. So the child cuts what it
+# sends: each page at PAGE_TEXT_MAX_CHARS (twice the closing text the
+# model reads, so a heading on a real page still opens a full window; the
+# densest real page is ~6,000 characters, the whole Drought list 61,616
+# over 11 pages), and the pages together at READER_MAX_TEXT_CHARS, past
+# which the read stops — from the END backwards, since reference_text
+# wants the closing pages — and the result says it was cut. 8,000,000 is
+# the page cap's worth at a generous 13,000 characters a page, ~120 times
+# the largest example tail (72,699), and the parent's work on it (the join
+# and the per-line heading scan) is about a second. The parent bounds its
+# own side too (web.RESULT_MAX_BYTES): a frame longer than it is refused
+# on its length header, unread.
+PAGE_TEXT_MAX_CHARS = 2 * REFERENCE_MAX_CHARS
+READER_MAX_TEXT_CHARS = 8_000_000
 
 # The memory bound where the address-space cap is not one. macOS refuses
 # RLIMIT_AS, and there a FlateDecode bomb — 1.17 MB that inflates to 1.2 GB
@@ -291,14 +313,21 @@ def read_pages(
     file provokes — is one ValueError, the caller's 400; so is a file the
     child cannot finish with inside its budget — the deadline, the CPU
     limit's SIGXCPU, the memory bound (the watchdog's exit code, or the
-    address-space cap's), an out-of-memory kill — which reads as "too
-    costly", never as a 500. A child that ends any other way is the
+    address-space cap's), an out-of-memory kill — or whose pages the
+    parent refuses on their size (web.RESULT_MAX_BYTES), which reads as
+    "too costly", never as a 500. A child that ends any other way is the
     server's fault, not the file's: an unhandled exception at start-up or
     in the reader (an import that fails, a bug) or a return with nothing
     reported propagates as the ReaderExitedError it is (a 500), its exit
     status logged by in_bounded_child and the child's traceback on stderr.
     So is a failure to hand the file to the child (no temp dir), a
     RuntimeError.
+
+    The pages are what the child could send: each cut at
+    PAGE_TEXT_MAX_CHARS, and past READER_MAX_TEXT_CHARS in all the earlier
+    pages are not read at all — the LAST pages are what come back, with a
+    warning, since the closing text is what the scan reads (see the
+    constants).
     """
     handle.seek(0)  # from the start, as pypdf itself would read it
     payload_path = handover_file(handle, "the report PDF")
@@ -315,13 +344,26 @@ def read_pages(
             "could not read the PDF: it was too costly to read "
             f"(took longer than {timeout:g} seconds)"
         ) from exc
+    except ResultTooLargeError as exc:
+        raise ValueError(
+            "could not read the PDF: it was too costly to read (the reader's result was too large)"
+        ) from exc
     except ReaderExitedError as exc:
         why = _stopped_by_a_bound(exc.exitcode)
         if why is None:
             raise
         raise ValueError(f"could not read the PDF: it was too costly to read ({why})") from exc
     if kind == "result":
-        return payload
+        pages, cut = payload
+        if cut:
+            logger.warning(
+                "the report PDF was read in part: its last %d pages hold more than %d "
+                "characters of text, so only the last %d were read",
+                max_pages,
+                READER_MAX_TEXT_CHARS,
+                len(pages),
+            )
+        return pages
     name, message, _child_traceback = payload
     if kind == "value":  # the child's own refusal, worded for the user
         raise ValueError(f"could not read the PDF: {message}")
@@ -408,21 +450,37 @@ def _watch_memory(
     return thread
 
 
-def _last_pages(handle: BinaryIO, max_pages: int) -> list[str]:
-    """The text of the last `max_pages` pages of the REAL page list. pypdf
-    3.17.4's `reader.pages` is a view over the trailer's declared /Count for
-    an encrypted file (it flattens the tree only for an unencrypted one), so
-    a stale count would drop the closing pages — the bibliography — or make
-    a file every viewer opens unreadable: the list is built from the tree
-    explicitly, once the walk above has bounded its cost (the pinned
-    version's flatten; `flattened_pages` is the public name of its result)."""
+def _last_pages(handle: BinaryIO, max_pages: int) -> tuple[list[str], bool]:
+    """The text of the last `max_pages` pages of the REAL page list, and
+    whether the text cap cut the read short. pypdf 3.17.4's `reader.pages`
+    is a view over the trailer's declared /Count for an encrypted file (it
+    flattens the tree only for an unencrypted one), so a stale count would
+    drop the closing pages — the bibliography — or make a file every viewer
+    opens unreadable: the list is built from the tree explicitly, once the
+    walk above has bounded its cost (the pinned version's flatten;
+    `flattened_pages` is the public name of its result).
+
+    The pages are read from the END, each cut to PAGE_TEXT_MAX_CHARS, and
+    the walk stops at the first page that would take the total past
+    READER_MAX_TEXT_CHARS (see the constants): the pages kept are the last
+    ones, whole, in order. The cost of extracting a page pypdf inflates far
+    past the cap is the child's, under its watchdog; only the cut text
+    leaves the process."""
     reader = PdfReader(handle, strict=False)
     if reader.is_encrypted:
         reader.decrypt("")
     _bound_page_tree(reader)
     reader._flatten()  # the one way to the real list, see above
     pages = reader.flattened_pages or []
-    return [_sendable(page.extract_text() or "") for page in pages[-max_pages:]]
+    kept: list[str] = []
+    total = 0
+    for page in reversed(pages[-max_pages:]):
+        text = _sendable((page.extract_text() or "")[:PAGE_TEXT_MAX_CHARS])
+        if total + len(text) > READER_MAX_TEXT_CHARS:
+            return kept[::-1], True
+        kept.append(text)
+        total += len(text)
+    return kept[::-1], False
 
 
 def _sendable(text: str) -> str:

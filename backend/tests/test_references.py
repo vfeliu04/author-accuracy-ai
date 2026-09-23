@@ -10,10 +10,12 @@ import os
 import re
 import resource
 import signal
+import subprocess
 import sys
 import threading
 import time
 import types
+import zlib
 from concurrent.futures import wait
 
 import httpx
@@ -27,6 +29,7 @@ from authorai.references import (
     ENTRY_STARTS_FLOOR,
     HEADING_RUN_PAGES,
     MAX_REFERENCES,
+    PAGE_TEXT_MAX_CHARS,
     PAGE_TREE_CEILING,
     READER_ADDRESS_SPACE_BYTES,
     READER_MEMORY_BYTES,
@@ -459,30 +462,73 @@ def _flat_page_tree(leaves: int, *, count: int) -> bytes:
     return pdf_from_objects(objects)
 
 
-def _cmap_pdf(bfchars: str) -> bytes:
-    """One page set in a Type0 font whose ToUnicode CMap maps glyphs as
-    `bfchars` says — the shape of a real malformed font, which pypdf decodes
-    with `surrogatepass` (strict=False) rather than refuse."""
+def _stream(data: bytes, *, deflate: bool) -> bytes:
+    """A stream object body, deflated when asked (as real PDFs store them)."""
+    if deflate:
+        data = zlib.compress(data, 9)
+        head = b"<< /Length " + str(len(data)).encode() + b" /Filter /FlateDecode >>"
+    else:
+        head = b"<< /Length " + str(len(data)).encode() + b" >>"
+    return head + b"\nstream\n" + data + b"\nendstream"
+
+
+def _cmap_pdf(
+    bfchars: str,
+    content: bytes = b"BT /F1 12 Tf 72 720 Td <000100020002> Tj ET",
+    *,
+    pages: int = 1,
+    deflate: bool = False,
+) -> bytes:
+    """`pages` pages, each drawing `content`, set in a Type0 font whose
+    ToUnicode CMap maps glyphs as `bfchars` says — the shape of a real
+    malformed font, which pypdf decodes with `surrogatepass` (strict=False)
+    rather than refuse."""
     cmap = (
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
         "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
         "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
         f"{bfchars}\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n"
     ).encode()
-    content = b"BT /F1 12 Tf 72 720 Td <000100020002> Tj ET"
+    kids = " ".join(f"{7 + index} 0 R" for index in range(pages))
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode(),
         b"<< /Type /Font /Subtype /Type0 /BaseFont /Fake /Encoding /Identity-H "
-        b"/DescendantFonts [5 0 R] /ToUnicode 6 0 R >>",
+        b"/DescendantFonts [4 0 R] /ToUnicode 5 0 R >>",
         b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fake /CIDSystemInfo "
         b"<< /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>",
-        b"<< /Length " + str(len(cmap)).encode() + b" >>\nstream\n" + cmap + b"\nendstream",
-        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+        _stream(cmap, deflate=deflate),
+        _stream(content, deflate=deflate),
+        *[
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>"
+        ]
+        * pages,
     ]
     return pdf_from_objects(objects)
+
+
+def _amplifier_pdf(destination_chars: int, uses: int, *, pages: int = 1) -> bytes:
+    """The security review's text amplifier: one glyph code whose ToUnicode
+    destination is `destination_chars` characters ("A"), drawn `uses` times
+    on each of `pages` pages, streams deflated — a file of ~1.3 KB that
+    pypdf expands to destination_chars × uses characters a page, by dict
+    lookup, at memcpy speed."""
+    return _cmap_pdf(
+        f"1 beginbfchar\n<0001> <{'0041' * destination_chars}>\nendbfchar",
+        b"BT /F1 12 Tf 72 720 Td <" + b"0001" * uses + b"> Tj ET",
+        pages=pages,
+        deflate=True,
+    )
+
+
+def _resident_bytes() -> int:
+    """This process's CURRENT resident size (`ps`, on macOS and Linux alike):
+    ru_maxrss is a peak, which an earlier test may already have raised."""
+    kilobytes = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True, check=True
+    ).stdout
+    return int(kilobytes.strip()) * 1024
 
 
 def test_a_lone_surrogate_from_a_broken_font_is_replaced_so_the_text_can_be_sent():
@@ -679,6 +725,115 @@ def test_a_reader_that_hits_the_address_space_cap_reads_as_too_costly(monkeypatc
         read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
     assert "the reader needed too much memory" in str(caught.value)
     assert f"exited without a result (exit code {READER_MEMORY_EXIT_CODE})" in web_log.text
+
+
+# --- the reader's result is bounded on both sides of the pipe ------------------
+
+# The parent's growth on receiving a hostile file's pages, pinned generously:
+# the child sends at most two pages of PAGE_TEXT_MAX_CHARS below (~260 KB),
+# and the parent's own work on them is small. Before the caps it grew by
+# ~440 MiB (the 240 MB pickle, the unpickled list and the join at once).
+_PARENT_GROWTH_BOUND = 64 * 2**20
+
+
+def test_a_page_denser_than_the_page_cap_reaches_the_parent_cut():
+    """The security review's amplifier, deterministic: 240 MB of text from a
+    1.5 KB file — two pages of 120 M characters each, which peak at ~510
+    MiB in the child, under its watchdog — comes back as two pages of
+    PAGE_TEXT_MAX_CHARS. The child cuts each page before it is sent, so the
+    parent never holds the expansion: in seconds, with its own memory
+    untouched."""
+    pdf = _amplifier_pdf(30_000, 4_000, pages=2)
+    assert len(pdf) < 2_000
+    resident = _resident_bytes()
+    started = time.perf_counter()
+    pages = read_pages(io.BytesIO(pdf), timeout=60)
+    assert time.perf_counter() - started < 15
+    assert [len(page) for page in pages] == [PAGE_TEXT_MAX_CHARS] * 2
+    assert set(pages[0]) == set(pages[1]) == {"A"}
+    assert _resident_bytes() - resident < _PARENT_GROWTH_BOUND
+
+
+def test_the_reviews_amplifier_is_bounded_whichever_bound_it_meets():
+    """The review's exact shape: 30,000 × 8,000, 240 MB on ONE page, which
+    pypdf builds at 620-880 MiB in the child — either side of the 768 MiB
+    watchdog from one run to the next. Whichever bound it meets, the parent
+    sees the capped page or the memory bound's refusal (the 400 path),
+    never a 500, in seconds, with its own memory untouched."""
+    pdf = _amplifier_pdf(30_000, 8_000)
+    assert len(pdf) < 1_500
+    resident = _resident_bytes()
+    started = time.perf_counter()
+    try:
+        (page,) = read_pages(io.BytesIO(pdf), timeout=60)
+    except ValueError as exc:
+        assert "too costly to read (the reader needed too much memory)" in str(exc)
+    else:
+        assert len(page) == PAGE_TEXT_MAX_CHARS and set(page) == {"A"}
+    assert time.perf_counter() - started < 15
+    assert _resident_bytes() - resident < _PARENT_GROWTH_BOUND
+
+
+def test_the_reader_keeps_the_last_pages_that_fit_the_total_cap(monkeypatch):
+    """Past READER_MAX_TEXT_CHARS the reader stops and says so: the pages
+    kept are the LAST ones — what reference_text wants — read from the end
+    backwards, each whole, and a page that would not fit ends the walk.
+    Under the cap nothing is cut."""
+    pdf = pdf_with_pages(["a" * 40, "b" * 40, "c" * 40, "d" * 40])
+    pages, cut = references._last_pages(io.BytesIO(pdf), 600)
+    assert (cut, [page[0] for page in pages]) == (False, ["a", "b", "c", "d"])
+    lengths = [len(page) for page in pages]
+    monkeypatch.setattr(references, "READER_MAX_TEXT_CHARS", sum(lengths[2:]) + lengths[1] // 2)
+    pages, cut = references._last_pages(io.BytesIO(pdf), 600)
+    assert (cut, [page[0] for page in pages]) == (True, ["c", "d"])
+    assert [len(page) for page in pages] == lengths[2:]
+    monkeypatch.setattr(references, "PAGE_TEXT_MAX_CHARS", 5)
+    monkeypatch.setattr(references, "READER_MAX_TEXT_CHARS", 12)
+    pages, cut = references._last_pages(io.BytesIO(pdf), 600)
+    assert (pages, cut) == (["ccccc", "ddddd"], True)
+
+
+def _reader_with_a_small_total_cap(sender, path, max_pages, cpu_seconds):
+    """The real reader under a total cap of 8 characters — one short page
+    with its line break — set in the child's own module, since the parent's
+    monkeypatch does not reach a spawned process."""
+    references.READER_MAX_TEXT_CHARS = 8
+    references._read_in_child(sender, path, max_pages, cpu_seconds)
+
+
+def test_a_read_cut_at_the_total_cap_hands_the_parent_the_last_pages_with_a_warning(
+    monkeypatch, references_log
+):
+    monkeypatch.setattr(references, "_read_in_child", _reader_with_a_small_total_cap)
+    pdf = pdf_with_pages(["one", "two", "three", "four"])
+    pages = read_pages(io.BytesIO(pdf), timeout=30)
+    assert [page.strip() for page in pages] == ["four"]
+    assert "WARNING" in references_log.text
+    assert "read in part" in references_log.text
+
+
+def _reader_that_reports_too_much(sender, path, *_args):
+    """A reader whose result is larger than the parent will receive."""
+    from authorai.web import report_outcome
+
+    report_outcome(sender, lambda: "x" * (2 * 2**20), lambda exc: "other")
+
+
+def test_a_result_the_parent_refuses_on_its_size_reads_as_too_costly(monkeypatch, web_log):
+    """The parent's side of the bound: a frame past RESULT_MAX_BYTES is
+    refused on its length header, unread, and the refusal is a bound of the
+    reader's — the 400, never the 500 a reader that dies mid-report is."""
+    import authorai.web as web_mod
+
+    monkeypatch.setattr(web_mod, "RESULT_MAX_BYTES", 2**20)
+    monkeypatch.setattr(references, "_read_in_child", _reader_that_reports_too_much)
+    before = set(multiprocessing.active_children())
+    with pytest.raises(ValueError, match="too costly to read") as caught:
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
+    assert "the reader's result was too large" in str(caught.value)
+    assert f"reported a result larger than {2**20} bytes" in web_log.text
+    assert "exited without a result" not in web_log.text
+    assert set(multiprocessing.active_children()) == before
 
 
 def test_the_watchdog_ends_the_process_only_once_the_peak_passes_the_bound(monkeypatch):
