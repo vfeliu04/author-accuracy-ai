@@ -133,6 +133,42 @@ def test_headings_one_page_more_than_a_run_apart_are_two_sections():
     assert text == "References\n" + ENTRY
 
 
+def test_a_heading_that_begins_a_page_belongs_to_that_page():
+    """The joined text puts one newline between pages, and each page's start
+    is counted with it: a heading at the very first character of page 3 is
+    on page 3, not page 2. Observable through the run rule — the earlier
+    heading is on page 0, so the two are HEADING_RUN_PAGES + 1 apart, two
+    sections, and the slice starts at the later one. A page start counted
+    one character late, or a bisect that puts a position equal to a page
+    start on the page before, reads them as one run and keeps page 0."""
+    assert HEADING_RUN_PAGES + 1 == 3
+    pages = ["Body.\nReferences\n" + SECOND_ENTRY, "Body.", "Body.", "References\n" + ENTRY]
+    text, source = reference_text(pages)
+    assert source == "heading"
+    assert text == "References\n" + ENTRY
+
+
+def test_a_heading_that_ends_a_page_belongs_to_that_page():
+    """The other side of the same count: a heading printed at the foot of a
+    page (its entries begin on the next page, and pypdf ends a page's text
+    without a newline) sits in that page's last characters. With the join
+    newline left out of the count every recorded page start drifts one
+    character earlier per page, so by page 12 the page's last twelve
+    characters — the whole heading — would read as page 13: three pages
+    after the running header on page 10 instead of two, the run would
+    break, and the header's page would be dropped."""
+    pages = [
+        *[BODY] * 10,
+        "References\n" + SECOND_ENTRY,  # page 10: the running header
+        "Entries continue.",
+        BODY + "\nReferences",  # page 12: the heading at the foot, HEADING_RUN_PAGES later
+        ENTRY,
+    ]
+    text, source = reference_text(pages)
+    assert source == "heading"
+    assert text == "\n".join(pages[10:])
+
+
 def test_a_contents_page_mention_far_earlier_stays_excluded():
     """A table of contents prints 'References' on a line of its own, many
     pages before the bibliography: more than HEADING_RUN_PAGES pages back
@@ -321,6 +357,24 @@ def test_split_reference_text_prefers_a_blank_line_between_entries():
     assert [entry for chunk in chunks for entry in chunk.split("\n\n")] == entries
 
 
+def test_a_blank_line_early_in_the_window_does_not_make_a_sliver():
+    """The blank-line cut is taken only in the second half of the window. A
+    blank line 200 characters into a 12,000-character window, with no later
+    one, must not end the chunk there: the cut falls back to the window's
+    last line break, so the first chunk is more than half a window and the
+    blank line stays inside it. A blank line IN the second half is taken,
+    so entries stay whole where the layout marks their boundaries."""
+    early = "x" * 198 + "\n\n" + _lines(340)
+    chunks = split_reference_text(early)
+    assert chunks[0] != "x" * 198
+    assert len(chunks[0]) > REFERENCE_CHUNK_CHARS // 2
+    assert chunks[0].startswith("x" * 198 + "\n\nRef 0000.")
+    assert [line for chunk in chunks for line in chunk.split("\n")] == early.split("\n")
+    late = _lines(80) + "\n\n" + _lines(340)
+    assert REFERENCE_CHUNK_CHARS // 2 < len(_lines(80)) < REFERENCE_CHUNK_CHARS
+    assert split_reference_text(late)[0] == _lines(80)
+
+
 def test_split_reference_text_cuts_a_line_longer_than_a_chunk_at_a_space():
     """A PDF whose text lost its line breaks: no line break to cut at, so the
     last space serves and, with none, the cap itself — the output budget
@@ -387,6 +441,28 @@ def test_a_failing_part_fails_the_whole_extraction():
 
     with pytest.raises(RuntimeError, match="no parseable ReferenceList"):
         extract_references(FakeLLM({ReferenceList: answer}), "m", text)
+
+
+def test_a_long_lists_parts_are_read_four_at_a_time():
+    """Four chunks, each call held at a Barrier(LOOKUP_WORKERS) until every
+    one of the four is inside the model call at the same moment: the
+    barrier releases only when all parties have arrived, so a pool of fewer
+    workers, or a serial loop, leaves the first call waiting alone until
+    the barrier times out and breaks — the extraction then raises
+    BrokenBarrierError instead of hanging."""
+    text = _lines(480)
+    assert len(split_reference_text(text)) == references.LOOKUP_WORKERS == 4
+    barrier = threading.Barrier(references.LOOKUP_WORKERS, timeout=5)
+
+    def answer(prompt: str) -> ReferenceList:
+        barrier.wait()
+        return _list("ok")
+
+    llm = FakeLLM({ReferenceList: answer})
+    result = extract_references(llm, "m", text)
+    assert not barrier.broken
+    assert len(llm.parse_calls) == 4
+    assert [r.entry for r in result.references] == ["ok"] * 4
 
 
 def test_entries_are_cut_to_the_prefix_length_verbatim(references_log):
