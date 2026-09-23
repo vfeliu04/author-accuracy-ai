@@ -41,6 +41,7 @@ import threading
 import time
 import traceback
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from html import unescape
@@ -251,7 +252,8 @@ def in_bounded_child(
 ) -> tuple[str, Any]:
     """Run `target(sender, payload_path, *args, cpu_seconds)` in a spawned
     child under a wall-clock budget and return the (kind, payload) pair it
-    sent back. The one bounded-reader primitive: extract_web_bounded reads a
+    sent back (report_outcome is the child's side of that exchange). The one
+    bounded-reader primitive: extract_web_bounded reads a
     page through it, and the bibliography scan (references.read_pages) reads
     a PDF through it, so a hostile input of either kind meets one deadline,
     one CPU limit and one parent-death watcher (end_with_parent, which the
@@ -366,26 +368,44 @@ def _start(child) -> None:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
+def report_outcome(
+    sender, work: Callable[[], Any], failure_kind: Callable[[Exception], str]
+) -> None:
+    """The child's side of in_bounded_child's exchange, in one place: the
+    value `work` returns is sent back as ("result", value), the exception
+    it raises as (failure_kind(exc), (type name, message, traceback)) —
+    exceptions themselves need not pickle, and which failures a reader
+    tells apart is its own rule. The pipe is closed once the outcome is
+    sent."""
+    try:
+        outcome = ("result", work())
+    except Exception as exc:  # noqa: BLE001 - every failure is reported; the parent judges it
+        outcome = (failure_kind(exc), (type(exc).__name__, str(exc), traceback.format_exc()))
+    sender.send(outcome)
+    sender.close()
+
+
 def _extract_in_child(sender, page_path: str, is_text: bool, url: str, cpu_seconds: int) -> None:
     """The child's side of extract_web_bounded: the page read back from its
-    file, then the result, or the failure as a (kind, (type name, message,
-    traceback)) triple — exceptions themselves need not pickle."""
+    file, then the result or the failure, reported through report_outcome —
+    a thin page and a ValueError each by their own kind, anything else as
+    "other"."""
     end_with_parent(cpu_seconds)
-    try:
+
+    def read_and_extract():
         with open(page_path, "rb") as page_file:
             raw = page_file.read()
         Path(page_path).unlink(missing_ok=True)
         html = raw.decode("utf-8", "surrogatepass") if is_text else raw
-        outcome = ("result", extract_web(html, url=url))
-    except Exception as exc:
-        kind = "other"
-        if isinstance(exc, ThinPageError):
-            kind = "thin"
-        elif isinstance(exc, ValueError):
-            kind = "value"
-        outcome = (kind, (type(exc).__name__, str(exc), traceback.format_exc()))
-    sender.send(outcome)
-    sender.close()
+        return extract_web(html, url=url)
+
+    report_outcome(sender, read_and_extract, _failure_kind)
+
+
+def _failure_kind(exc: Exception) -> str:
+    if isinstance(exc, ThinPageError):
+        return "thin"
+    return "value" if isinstance(exc, ValueError) else "other"
 
 
 def end_with_parent(cpu_seconds: int) -> None:

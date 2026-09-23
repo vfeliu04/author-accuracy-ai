@@ -28,7 +28,6 @@ import re
 import resource
 import sys
 import threading
-import traceback
 from bisect import bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from itertools import accumulate
@@ -57,6 +56,7 @@ from authorai.web import (
     end_with_parent,
     handover_file,
     in_bounded_child,
+    report_outcome,
 )
 
 logger = setup_logger(__name__)
@@ -327,8 +327,8 @@ def _stopped_by_a_bound(exitcode: int | None) -> str | None:
 def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) -> None:
     """The child's side of read_pages: the file opened and unlinked at once
     (the open handle keeps it; a reader killed outright never reaches its
-    own removal), the pages, or the failure as a (kind, (type name, message,
-    traceback)) triple — a ValueError is the child's own refusal, anything
+    own removal), then the pages, or the failure, reported through
+    web.report_outcome — a ValueError is the child's own refusal, anything
     else is pypdf's. A MemoryError is not reported but exited on, with
     READER_MEMORY_EXIT_CODE like the watchdog: it is the memory bound
     (RLIMIT_AS, where enforced), and a process past it may not manage the
@@ -336,17 +336,16 @@ def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) 
     end_with_parent(cpu_seconds)
     _limit_address_space(READER_ADDRESS_SPACE_BYTES)
     _watch_memory()
-    try:
-        with open(payload_path, "rb") as pdf_file:
-            Path(payload_path).unlink(missing_ok=True)
-            outcome = ("result", _last_pages(pdf_file, max_pages))
-    except MemoryError:  # the address-space cap, or an allocation no machine could make
-        os._exit(READER_MEMORY_EXIT_CODE)
-    except Exception as exc:  # noqa: BLE001 - every reader failure is "unreadable"
-        kind = "value" if isinstance(exc, ValueError) else "other"
-        outcome = (kind, (type(exc).__name__, str(exc), traceback.format_exc()))
-    sender.send(outcome)
-    sender.close()
+
+    def read():
+        try:
+            with open(payload_path, "rb") as pdf_file:
+                Path(payload_path).unlink(missing_ok=True)
+                return _last_pages(pdf_file, max_pages)
+        except MemoryError:  # the address-space cap, or an allocation no machine could make
+            os._exit(READER_MEMORY_EXIT_CODE)
+
+    report_outcome(sender, read, lambda exc: "value" if isinstance(exc, ValueError) else "other")
 
 
 def _limit_address_space(limit: int) -> None:
