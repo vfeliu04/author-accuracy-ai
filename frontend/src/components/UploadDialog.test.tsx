@@ -567,7 +567,11 @@ describe("UploadDialog reference checklist", () => {
     expect(screen.getByRole("checkbox", { name: /Work two/ })).not.toBeChecked();
     expect(screen.getByText("Work four")).toBeInTheDocument();
     expect(heading(2)).toBeInTheDocument();
-    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+    // The duplicate's tick is not dropped in silence: the row goes, covered
+    // by the first copy, and the note says why the count is one short.
+    expect(
+      screen.getByText("Added 1 of 2 — 1 couldn't be added: That link is already added.")
+    ).toHaveClass("modal__count");
   });
 
   it("stops adding at the source limit and says how many went in", async () => {
@@ -779,5 +783,41 @@ describe("UploadDialog reference checklist", () => {
     for (const row of document.querySelectorAll(".file-row[title]")) {
       expect(row.getAttribute("title")).not.toBe("");
     }
+  });
+
+  it("lists a suggested address the dialog would refuse without a tick, saying why", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        cited({
+          title: "A recorded webinar",
+          url: "https://www.youtube.com/watch?v=abc",
+          suggested_url: "https://www.youtube.com/watch?v=abc"
+        }),
+        cited({
+          title: "A record whose copy is a video",
+          retrievability: "pdf",
+          suggested_url: "https://youtu.be/abc"
+        }),
+        cited({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" })
+      ])
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    expect(screen.getAllByText("YouTube links aren't supported yet.")).toHaveLength(2);
+    expect(screen.queryByRole("checkbox", { name: /webinar/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /video/ })).not.toBeInTheDocument();
+    expect(screen.getByText("www.youtube.com")).toBeInTheDocument();
+    expect(screen.getByText("youtu.be")).toBeInTheDocument();
+    // The refusal replaces the copy tag: only Work one reads "free PDF".
+    expect(screen.getAllByText("free PDF")).toHaveLength(1);
+    expect(addLinks()).toHaveTextContent("Add 1 link");
+
+    fireEvent.click(addLinks());
+    expect(screen.getByText("Sources (1)")).toBeInTheDocument();
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("YouTube links aren't supported yet.")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /^Add \d+ links?$/ })).not.toBeInTheDocument();
+    expect(heading(2)).toBeInTheDocument();
   });
 });

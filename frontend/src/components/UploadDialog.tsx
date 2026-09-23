@@ -27,8 +27,19 @@ function uploadError(err: unknown): string {
     : err.message;
 }
 
-// A cited work with its place in the scan, which is what a tick refers to.
-type Cited = { ref: ScannedReference; index: number };
+// A cited work with its place in the scan, which is what a tick refers to,
+// and why the dialog would refuse its suggested address, if it would.
+type Cited = { ref: ScannedReference; index: number; refused: string | null };
+
+// The dialog's own link gate over the suggested address alone (a YouTube
+// page, say — the server's offer gate and the dialog's do not agree on every
+// address). A refused one is listed with the reason and can never be ticked,
+// rather than ticked and then dropped in silence by the Add click.
+function refusal(ref: ScannedReference): string | null {
+  if (ref.suggested_url === null) return null;
+  const result = checkLink(ref.suggested_url, []);
+  return "error" in result ? result.error : null;
+}
 
 // A free copy the lookup found is worth adding; an address the entry merely
 // printed was validated but never visited, so it waits for a tick.
@@ -110,10 +121,13 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const missing = useMemo<Cited[]>(() => {
     const names = sources.map((file) => file.name);
     return (scan.data?.references ?? [])
-      .map((ref, index) => ({ ref, index }))
+      .map((ref, index) => ({ ref, index, refused: refusal(ref) }))
       .filter(({ ref }) => alreadyAdded(ref, names, links) === null);
   }, [scan.data, sources, links]);
-  const addable = useMemo(() => missing.filter(({ ref }) => ref.suggested_url !== null), [missing]);
+  const addable = useMemo(
+    () => missing.filter(({ ref, refused }) => ref.suggested_url !== null && refused === null),
+    [missing]
+  );
   const ticked = addable.filter(({ index }) => checked.has(index));
 
   useEffect(() => {
@@ -187,33 +201,42 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   };
 
   // The only way a suggestion becomes a source: the ticked rows, each through
-  // the same checks a typed link gets, up to the source cap. A duplicate is
-  // skipped (its row goes once the first copy is in); the cap stops the rest
-  // and says so, with what got in.
+  // the same checks a typed link gets, up to the source cap. A tick that did
+  // not get in is never dropped in silence: the cap stops the rest and says
+  // so, with what got in, and a row the checks refuse against the links now
+  // held (a duplicate of one ticked just before it — its row goes once the
+  // first copy is in) is counted, with the reason.
   const addSuggested = () => {
     if (!scan.data) return;
     const wanted = ticked.map(({ ref }) => ref.suggested_url as string);
     let next = links;
     let added = 0;
     let capped = false;
+    const refused: string[] = [];
     for (const url of wanted) {
       if (sources.length + next.length >= MAX_SOURCES) {
         capped = true;
         break;
       }
       const result = checkLink(url, next);
-      if ("error" in result) continue;
+      if ("error" in result) {
+        refused.push(result.error);
+        continue;
+      }
       next = [...next, result.link];
       added += 1;
     }
     setLinks(next);
-    setAddNote(
-      capped
-        ? {
-            of: scan.data,
-            text: `Added ${added} of ${wanted.length} — at most ${MAX_SOURCES} sources per verification.`
-          }
+    const why = [
+      capped ? `at most ${MAX_SOURCES} sources per verification.` : null,
+      refused.length > 0
+        ? `${refused.length} couldn't be added: ${Array.from(new Set(refused)).join(" ")}`
         : null
+    ].filter((part): part is string => part !== null);
+    setAddNote(
+      why.length === 0
+        ? null
+        : { of: scan.data, text: `Added ${added} of ${wanted.length} — ${why.join(" ")}` }
     );
   };
 
@@ -474,19 +497,24 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             </p>
           ) : null}
           {cut !== null ? <p className="modal__count">{cut}</p> : null}
-          {missing.map(({ ref, index }) => {
+          {missing.map(({ ref, index, refused }) => {
             // The title, else the printed text; a row the scan kept for its
             // DOI or address alone, with no text, is named by that. Never a
             // blank label or tooltip.
             const label = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
             const tooltip = ref.entry || label;
             const tag = copyTag(ref, lookup?.status ?? "ok");
-            if (ref.suggested_url === null) {
+            if (ref.suggested_url === null || refused !== null) {
               return (
                 <div className="file-row" key={index} title={tooltip}>
                   <span className="file-row__check" aria-hidden />
                   <span className="file-row__name">{label}</span>
-                  <span className="file-row__size">{tag}</span>
+                  {ref.suggested_url !== null ? (
+                    <span className="file-row__host" title={ref.suggested_url}>
+                      {linkHost(ref.suggested_url)}
+                    </span>
+                  ) : null}
+                  <span className="file-row__size">{refused ?? tag}</span>
                 </div>
               );
             }
