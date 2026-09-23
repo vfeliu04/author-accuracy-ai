@@ -148,15 +148,29 @@ def extract_metadata(llm: LLM, model: str, opening_text: str) -> SourceMetadata:
 
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:)\s*", re.IGNORECASE)
 _DOI_SHAPE = re.compile(r"^10\.\d{4,9}/\S+$")
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def _steers_the_path(doi: str) -> bool:
+    """True when the DOI, quoted into a request path, would name a resource
+    other than <endpoint>/<doi>. httpx applies RFC 3986 dot-segment removal
+    to the path it sends, quoting notwithstanding, so "10.1000/../../admin"
+    is a GET of /admin on the registry; a backslash is a path separator to
+    some servers. A dot INSIDE a segment (10.1016/j.heliyon.2024.e34730)
+    is ordinary DOI punctuation and passes."""
+    return "\\" in doi or any(segment in _DOT_SEGMENTS for segment in doi.split("/"))
 
 
 def clean_doi(doi: str) -> str | None:
     """Strip the URL/`doi:` prefixes the extractor is told not to emit but
     sometimes does, and reject anything that is not DOI-shaped — an
     unvalidated string in the request path would silently look up a
-    DIFFERENT DOI (fragments are dropped, `?` starts a query string)."""
+    DIFFERENT DOI (fragments are dropped, `?` starts a query string) or, with
+    a "." or ".." segment, a different ENDPOINT. The one gate for every
+    registry client (Crossref here, Unpaywall in references.py), so the DOI
+    a model extracted never steers a request path."""
     candidate = _DOI_PREFIX.sub("", doi.strip())
-    if not _DOI_SHAPE.match(candidate):
+    if not _DOI_SHAPE.match(candidate) or _steers_the_path(candidate):
         logger.warning("Malformed DOI %r — skipping DOI lookup", doi)
         return None
     return candidate

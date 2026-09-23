@@ -324,6 +324,38 @@ def test_a_malformed_doi_makes_no_request():
 
 
 @respx.mock
+def test_the_request_path_is_exactly_the_doi_under_v2():
+    """The DOI is the whole of the path after /v2/, dots inside a segment
+    included (the heliyon DOI is a real, open one)."""
+    doi = "10.1016/j.heliyon.2024.e34730"
+    route = respx.get(f"{UNPAYWALL_BASE}/v2/{doi}").mock(
+        return_value=httpx.Response(200, json=_record())
+    )
+    _unpaywall().by_doi(doi)
+    assert str(route.calls.last.request.url) == (
+        f"{UNPAYWALL_BASE}/v2/{doi}?email=checker%40example.org"
+    )
+
+
+@respx.mock
+def test_a_doi_that_would_steer_the_request_path_makes_no_request():
+    """The DOI is model-extracted text. httpx resolves "." and ".." segments
+    even after quoting (RFC 3986 dot-segment removal), so "10.1000/../../admin"
+    would GET /admin on the registry. Such a DOI is malformed: no request."""
+    route = respx.route(host="api.unpaywall.org").mock(return_value=httpx.Response(404))
+    for bad in (
+        "10.1000/../../admin",
+        "10.1000/x/../../../etc",
+        "10.1000/./x",
+        "10.1000/x/.",
+        "10.1000/..",
+        "10.1000/a\\b",
+    ):
+        assert _unpaywall().by_doi(bad) is None, bad
+    assert route.call_count == 0, [str(c.request.url) for c in route.calls]
+
+
+@respx.mock
 def test_an_empty_mailto_is_refused_before_any_request():
     """Unpaywall answers HTTP 422 without an email; refusing at construction
     is the loud version, and no route is mocked so a request would fail."""

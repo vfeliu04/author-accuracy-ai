@@ -16,6 +16,7 @@ from authorai.credibility import (
     _title_match,
     aggregate_credibility,
     authority_needles,
+    clean_doi,
     evidence_usage,
     merge_record,
     resolve_tier,
@@ -165,6 +166,55 @@ def test_malformed_doi_is_skipped_without_a_request():
     for bad in ("https://doi.org/nope", "not-a-doi", "10.1/x"):
         tier, record = resolve_tier(SourceMetadata(doi=bad, title=None), _client(), origin=UPLOADED)
         assert (tier, record) == ("METADATA_ONLY", None)
+
+
+@respx.mock
+def test_by_doi_requests_exactly_the_works_path():
+    doi = "10.1016/j.heliyon.2024.e34730"
+    route = respx.get(f"{CROSSREF_BASE}/works/{doi}").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
+    )
+    assert _client().by_doi(doi) == {"title": ["Anything"]}
+    assert str(route.calls.last.request.url) == f"{CROSSREF_BASE}/works/{doi}"
+
+
+@respx.mock
+def test_a_doi_that_would_steer_the_request_path_makes_no_request():
+    """httpx resolves "." and ".." segments even after quoting, so
+    "10.1000/../../admin" would GET /admin on the registry; the DOI comes
+    from the model, so the shape gate refuses it before it enters the path."""
+    route = respx.route(host="api.crossref.org").mock(return_value=httpx.Response(404))
+    for bad in ("10.1000/../../admin", "10.1000/x/../../../etc", "10.1000/./x", "10.1000/a\\b"):
+        assert _client().by_doi(bad) is None, bad
+    assert route.call_count == 0, [str(c.request.url) for c in route.calls]
+
+
+@pytest.mark.parametrize(
+    "doi",
+    [
+        "10.1000/../../admin",
+        "10.1000/x/../../../etc",
+        "10.1000/./x",
+        "10.1000/x/.",
+        "10.1000/.",
+        "10.1000/..",
+        "10.1000/a\\b",
+    ],
+)
+def test_clean_doi_rejects_a_dot_segment_or_a_backslash(doi, credibility_log):
+    """A segment that IS "." or ".." steers the request path; a backslash is
+    a path separator to some servers. Both are refused as malformed, with
+    the same warning as any other shapeless DOI."""
+    assert clean_doi(doi) is None
+    assert "Malformed DOI" in credibility_log.text
+
+
+def test_clean_doi_keeps_dots_inside_a_segment():
+    """Dots INSIDE a segment are ordinary DOI punctuation."""
+    doi = "10.1016/j.heliyon.2024.e34730"
+    assert clean_doi(doi) == doi
+    assert clean_doi(f"https://doi.org/{doi}") == doi
+    assert clean_doi("10.1000/a.b.c/d.e") == "10.1000/a.b.c/d.e"
 
 
 @respx.mock
