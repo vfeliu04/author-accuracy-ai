@@ -150,16 +150,31 @@ _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:)\s*", re.IGNOREC
 _DOI_SHAPE = re.compile(r"^10\.\d{4,9}/\S+$")
 _DOT_SEGMENTS = frozenset({".", ".."})
 
+# Bounds on a DOI candidate BEFORE it is judged as served, because that
+# judgment decodes it repeatedly and a nested chain ("%2525…2e") shrinks by
+# two characters a pass — quadratic, 30 s for 240k characters, and on the
+# web path a page's own citation_doi reached it inside the reader's whole
+# budget. No real DOI approaches 256 characters (the longest registered run
+# a little over 100), and the most decoding a request meets is one proxy
+# and one server, so three passes reach anything such a chain can hide:
+# "%25252e" is a dot to a hop chain three deep, "%2525252e" to no real one.
+DOI_MAX_CHARS = 256
+DOI_DECODE_PASSES = 3
+
 
 def _as_served(doi: str) -> str:
     """The DOI as a server may read it before it normalizes the path:
-    percent-decoded until nothing changes. One decoding turns "%2e%2e" into
-    ".."; a server that decodes once still sees "%252e%252e" as "%2e%2e",
-    but one that decodes twice (a proxy in front of it) sees "..", so the
-    gate assumes the most decoding any hop may do."""
-    decoded = unquote(doi)
-    while decoded != doi:
-        doi, decoded = decoded, unquote(decoded)
+    percent-decoded until nothing changes, at most DOI_DECODE_PASSES times.
+    One decoding turns "%2e%2e" into ".."; a server that decodes once still
+    sees "%252e%252e" as "%2e%2e", but one that decodes twice (a proxy in
+    front of it) sees "..", so the gate assumes the most decoding any hop
+    chain may do — a fixed number, not "until stable", which is quadratic
+    on a nested chain (see DOI_DECODE_PASSES)."""
+    for _ in range(DOI_DECODE_PASSES):
+        decoded = unquote(doi)
+        if decoded == doi:
+            break
+        doi = decoded
     return doi
 
 
@@ -190,6 +205,13 @@ def clean_doi(doi: str) -> str | None:
     registry client (Crossref here, Unpaywall in references.py), so the DOI
     a model extracted never steers a request path."""
     candidate = _DOI_PREFIX.sub("", doi.strip())
+    if len(candidate) > DOI_MAX_CHARS:  # before the decoding below, which the length prices
+        logger.warning(
+            "Malformed DOI (%d characters, over %d) — skipping DOI lookup",
+            len(candidate),
+            DOI_MAX_CHARS,
+        )
+        return None
     if not _DOI_SHAPE.match(candidate) or _steers_the_path(candidate):
         logger.warning("Malformed DOI %r — skipping DOI lookup", doi)
         return None

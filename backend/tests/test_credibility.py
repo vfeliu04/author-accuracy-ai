@@ -1,5 +1,7 @@
 """Credibility tests: Crossref tiers (respx-recorded), publisher matching, aggregation."""
 
+import time
+
 import httpx
 import pytest
 import respx
@@ -268,6 +270,33 @@ def test_clean_doi_rejects_a_dot_segment_or_a_backslash(doi, credibility_log):
     as malformed, with the same warning as any other shapeless DOI."""
     assert clean_doi(doi) is None
     assert "Malformed DOI" in credibility_log.text
+
+
+def test_clean_doi_bounds_the_length_before_decoding_and_decodes_a_fixed_number_of_times(
+    credibility_log,
+):
+    """The decode-until-stable loop was quadratic — a nested chain shrinks by
+    two characters a pass — and ran before any length bound: 240k characters
+    of "%2525…2e" cost 30 s, on the web path inside the page reader's whole
+    budget. A DOI past DOI_MAX_CHARS is refused before the loop (no real DOI
+    approaches it), and the loop makes at most DOI_DECODE_PASSES decodings —
+    the most a request may be decoded across a proxy and a server — so the
+    worst case is milliseconds."""
+    from authorai.credibility import DOI_DECODE_PASSES, DOI_MAX_CHARS
+
+    nested = "10.1000/" + "%25" * 120_000 + "2e" + "%25" * 120_000 + "2e/x"  # a ../ chain, deep
+    started = time.perf_counter()
+    assert clean_doi(nested) is None
+    assert time.perf_counter() - started < 0.05
+    assert "Malformed DOI" in credibility_log.text
+    longest = "10.1000/" + "a" * (DOI_MAX_CHARS - len("10.1000/"))
+    assert clean_doi(longest) == longest
+    assert clean_doi(longest + "a") is None
+    # Exactly DOI_DECODE_PASSES encodings of a dot segment still decode to
+    # it and are refused; one more is beyond what any hop chain decodes.
+    assert DOI_DECODE_PASSES == 3
+    assert clean_doi("10.1000/%25252e%25252e/x") is None
+    assert clean_doi("10.1000/%2525252e%2525252e/x") == "10.1000/%2525252e%2525252e/x"
 
 
 def test_clean_doi_keeps_dots_inside_a_segment():
