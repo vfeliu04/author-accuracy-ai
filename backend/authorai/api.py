@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from authorai import chat as chatmod
 from authorai import db as dbmod
+from authorai import references as refsmod
 from authorai.config import Settings
 from authorai.fetch import is_youtube_url, validate_source_url
 from authorai.llm import AnthropicClient
@@ -413,6 +414,99 @@ def chat(run_id: str, body: ChatRequest, request: Request, conn: Conn) -> dict:
 def _fraction(score: float | None) -> float | None:
     """0–100 component scores leave the API as 0–1 fractions like accuracy."""
     return None if score is None else round(score / 100, 4)
+
+
+class ScannedReference(refsmod.Reference):
+    """A cited work as the dialog shows it: the printed fields, plus whether a
+    free copy is known and the address the user may add as a link."""
+
+    retrievability: refsmod.Retrievability
+    # Set for "pdf" and "landing" (Unpaywall's copy), and for a DOI-less
+    # entry that prints its own address (offered unchecked, retrievability
+    # stays "unknown"); never for "paywalled".
+    suggested_url: str | None
+
+
+class LookupStatus(BaseModel):
+    # ok: every DOI was asked about. unconfigured: no contact email, so
+    # nothing was asked. unavailable: the registry failed part-way; `detail`
+    # says how, and the list keeps what was resolved before the failure.
+    status: Literal["ok", "unconfigured", "unavailable"]
+    detail: str | None = None
+
+
+class ReferenceScan(BaseModel):
+    text_source: refsmod.TextSource
+    lookup: LookupStatus
+    references: list[ScannedReference]
+
+
+@router.post("/references/scan")
+def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> ReferenceScan:
+    """List the works the report's own reference list cites, with whether a
+    free copy is known — a pre-upload aid for the upload dialog, which shows
+    the cited works the user has not supplied and offers the free ones as
+    links.
+
+    What this endpoint does NOT do: it creates no run, upload or job row
+    (there is deliberately no database dependency here, so it cannot); it
+    writes no file under uploads_dir (the spooled part is read in place); it
+    never fetches a cited work (a suggested address is syntax-checked only,
+    by the gate a pasted link passes); and it caches nothing — every call
+    reads the PDF and asks the model again.
+
+    The file gets the same checks an upload gets (extension, size, magic),
+    then pypdf reads its closing pages; a file pypdf cannot open is a 400
+    naming it. No text at all (a scanned PDF) answers "none" with an empty
+    list and no model call. A missing contact email means no lookup
+    ("unconfigured"); a registry failure part-way keeps the list and flags
+    it ("unavailable") rather than failing the scan, because the citations
+    are useful without retrievability. A model failure is not caught: 500,
+    like chat. Sync, so its blocking reads run on the threadpool.
+    """
+    settings: Settings = request.app.state.settings
+    _validate_pdf(report, settings.max_upload_bytes)
+    try:
+        pages = refsmod.read_pages(report.file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{report.filename!r}: {exc}") from exc
+    text, text_source = refsmod.reference_text(pages)
+    references: list[refsmod.Reference] = []
+    if text_source != "none":
+        llm = AnthropicClient(settings.anthropic_api_key)
+        references = refsmod.extract_references(llm, settings.references_model, text).references
+
+    mailto = (settings.crossref_mailto or "").strip()
+    if not mailto:
+        lookup = LookupStatus(status="unconfigured")
+        resolved = [refsmod.NOT_RESOLVED] * len(references)
+    else:
+        unpaywall = refsmod.UnpaywallClient(mailto)
+        try:
+            resolved = refsmod.lookup_retrievability(unpaywall, references)
+            lookup = LookupStatus(status="ok")
+        except refsmod.RegistryUnavailable as exc:
+            logger.warning(
+                "Unpaywall gave no answer — listing the references without retrievability: %s",
+                exc,
+            )
+            resolved = exc.resolved
+            lookup = LookupStatus(status="unavailable", detail=str(exc))
+        finally:
+            unpaywall.close()
+
+    return ReferenceScan(
+        text_source=text_source,
+        lookup=lookup,
+        references=[
+            ScannedReference(
+                **reference.model_dump(),
+                retrievability=kind,
+                suggested_url=url or refsmod.printed_url(reference),
+            )
+            for reference, (kind, url) in zip(references, resolved, strict=True)
+        ],
+    )
 
 
 @router.get("/runs/{run_id}/report")

@@ -8,7 +8,9 @@ against an app that can't actually start.
 import json
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from starlette.routing import Route
@@ -17,7 +19,8 @@ from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.jobs import Worker
 from authorai.main import create_app
-from tests.conftest import DIM, poison_providers
+from authorai.references import UNPAYWALL_BASE, Reference, ReferenceList
+from tests.conftest import DIM, FakeLLM, pdf_with_pages, poison_providers
 
 # Routes that are intentionally open (no API key). Everything else must 401.
 OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
@@ -1405,3 +1408,179 @@ def test_links_count_toward_the_source_cap(tmp_path):
         )
     assert resp.status_code == 400, resp.text
     assert "too many sources" in resp.json()["detail"]
+
+
+# --- POST /api/references/scan ---------------------------------------------------
+
+SCAN = "/api/references/scan"
+CITED = ReferenceList(
+    references=[
+        Reference(entry="Open, A. (2021). Free paper. J. 1.", doi="10.1000/open", year=2021),
+        Reference(entry="Closed, B. (2019). Paid paper. J. 2.", doi="10.1000/closed", year=2019),
+        Reference(entry="Web, C. (2020). A page. https://x.org/page", url="https://x.org/page#top"),
+        Reference(entry="Plain, D. (2018). A book.", title="A book", authors=["Plain, D."]),
+    ]
+)
+
+
+def _scan_report(pages=("Body.", "References\nOpen, A. (2021). Free paper. J. 1.")):
+    return {"report": ("report.pdf", pdf_with_pages(list(pages)), "application/pdf")}
+
+
+def _nothing_written(settings) -> None:
+    """The scan is structurally unable to write rows (no DB dependency) and
+    must leave nothing on disk either — it reads the spooled part in place."""
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    for table in ("runs", "uploads", "jobs"):
+        assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table
+    conn.close()
+    assert not settings.uploads_dir.exists() or not any(settings.uploads_dir.iterdir())
+
+
+@respx.mock
+def test_reference_scan_lists_cited_works_and_writes_nothing(tmp_path, monkeypatch):
+    from authorai import api as apimod
+
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/open").mock(
+        return_value=httpx.Response(
+            200, json={"is_oa": True, "best_oa_location": {"url_for_pdf": "https://x.org/o.pdf"}}
+        )
+    )
+    respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/closed").mock(
+        return_value=httpx.Response(200, json={"is_oa": False, "best_oa_location": None})
+    )
+    settings = _settings(tmp_path, crossref_mailto="checker@example.org")
+    fake = FakeLLM({ReferenceList: CITED})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["text_source"] == "heading"
+    assert body["lookup"] == {"status": "ok", "detail": None}
+    assert [(r["retrievability"], r["suggested_url"]) for r in body["references"]] == [
+        ("pdf", "https://x.org/o.pdf"),
+        ("paywalled", None),
+        ("unknown", "https://x.org/page"),  # printed in the entry, not checked
+        ("unknown", None),
+    ]
+    assert body["references"][0] == {
+        "title": None,
+        "authors": [],
+        "year": 2021,
+        "doi": "10.1000/open",
+        "url": None,
+        "entry": "Open, A. (2021). Free paper. J. 1.",
+        "retrievability": "pdf",
+        "suggested_url": "https://x.org/o.pdf",
+    }
+    # The model saw the closing text under the references contract, on the
+    # configured model.
+    call = fake.parse_calls[0]
+    assert call["model"] == settings.references_model
+    assert "Open, A. (2021)" in call["prompt"]
+    assert call["output_type"] is ReferenceList
+    _nothing_written(settings)
+
+
+@pytest.mark.parametrize(
+    ("file_name", "content", "expected_status", "expected_detail"),
+    [
+        ("report.txt", b"%PDF-1.4 x", 400, "'report.txt' is not a .pdf file"),
+        ("report.pdf", b"not a pdf at all", 400, "'report.pdf' is not PDF content"),
+        ("report.pdf", b"%PDF-1.4 fake pdf content", 400, "'report.pdf': could not read"),
+        ("report.pdf", b"%PDF-" + b"x" * 2000, 413, "exceeds the 1000 byte per-file limit"),
+    ],
+)
+def test_reference_scan_rejects_what_it_cannot_read(
+    tmp_path, monkeypatch, file_name, content, expected_status, expected_detail
+):
+    """The same validation an upload gets, plus pypdf's verdict: a file that
+    passes the magic check but cannot be opened is a 400 naming the file,
+    never a 500 — and no model is constructed for any of them."""
+    from authorai import api as apimod
+
+    monkeypatch.setattr(
+        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
+    )
+    settings = _settings(tmp_path, max_upload_bytes=1000)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            SCAN, headers=AUTH, files={"report": (file_name, content, "application/pdf")}
+        )
+    assert resp.status_code == expected_status, resp.text
+    assert expected_detail in resp.json()["detail"]
+    _nothing_written(settings)
+
+
+def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypatch):
+    """A scanned (image-only) PDF has no text to read: the answer is 'none'
+    and an empty list — the model is never asked, so it cannot invent a
+    bibliography."""
+    from authorai import api as apimod
+
+    monkeypatch.setattr(
+        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
+    )
+    settings = _settings(tmp_path, crossref_mailto="checker@example.org")
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report(pages=["", ""]))
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "text_source": "none",
+        "lookup": {"status": "ok", "detail": None},
+        "references": [],
+    }
+    _nothing_written(settings)
+
+
+@respx.mock
+def test_reference_scan_without_a_contact_email_looks_nothing_up(tmp_path, monkeypatch):
+    """No route is mocked: any Unpaywall request would make respx raise. The
+    list is still returned, flagged 'unconfigured', every DOI 'unknown' — and
+    a printed address is still offered, since it needs no lookup."""
+    from authorai import api as apimod
+
+    settings = _settings(tmp_path)  # crossref_mailto unset
+    assert settings.crossref_mailto is None
+    fake = FakeLLM({ReferenceList: CITED})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["lookup"] == {"status": "unconfigured", "detail": None}
+    assert [(r["retrievability"], r["suggested_url"]) for r in body["references"]] == [
+        ("unknown", None),
+        ("unknown", None),
+        ("unknown", "https://x.org/page"),
+        ("unknown", None),
+    ]
+
+
+@respx.mock
+def test_reference_scan_survives_an_unpaywall_outage(tmp_path, monkeypatch):
+    """A registry outage is not a scan failure: the citation list is still
+    useful, so it comes back 200 with an explicit 'unavailable' flag and the
+    reason — never a silent 'unknown', never a 500."""
+    from authorai import api as apimod
+
+    monkeypatch.setattr("authorai.credibility.time.sleep", lambda seconds: None)
+    respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/.*").mock(return_value=httpx.Response(503))
+    settings = _settings(tmp_path, crossref_mailto="checker@example.org")
+    fake = FakeLLM({ReferenceList: CITED})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["lookup"]["status"] == "unavailable"
+    assert "HTTP 503" in body["lookup"]["detail"]
+    assert len(body["references"]) == len(CITED.references)
+    assert all(r["retrievability"] == "unknown" for r in body["references"])
+    assert body["references"][2]["suggested_url"] == "https://x.org/page"
+    _nothing_written(settings)
+
+
+def test_reference_scan_needs_the_report_part(client):
+    assert client.post(SCAN, headers=AUTH).status_code == 422

@@ -1,6 +1,6 @@
 # API Reference
 
-The backend is a FastAPI app built by `create_app` in `backend/authorai/main.py`; all `/api` routes live in `backend/authorai/api.py`. A run is created by uploading a report PDF plus its sources — PDF files, web links, or both — in one request; the full pipeline (ingest → extract → verify → score) then executes as a background job that the client polls. Limits and defaults referenced below come from `backend/authorai/config.py` — see [configuration.md](configuration.md).
+The backend is a FastAPI app built by `create_app` in `backend/authorai/main.py`; all `/api` routes live in `backend/authorai/api.py`. A run is created by uploading a report PDF plus its sources — PDF files, web links, or both — in one request; the full pipeline (ingest → extract → verify → score) then executes as a background job that the client polls. Before a run exists, the upload dialog can ask for the report's own reference list (`POST /api/references/scan`), which stores nothing. Limits and defaults referenced below come from `backend/authorai/config.py` — see [configuration.md](configuration.md).
 
 ## Base URL
 
@@ -31,6 +31,10 @@ curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 | Sources per run, files and links together | 20 (`max_source_files`) | In `POST /api/runs` → 400 |
 | Link length | 2048 characters, as given and once encoded | In `POST /api/runs` → 400 |
 | Run title | 200 characters | In `POST /api/runs` → 400 |
+| Pages read by the reference scan | The last 600 (`REFERENCE_MAX_PAGES` in `references.py`) | In `POST /api/references/scan`; earlier pages are not read |
+| Closing text the reference scan sends to the model | 30,000 characters (`REFERENCE_MAX_CHARS`), from the last reference-list heading forward, else the last 30,000 of the document | In `POST /api/references/scan`; the model never sees more |
+| References returned by a scan | 80 (`MAX_REFERENCES`); a longer model answer is cut in code, with a warning in the log | In `POST /api/references/scan` |
+| Unpaywall lookups per scan | One per printed DOI, four at a time, 10-second timeout and two retries each; the first registry failure ends the lookup | In `POST /api/references/scan` → `lookup.status` `unavailable`, still 200 |
 | Fetched response served as `text/html` or `application/xhtml+xml` (a web page, or a PDF served under an HTML type) | 10,000,000 bytes, counted after decompression (`fetch_max_bytes`) | In the ingest step's fetch → run `FAILED` |
 | Fetched response served as `application/pdf` or `application/octet-stream` | 50,000,000 bytes, counted after decompression (`max_upload_bytes`) | In the ingest step's fetch → run `FAILED` |
 | Time to fetch one link, redirects and DNS lookups included | 30 seconds (`fetch_timeout_seconds`); a slow DNS lookup is not cut short, and the budget is checked again once it returns | In the ingest step's fetch → run `FAILED` |
@@ -46,12 +50,14 @@ All errors are JSON with a `detail` key.
 |---|---|---|
 | 401 | Middleware (missing/wrong/unconfigured key) | `{"detail": "Invalid or missing API key"}` |
 | 413 | Middleware (`Content-Length` over cap) | `{"detail": "Request body exceeds the size limit"}` |
-| 413 | Upload validation (one file over cap) | `{"detail": "'<name>' exceeds the <n> byte per-file limit"}` |
+| 413 | Upload validation (one file over cap) | `{"detail": "'<name>' exceeds the <n> byte per-file limit"}` — `POST /api/runs` and `POST /api/references/scan` alike |
 | 400 | Upload validation | `detail` is one of `'<name>' is not a .pdf file` / `'<name>' is not PDF content` / `at least one source (a PDF file or a web link) is required` / `too many sources (N > 20)` / `not a usable link: <reason>` / `'<link>': YouTube links are not supported yet` / `'<link>' was added twice` / `title is limited to 200 characters` |
+| 400 | Reference scan | `'<name>' is not a .pdf file` / `'<name>' is not PDF content` as above, or `'<name>': could not read the PDF (<reason>)` when the file passes the magic check but cannot be opened |
 | 404 | Route handlers | `{"detail": "Unknown run '<id>'"}` etc. (exact strings per endpoint below) |
 | 409 | Chat on an unfinished run | `{"detail": "The run is not scored yet — chat is available once it is DONE"}` |
 | 409 | Retry or delete in the wrong state | Exact strings under each endpoint below |
-| 422 | FastAPI/Pydantic validation | `{"detail": [{"type": ..., "loc": [...], "msg": ..., ...}]}` — the standard FastAPI validation-error list |
+| 422 | FastAPI/Pydantic validation | `{"detail": [{"type": ..., "loc": [...], "msg": ..., ...}]}` — the standard FastAPI validation-error list (a scan without its `report` part lands here) |
+| 500 | Reference scan, chat | The model call failed (a provider outage, or no parseable answer); nothing was stored, and the request can simply be repeated |
 
 ## Endpoint index
 
@@ -59,6 +65,7 @@ All errors are JSON with a `detail` key.
 |---|---|---|---|
 | GET | `/health` | no | Liveness: `{"status": "ok", "version": "<pkg version>"}` |
 | GET | `/docs`, `/redoc`, `/openapi.json` | no | Interactive docs; served only when `docs_enabled` (see below) |
+| POST | `/api/references/scan` | yes | Read a report PDF's own reference list, with whether a free copy is known; stores nothing (200) |
 | POST | `/api/runs` | yes | Upload report + sources, queue the pipeline (202) |
 | GET | `/api/runs` | yes | List all runs, newest first |
 | GET | `/api/runs/{run_id}` | yes | Run detail + latest job (progress feed) + uploads |
@@ -68,6 +75,58 @@ All errors are JSON with a `detail` key.
 | GET | `/api/runs/{run_id}/report` | yes | Full analysis payload: scores, stats, claims, sources |
 | GET | `/api/runs/{run_id}/documents/{doc_id}/file` | yes | Stream a run's stored file inline: a PDF, or a web page's JSON snapshot |
 | POST | `/api/runs/{run_id}/chat` | yes | Grounded Q&A over a DONE run (see [chat.md](chat.md)) |
+
+## Reference scan
+
+### `POST /api/references/scan` → 200
+
+A pre-upload aid: the upload dialog sends the report PDF the moment it is picked, and shows the works the report cites that are not among the user's sources, offering the ones with a free copy online as links. Multipart form with one part, `report`, under the same rules as the report of `POST /api/runs` (`.pdf` extension, `%PDF-` magic bytes, ≤ `max_upload_bytes`; 413 over the cap, 422 when the part is missing). The middleware's 401 and whole-request 413 apply as to every `/api` route.
+
+**The scan stores nothing.** It creates no run, upload or job row (the handler has no database dependency, so it cannot), writes no file under `uploads_dir` (the uploaded part is read in place), never fetches a cited work, and caches nothing — a second scan of the same file reads it and asks the model again. Only the PDF's closing pages are read: at most the last 600 pages, with pypdf rather than the ingest pipeline's layout parser, so the answer arrives while the user is still choosing sources. The text the model reads starts at the report's **last** reference-list heading (a line reading `References`, `Bibliography`, `Works Cited`, `Reference list` or `Literature cited`, optionally numbered) and is capped at 30,000 characters; a report without such a heading gets the last 30,000 characters of the document instead. A file with no extractable text at all (a scanned PDF) is answered without a model call, so no bibliography can be invented for it.
+
+Response:
+
+```json
+{
+  "text_source": "heading",                  // "heading" | "tail" | "none"
+  "lookup": { "status": "ok", "detail": null },
+  "references": [
+    {
+      "title": "Domestic water consumption and personal habits",
+      "authors": ["Smith, J.", "Lee, K."],
+      "year": 2024,
+      "doi": "10.1016/j.heliyon.2024.e34730",
+      "url": null,
+      "entry": "Smith, J., & Lee, K. (2024). Domestic water consumption and personal habits. Heliyon, 10(8). https://doi.org/10.1016/j.heliyon.2024.e34730",
+      "retrievability": "landing",
+      "suggested_url": "https://doi.org/10.1016/j.heliyon.2024.e34730"
+    }
+  ]
+}
+```
+
+`text_source` says where the text came from: `heading` (from the last reference-list heading), `tail` (no heading; the document's end) or `none` (no text at all; `references` is then empty). At most 80 references are returned; a longer model answer is cut, with a warning in the server log.
+
+Each reference carries what its entry **prints** — `title`, `authors`, `year`, `doi` (no URL prefix) and `url` are `null` or empty when the entry does not print them, and the model is told never to supply a DOI from memory — plus `entry`, the reference as printed, which the dialog shows when there is no title. `retrievability` and `suggested_url` come from Unpaywall, asked by DOI:
+
+| `retrievability` | Meaning | `suggested_url` |
+|---|---|---|
+| `pdf` | Unpaywall knows a free PDF of the work | The PDF's address |
+| `landing` | Unpaywall knows a free copy but only its landing page (for many open-access works its `url_for_pdf` is null) | The landing page |
+| `paywalled` | Unpaywall says the work is not open access | Always `null` — a closed work is never offered |
+| `unknown` | No DOI printed, the DOI was not found, the record did not say, no lookup was made, or the registry's address failed the link gate | `null`, **except** for an entry with no DOI that prints its own address: that address is offered as addable but unchecked — the dialog labels it "printed in the entry, not checked" |
+
+Every `suggested_url` has passed the syntax gate a pasted link passes (`http`/`https`, a valid host, no credentials, ≤ 2048 characters; the `#fragment` dropped, scheme and host lowercased) and nothing more: the scan never connects to it. A DOI is looked up only when it is DOI-shaped (`10.NNNN/…`); anything else is `unknown` without a request.
+
+`lookup.status` is the registry's story for the whole scan:
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Every printed DOI was asked about (also when there was nothing to ask) |
+| `unconfigured` | `AUTHORAI_CROSSREF_MAILTO` is unset, which Unpaywall requires (it answers 422 without a contact email): no lookup was made and every reference is `unknown`; printed addresses are still offered |
+| `unavailable` | Unpaywall failed part-way (throttled, down, or unreachable after the retries); `detail` says how. The response is still 200: references resolved before the failure keep their verdict, the rest are `unknown` |
+
+Lookups run four at a time; the first registry failure stops the rest. A failure of the model call itself is not caught and is a 500, as for chat.
 
 ## Runs and jobs
 
