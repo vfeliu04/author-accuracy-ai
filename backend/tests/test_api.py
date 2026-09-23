@@ -6,7 +6,6 @@ against an app that can't actually start.
 """
 
 import json
-
 import time
 from pathlib import Path
 
