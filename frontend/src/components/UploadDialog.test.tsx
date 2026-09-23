@@ -596,6 +596,12 @@ describe("UploadDialog reference checklist", () => {
     ).toEqual(["a.org/one", "a.org/two"]);
     expect(screen.getByRole("checkbox", { name: /Work three/ })).toBeChecked();
     expect(heading(1)).toBeInTheDocument();
+    // The tick that did not fit still counts: Verify holds, with the limit's
+    // own message, until it is unticked.
+    expect(screen.getByText("At most 20 sources per verification.")).toBeInTheDocument();
+    expect(verify()).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work three/ }));
+    expect(screen.queryByText("At most 20 sources per verification.")).not.toBeInTheDocument();
     expect(verify()).toBeEnabled();
   });
 
@@ -843,7 +849,7 @@ describe("UploadDialog reference checklist", () => {
     expect(linksArg).toEqual(["https://a.org/one", "https://b.org/two", "https://c.org/typed"]);
   });
 
-  it("holds Verify when the ticked copies pass the source limit, and says what got in", async () => {
+  it("holds Verify, with the limit's message, while the ticked copies would pass the source limit", async () => {
     const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf(
@@ -857,18 +863,53 @@ describe("UploadDialog reference checklist", () => {
     fireEvent.change(fileInput(), { target: { files } });
     await waitFor(() => expect(heading(3)).toBeInTheDocument());
 
+    // 18 sources and 3 ticks are 21: the hold shows before any click, as it
+    // does for a link past the limit, and nothing is added or sent.
+    expect(screen.getByText("At most 20 sources per verification.")).toBeInTheDocument();
+    expect(verify()).toBeDisabled();
     fireEvent.click(verify());
-    expect(screen.getByText("Added 2 of 3 — at most 20 sources per verification.")).toBeInTheDocument();
-    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: /Work three/ })).toBeChecked();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(create).not.toHaveBeenCalled();
+    expect(screen.getByText("Sources (18)")).toBeInTheDocument();
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Work three/ })).toBeChecked();
 
-    // Unticking the one that did not fit lets the upload go, with the two.
+    // Unticking the one that would not fit lifts the hold; Verify then adds
+    // the two ticked copies first, as it does with a typed link.
     fireEvent.click(screen.getByRole("checkbox", { name: /Work three/ }));
+    expect(screen.queryByText("At most 20 sources per verification.")).not.toBeInTheDocument();
+    expect(verify()).toBeEnabled();
     fireEvent.click(verify());
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     expect(create.mock.calls[0][2]).toEqual(["https://a.org/one", "https://a.org/two"]);
+  });
+
+  it("lifts the hold when a source is removed to make room, and sends every tick at the limit", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf(
+        ["one", "two", "three"].map((n) =>
+          cited({ title: `Work ${n}`, retrievability: "pdf", suggested_url: `https://a.org/${n}` })
+        )
+      )
+    );
+    renderDialog();
+    const files = [pdf("report.pdf"), ...Array.from({ length: 18 }, (_, i) => pdf(`doc${i}.pdf`))];
+    fireEvent.change(fileInput(), { target: { files } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    expect(verify()).toBeDisabled();
+
+    // 17 sources and 3 ticks are exactly 20, which the limit allows.
+    fireEvent.click(screen.getByRole("button", { name: "Remove doc0.pdf" }));
+    expect(screen.getByText("Sources (17)")).toBeInTheDocument();
+    expect(screen.queryByText("At most 20 sources per verification.")).not.toBeInTheDocument();
+    expect(verify()).toBeEnabled();
+    fireEvent.click(verify());
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const [, sourcesArg, linksArg] = create.mock.calls[0];
+    expect((sourcesArg as File[]).length).toBe(17);
+    expect(linksArg).toEqual(["https://a.org/one", "https://a.org/two", "https://a.org/three"]);
+    expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
   });
 
   it("offers to try a failed scan again, and lists the works when it answers", async () => {
