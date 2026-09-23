@@ -8,6 +8,7 @@ import type {
   PageProvenance,
   PageSection,
   PageSnapshot,
+  ReferenceScan,
   Report,
   RunDetail,
   RunListItem
@@ -72,6 +73,15 @@ export async function createRun(
   }
   // Content-Type is set by the browser for FormData (with the boundary).
   return apiJson<CreateRunResponse>("/api/runs", { method: "POST", body: form });
+}
+
+// Reads the report's reference list without creating anything server-side.
+// The signal lets the caller drop a scan that no longer matters (the report
+// was swapped, or the dialog closed) instead of waiting on a model call.
+export function scanReferences(report: File, signal?: AbortSignal): Promise<ReferenceScan> {
+  const form = new FormData();
+  form.append("report", report, report.name);
+  return apiJson<ReferenceScan>("/api/references/scan", { method: "POST", body: form, signal });
 }
 
 export async function listRuns(): Promise<RunListItem[]> {

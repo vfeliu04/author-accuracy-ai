@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { useCreateRun } from "../api/queries";
+import { useCreateRun, useReferenceScan } from "../api/queries";
+import type { LookupStatus, ReferenceScan, ScannedReference } from "../api/types";
 import { formatBytes, plural } from "../lib/format";
-import { checkLink, linkHostPath } from "../lib/links";
+import { checkLink, linkHost, linkHostPath } from "../lib/links";
+import { alreadyAdded, stem } from "../lib/references";
 
 // Client-side mirrors of the server caps — fail fast in the dialog instead
 // of after a full upload (the server remains the authority). Files and links
@@ -11,11 +13,6 @@ import { checkLink, linkHostPath } from "../lib/links";
 const MAX_SOURCES = 20;
 const MAX_FILE_BYTES = 50_000_000;
 const MAX_TOTAL_BYTES = 200_000_000;
-
-function stem(name: string): string {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(0, dot) : name;
-}
 
 function isPdf(file: File): boolean {
   return file.name.toLowerCase().endsWith(".pdf");
@@ -28,6 +25,46 @@ function uploadError(err: unknown): string {
   return err.message.startsWith("not a usable link:")
     ? "One of the links isn't a valid web address. Check it and try again."
     : err.message;
+}
+
+// A cited work with its place in the scan, which is what a tick refers to.
+type Cited = { ref: ScannedReference; index: number };
+
+// A free copy the lookup found is worth adding; an address the entry merely
+// printed was validated but never visited, so it waits for a tick.
+function foundCopy(ref: ScannedReference): boolean {
+  return ref.suggested_url !== null && (ref.retrievability === "pdf" || ref.retrievability === "landing");
+}
+
+function defaultTicks(scan: ReferenceScan | undefined): ReadonlySet<number> {
+  const ticks = new Set<number>();
+  scan?.references.forEach((ref, index) => {
+    if (foundCopy(ref)) ticks.add(index);
+  });
+  return ticks;
+}
+
+// What the row says about a copy of the work.
+function copyTag(ref: ScannedReference, lookup: LookupStatus): string {
+  switch (ref.retrievability) {
+    case "pdf":
+      return "free PDF";
+    case "landing":
+      return "free copy";
+    case "paywalled":
+      return "paywalled";
+    default:
+      if (ref.suggested_url !== null) return "printed in the entry, not checked";
+      if (lookup === "unconfigured") return "lookup not set up";
+      if (lookup === "unavailable") return "lookup unavailable";
+      return "no link found";
+  }
+}
+
+// A scan the dialog itself dropped (report swapped, dialog closed) is not
+// something to tell the reader about.
+function scanMessage(error: Error | null): string | null {
+  return error !== null && error.name !== "AbortError" ? error.message : null;
 }
 
 export default function UploadDialog({ onClose }: { onClose: () => void }) {
@@ -43,6 +80,26 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // The report's own reference list, read as soon as the report is picked.
+  // Which rows are ticked belongs to one scan: a set made for another answer
+  // is ignored and the defaults for this one stand, with no frame in between.
+  const scan = useReferenceScan(report);
+  const [ticks, setTicks] = useState<{ of: ReferenceScan; set: ReadonlySet<number> } | null>(null);
+  const [addNote, setAddNote] = useState<string | null>(null);
+  const defaults = useMemo(() => defaultTicks(scan.data), [scan.data]);
+  const checked = ticks !== null && ticks.of === scan.data ? ticks.set : defaults;
+
+  // Matched on every render: sources arrive after the report, so the answer
+  // is always taken against what is in the dialog now.
+  const missing = useMemo<Cited[]>(() => {
+    const names = sources.map((file) => file.name);
+    return (scan.data?.references ?? [])
+      .map((ref, index) => ({ ref, index }))
+      .filter(({ ref }) => alreadyAdded(ref, names, links) === null);
+  }, [scan.data, sources, links]);
+  const addable = useMemo(() => missing.filter(({ ref }) => ref.suggested_url !== null), [missing]);
+  const ticked = addable.filter(({ index }) => checked.has(index));
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -106,6 +163,41 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     setLinks(links.filter((added) => added !== link));
   };
 
+  const toggle = (index: number) => {
+    if (!scan.data) return;
+    const next = new Set(checked);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    setTicks({ of: scan.data, set: next });
+  };
+
+  // The only way a suggestion becomes a source: the ticked rows, each through
+  // the same checks a typed link gets, up to the source cap. A duplicate is
+  // skipped (its row goes once the first copy is in); the cap stops the rest
+  // and says so, with what got in.
+  const addSuggested = () => {
+    const wanted = ticked.map(({ ref }) => ref.suggested_url as string);
+    let next = links;
+    let added = 0;
+    let capped = false;
+    for (const url of wanted) {
+      if (sources.length + next.length >= MAX_SOURCES) {
+        capped = true;
+        break;
+      }
+      const result = checkLink(url, next);
+      if ("error" in result) continue;
+      next = [...next, result.link];
+      added += 1;
+    }
+    setLinks(next);
+    setAddNote(
+      capped
+        ? `Added ${added} of ${wanted.length} — at most ${MAX_SOURCES} sources per verification.`
+        : null
+    );
+  };
+
   const handleDrop = (event: DragEvent) => {
     event.preventDefault();
     setDragOver(false);
@@ -153,6 +245,9 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
       }
     );
   };
+
+  const scanError = scanMessage(scan.error);
+  const lookup = scan.data?.lookup;
 
   return (
     <div
@@ -336,6 +431,67 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               {linkError}
             </p>
           ) : null}
+
+          {report !== null && scanError === null ? (
+            <span className="field-label">
+              Cited by the report, not among your sources
+              {scan.data ? ` (${missing.length})` : ""}
+            </span>
+          ) : null}
+          {scan.isLoading ? (
+            <p className="modal__count">Scanning the report's references…</p>
+          ) : null}
+          {scanError !== null ? <p className="modal__error">{scanError}</p> : null}
+          {scan.data && scan.data.references.length === 0 ? (
+            <p className="modal__count">No reference list found in this report</p>
+          ) : null}
+          {scan.data && scan.data.references.length > 0 && missing.length === 0 ? (
+            <p className="modal__count">Every cited work is among your sources.</p>
+          ) : null}
+          {lookup?.status === "unavailable" ? (
+            <p className="modal__count">
+              Free copies could not be looked up{lookup.detail ? `: ${lookup.detail}` : "."}
+            </p>
+          ) : null}
+          {missing.map(({ ref, index }) => {
+            const label = ref.title ?? ref.entry;
+            const tag = copyTag(ref, lookup?.status ?? "ok");
+            if (ref.suggested_url === null) {
+              return (
+                <div className="file-row" key={index} title={ref.entry}>
+                  <span className="file-row__check" aria-hidden />
+                  <span className="file-row__name">{label}</span>
+                  <span className="file-row__size">{tag}</span>
+                </div>
+              );
+            }
+            return (
+              <label className="file-row" key={index} title={ref.entry}>
+                <input
+                  type="checkbox"
+                  className="file-row__check"
+                  checked={checked.has(index)}
+                  onChange={() => toggle(index)}
+                />
+                <span className="file-row__name">{label}</span>
+                <span className="file-row__host" title={ref.suggested_url}>
+                  {linkHost(ref.suggested_url)}
+                </span>
+                <span className="file-row__size">{tag}</span>
+              </label>
+            );
+          })}
+          {addable.length > 0 ? (
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={ticked.length === 0}
+              onClick={addSuggested}
+            >
+              Add {plural(ticked.length, "link")}
+            </button>
+          ) : null}
+          {addNote ? <p className="modal__error">{addNote}</p> : null}
 
           {error ? <p className="modal__error">{error}</p> : null}
           {tooManySources ? (
