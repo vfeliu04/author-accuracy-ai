@@ -645,7 +645,11 @@ def offerable_url(url: str) -> str:
     machine by definition. A NAME that resolves to private space is
     deliberately not caught here: a pre-upload aid does no DNS, and the
     fetch gate resolves and pins every hop at ingest, where such a link is
-    refused. An offer is only ever as good as that gate."""
+    refused — and so is a numeric spelling of an address that ip_address
+    does not parse ("2130706433", "127.1", "0x7f.0.0.1"), which is a NAME
+    to this gate and a loopback literal to the resolver: it is offered here
+    and refused at ingest, where every resolved answer is gated. An offer
+    is only ever as good as that gate."""
     normalized = validate_source_url(url)
     if is_youtube_url(normalized):
         raise ValueError(f"Source URL {normalized!r}: YouTube links are not supported yet")
