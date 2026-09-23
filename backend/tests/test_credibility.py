@@ -284,7 +284,9 @@ def test_clean_doi_bounds_the_length_before_decoding_and_decodes_a_fixed_number_
     worst case is milliseconds."""
     from authorai.credibility import DOI_DECODE_PASSES, DOI_MAX_CHARS
 
-    nested = "10.1000/" + "%25" * 120_000 + "2e" + "%25" * 120_000 + "2e/x"  # a ../ chain, deep
+    # "%25…252e" decodes to "%25…2e", one "25" shorter, every pass: 120,000
+    # passes for the old loop (minutes), three for this one.
+    nested = "10.1000/%" + "25" * 120_000 + "2e/x"
     started = time.perf_counter()
     assert clean_doi(nested) is None
     assert time.perf_counter() - started < 0.05
