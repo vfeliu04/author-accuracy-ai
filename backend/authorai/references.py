@@ -52,7 +52,13 @@ from authorai.fetch import (
 )
 from authorai.llm import LLM
 from authorai.log import setup_logger
-from authorai.web import ExtractionTimeoutError, end_with_parent, handover_file, in_bounded_child
+from authorai.web import (
+    ExtractionTimeoutError,
+    ReaderExitedError,
+    end_with_parent,
+    handover_file,
+    in_bounded_child,
+)
 
 logger = setup_logger(__name__)
 
@@ -266,9 +272,15 @@ def read_pages(
     (print/copy restrictions) is opened as readers do. Anything pypdf cannot
     read — its own exception family, or the KeyError/RecursionError a hostile
     file provokes — is one ValueError, the caller's 400; so is a file the
-    child cannot finish with inside its budget (the deadline, the CPU or
-    address-space limit), which reads as "too costly", never as a 500. A
-    failure to hand the file to the child (no temp dir) is the server's, a
+    child cannot finish with inside its budget — the deadline, the CPU
+    limit's SIGXCPU, the memory bound (the watchdog's exit code, or the
+    address-space cap's), an out-of-memory kill — which reads as "too
+    costly", never as a 500. A child that ends any other way is the
+    server's fault, not the file's: an unhandled exception at start-up or
+    in the reader (an import that fails, a bug) or a return with nothing
+    reported propagates as the ReaderExitedError it is (a 500), its exit
+    status logged by in_bounded_child and the child's traceback on stderr.
+    So is a failure to hand the file to the child (no temp dir), a
     RuntimeError.
     """
     handle.seek(0)  # from the start, as pypdf itself would read it
@@ -286,16 +298,31 @@ def read_pages(
             "could not read the PDF: it was too costly to read "
             f"(took longer than {timeout:g} seconds)"
         ) from exc
-    except RuntimeError as exc:  # exited without a result: killed by a limit, out of memory
-        raise ValueError(
-            "could not read the PDF: it was too costly to read (the reader was stopped)"
-        ) from exc
+    except ReaderExitedError as exc:
+        why = _stopped_by_a_bound(exc.exitcode)
+        if why is None:
+            raise
+        raise ValueError(f"could not read the PDF: it was too costly to read ({why})") from exc
     if kind == "result":
         return payload
     name, message, _child_traceback = payload
     if kind == "value":  # the child's own refusal, worded for the user
         raise ValueError(f"could not read the PDF: {message}")
     raise ValueError(f"could not read the PDF ({name}: {message})")
+
+
+def _stopped_by_a_bound(exitcode: int | None) -> str | None:
+    """Why a reader that exited without a result was stopped by one of its
+    bounds, worded for the user — or None when the exit is not a bound's.
+    A bound ends the child by signal (a negative status: the CPU limit's
+    SIGXCPU, an out-of-memory kill) or with the memory exit code; a plain
+    exit is an unhandled exception (1) or a return with nothing reported
+    (0) — a bug, which the caller must see as its own."""
+    if exitcode == READER_MEMORY_EXIT_CODE:
+        return "the reader needed too much memory"
+    if exitcode is not None and exitcode < 0:
+        return "the reader was stopped"
+    return None
 
 
 def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) -> None:

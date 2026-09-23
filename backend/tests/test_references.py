@@ -2,12 +2,14 @@
 the Haiku call, the Unpaywall client and retrievability — all offline (respx
 for HTTP, FakeLLM for the model, a hand-built PDF for pypdf)."""
 
+import functools
 import io
 import json
 import multiprocessing
 import os
 import re
 import resource
+import signal
 import sys
 import threading
 import time
@@ -499,9 +501,21 @@ def _reader_that_never_answers(sender, path, *_args):
     threading.Event().wait(60)
 
 
-def _reader_that_dies(sender, path, *_args):
-    """A reader the kernel ends (RLIMIT_CPU's SIGXCPU, RLIMIT_AS, jetsam)."""
-    os._exit(1)
+def _reader_the_kernel_ends(sender, path, *_args, signum: int):
+    """A reader the kernel ends by signal: the CPU limit's SIGXCPU, an
+    out-of-memory kill."""
+    os.kill(os.getpid(), signum)
+    threading.Event().wait(60)  # the signal lands; nothing here should run
+
+
+def _reader_that_cannot_import(sender, path, *_args):
+    """A child whose start-up fails before any read — a module edited on
+    disk under a running server, a missing dependency."""
+    raise ImportError("No module named 'pypdf'")
+
+
+def _reader_that_returns_nothing(sender, path, *_args):
+    """A reader that returns without reporting: a bug, not a bound."""
 
 
 def test_read_pages_reads_in_a_child_that_is_gone_when_it_answers(web_log):
@@ -554,12 +568,41 @@ def test_a_reader_that_overruns_its_budget_is_stopped_and_reads_as_too_costly(mo
     assert set(multiprocessing.active_children()) == before
 
 
-def test_a_reader_the_kernel_ends_reads_as_too_costly(monkeypatch, web_log):
-    monkeypatch.setattr(references, "_read_in_child", _reader_that_dies)
+@pytest.mark.parametrize(
+    "signum", [signal.SIGKILL, signal.SIGXCPU], ids=["out-of-memory kill", "CPU limit"]
+)
+def test_a_reader_the_kernel_ends_reads_as_too_costly(monkeypatch, web_log, signum):
+    reader = functools.partial(_reader_the_kernel_ends, signum=int(signum))
+    monkeypatch.setattr(references, "_read_in_child", reader)
     with pytest.raises(ValueError, match="too costly to read") as caught:
         read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
     assert "the reader was stopped" in str(caught.value)
-    assert "exited without a result (exit code 1)" in web_log.text
+    assert f"exited without a result (killed by signal {signum.name})" in web_log.text
+
+
+@pytest.mark.parametrize(
+    ("reader", "status"),
+    [(_reader_that_cannot_import, "exit code 1"), (_reader_that_returns_nothing, "exit code 0")],
+    ids=["an import error", "no result"],
+)
+def test_a_reader_that_fails_on_its_own_is_the_servers_fault_not_the_files(
+    monkeypatch, web_log, capfd, reader, status
+):
+    """A child that ends by no bound of its own — an unhandled exception at
+    start-up, a return with nothing reported — is a bug: the RuntimeError
+    propagates (the endpoint's 500) rather than the 400 that blames the
+    file, with the exit status in the log and, for the exception, the
+    child's own traceback on stderr."""
+    monkeypatch.setattr(references, "_read_in_child", reader)
+    with pytest.raises(RuntimeError) as caught:
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
+    assert not isinstance(caught.value, ValueError)
+    assert str(caught.value) == (
+        "the report PDF could not be read: the reader process exited without a result"
+    )
+    assert f"exited without a result ({status})" in web_log.text
+    if reader is _reader_that_cannot_import:
+        assert "ImportError: No module named 'pypdf'" in capfd.readouterr().err
 
 
 def test_the_reader_caps_its_address_space_without_loosening_an_inherited_cap(monkeypatch):
@@ -625,17 +668,19 @@ def test_a_reader_that_inflates_past_the_memory_bound_is_stopped_by_the_watchdog
     monkeypatch.setattr(references, "_read_in_child", _reader_that_inflates)
     before = set(multiprocessing.active_children())
     started = time.perf_counter()
-    with pytest.raises(ValueError, match="too costly to read"):
+    with pytest.raises(ValueError, match="too costly to read") as caught:
         read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
     assert time.perf_counter() - started < 15  # the watchdog, not the deadline
+    assert "the reader needed too much memory" in str(caught.value)
     assert f"exited without a result (exit code {READER_MEMORY_EXIT_CODE})" in web_log.text
     assert set(multiprocessing.active_children()) == before
 
 
 def test_a_reader_that_hits_the_address_space_cap_reads_as_too_costly(monkeypatch, web_log):
     monkeypatch.setattr(references, "_read_in_child", _reader_that_hits_the_address_space_cap)
-    with pytest.raises(ValueError, match="too costly to read"):
+    with pytest.raises(ValueError, match="too costly to read") as caught:
         read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
+    assert "the reader needed too much memory" in str(caught.value)
     assert f"exited without a result (exit code {READER_MEMORY_EXIT_CODE})" in web_log.text
 
 
@@ -692,7 +737,8 @@ def test_the_watchdog_does_not_hold_the_reader_open_after_a_clean_finish(web_log
         )
     assert not isinstance(caught.value, ExtractionTimeoutError)
     assert time.perf_counter() - started < 5
-    assert "exited without a result" in web_log.text
+    assert caught.value.exitcode == 0  # its own exit, not the parent's SIGTERM
+    assert "exited without a result (exit code 0)" in web_log.text
 
 
 # --- the models and the call ----------------------------------------------------

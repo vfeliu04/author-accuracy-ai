@@ -467,8 +467,10 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     reads the PDF and asks the model again.
 
     The file gets the same checks an upload gets (extension, size, magic),
-    then pypdf reads its closing pages; a file pypdf cannot open is a 400
-    naming it. No text at all (a scanned PDF) answers "none" with an empty
+    then pypdf reads its closing pages; a file pypdf cannot open, or that
+    passes the read's time or memory budget, is a 400 naming it (a reader
+    that fails on its own — an import error, a bug — is a 500, not the
+    file's fault). No text at all (a scanned PDF) answers "none" with an empty
     list and no model call. A missing contact email means no lookup
     ("unconfigured"); a registry failure part-way keeps the list and flags
     it ("unavailable") rather than failing the scan, because the citations

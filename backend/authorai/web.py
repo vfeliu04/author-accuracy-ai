@@ -94,6 +94,21 @@ class ExtractionTimeoutError(RuntimeError):
     """Reading the page exceeded its wall-clock budget and was stopped."""
 
 
+class ReaderExitedError(RuntimeError):
+    """The reader process exited without sending a result. `exitcode` is
+    its status: negative for a signal (the CPU limit's SIGXCPU, an
+    out-of-memory kill), a code the child chose (os._exit), 1 for an
+    unhandled exception at start-up or in its target, 0 for a return with
+    nothing reported. What the status means is the caller's to decide —
+    the same status is a bound for one reader and a bug for another — so
+    the message only names the reader's input, as every reader failure
+    does."""
+
+    def __init__(self, message: str, exitcode: int | None) -> None:
+        super().__init__(message)
+        self.exitcode = exitcode
+
+
 @dataclass
 class PageMetadata:
     """What a page's markup declares about itself. Field names mirror
@@ -245,9 +260,10 @@ def in_bounded_child(
     The payload reaches the child through the file at `payload_path`
     (handover_file), which is removed on every path — by the child once read,
     here for a child that never read it. Raises ExtractionTimeoutError at the
-    deadline, with the child stopped, and RuntimeError naming `url` when the
-    child exits without a result (killed, out of memory, a frame cut short),
-    with its exit status in the log.
+    deadline, with the child stopped, and ReaderExitedError (a RuntimeError)
+    naming `url` when the child exits without a result (killed, out of
+    memory, a frame cut short, a failed start-up), carrying its exit status,
+    which is also in the log.
     """
     context = multiprocessing.get_context("spawn")
     outcome = None
@@ -272,6 +288,13 @@ def in_bounded_child(
                 outcome = receiver.recv()
             except (EOFError, OSError):  # the child died before reporting (EOF) or
                 pass  # while reporting (a frame cut short): killed, out of memory
+            # The child is done with the pipe — it reported, or it is gone —
+            # so let it end by itself before _stop reaps it: a child still
+            # tearing down when its pipe closed would otherwise be terminated,
+            # and its exit status, which a caller reads to tell a bound from
+            # a bug, would always be SIGTERM. One that closed its pipe and
+            # reads on is stopped after the grace.
+            child.join(_EXIT_GRACE_SECONDS)
         finally:
             sender.close()
             receiver.close()
@@ -283,8 +306,17 @@ def in_bounded_child(
         logger.warning(
             "the reader process for %s exited without a result (%s)", url, _exit_status(exitcode)
         )
-        raise RuntimeError(f"{url} could not be read: the reader process exited without a result")
+        raise ReaderExitedError(
+            f"{url} could not be read: the reader process exited without a result", exitcode
+        )
     return outcome
+
+
+# How long a child that is done with its pipe may take to end by itself
+# before _stop terminates it: an interpreter's teardown is tens of
+# milliseconds, so a real exit is never cut short, and a child that closed
+# its pipe and reads on costs at most this before it is stopped.
+_EXIT_GRACE_SECONDS = 1.0
 
 
 def handover_file(payload: bytes | str | BinaryIO, url: str) -> str:
