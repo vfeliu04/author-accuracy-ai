@@ -1035,6 +1035,42 @@ describe("UploadDialog reference checklist", () => {
     expect(scan).toHaveBeenCalledTimes(2);
   });
 
+  it("hides the may-have-missed line, with its Try again, while the scan it asked for runs", async () => {
+    // A stale warning under a running scan would read as the new scan's
+    // verdict, and its Try again would start a third one. The line and the
+    // control go with the click and come back only if the new answer is
+    // short too; the list the first answer gave stays on screen meanwhile.
+    const short = scanOf([scannedReference({ title: "Work one" })], { status: "ok", detail: null }, {
+      text_truncated: false,
+      references_dropped: 0,
+      possibly_incomplete: true
+    });
+    let finish!: (value: ReferenceScan) => void;
+    vi.spyOn(v2, "scanReferences")
+      .mockResolvedValueOnce(short)
+      .mockImplementationOnce(
+        () =>
+          new Promise<ReferenceScan>((resolve) => {
+            finish = resolve;
+          })
+      );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    expect(screen.getByText("The scan may have missed some entries")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Scanning the report's references…")).toBeInTheDocument();
+    expect(screen.getByText("Work one")).toBeInTheDocument();
+    expect(screen.queryByText("The scan may have missed some entries")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+
+    await act(async () => finish(short));
+    expect(await screen.findByText("The scan may have missed some entries")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByText("Scanning the report's references…")).not.toBeInTheDocument();
+  });
+
   it("offers to try a failed scan again, and lists the works when it answers", async () => {
     const scan = vi
       .spyOn(v2, "scanReferences")
