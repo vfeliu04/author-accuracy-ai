@@ -205,14 +205,18 @@ ENTRY_PREFIX_CHARS = 160
 # an answer under COMPLETE_FRACTION of that count, where the text shows at
 # least ENTRY_STARTS_FLOOR starts (under four, prose alone shows one or two
 # and an empty list is the right answer), or any entry whose RAW text runs
-# past MERGED_ENTRY_CHARS — three prefixes: entries merged into one object
-# — is asked for once more with the same prompt; the answer with more
-# references is kept, and one that still looks incomplete flags the scan
-# (Extraction.possibly_incomplete, the response's limits field) instead of
-# passing for the whole list.
+# past MERGED_ENTRY_CHARS (entries merged into one object) — is asked for
+# once more with the same prompt; the answer that passes the check is
+# kept, else the one with more references, and one that still looks
+# incomplete flags the scan (Extraction.possibly_incomplete, the
+# response's limits field) instead of passing for the whole list. An
+# answer of exactly half the starts passes. The merged line sits well
+# above the longest real entry and well below a merged one: nine Drought
+# entries run 481-759 characters raw (a wrapped author list, a long title
+# and a DOI), and the merged answer that was measured ran ~20,000.
 ENTRY_STARTS_FLOOR = 4
 COMPLETE_FRACTION = 0.5
-MERGED_ENTRY_CHARS = 3 * ENTRY_PREFIX_CHARS
+MERGED_ENTRY_CHARS = 1_000
 
 # How far apart, in PAGES, two heading matches may sit and still be one
 # section: a bibliography that spans several pages repeats its heading on
@@ -881,9 +885,10 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
 
     Each chunk's answer is held against the text it read (the completeness
     guard, see ENTRY_STARTS_FLOOR): one that looks incomplete is asked for
-    once more with the same prompt, the answer with more references is
-    kept, and one that still looks incomplete flags the whole scan as
-    possibly incomplete — a warning either way, never silently.
+    once more with the same prompt, the answer that passes the check is
+    kept (else the one with more references), and one that still looks
+    incomplete flags the whole scan as possibly incomplete — a warning
+    either way, never silently.
 
     A chunk whose call fails fails the scan — the endpoint's 500, as for any
     model failure. The other chunks' entries are not returned in its place:
@@ -922,9 +927,11 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
             "part %d of %d looks incomplete (%s) — asking once more", index + 1, total, why
         )
         retry = ask()
-        if len(retry.references) > len(answer.references):
-            answer = retry
-        why = _incomplete(starts, answer)
+        retry_why = _incomplete(starts, retry)
+        # The answer that passes the check, whichever is larger; when
+        # neither does, the larger (a short answer is the live failure).
+        if retry_why is None or len(retry.references) > len(answer.references):
+            answer, why = retry, retry_why
         if why is None:
             return answer, False
         logger.warning(

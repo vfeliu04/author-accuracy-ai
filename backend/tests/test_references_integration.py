@@ -187,7 +187,7 @@ def test_the_largest_real_list_splits_into_the_chunks_the_cost_comment_counts():
 # ". YYYY. " token the Global Hunger Index and REPORT19 styles print once
 # per entry, the highest bracket number of the numbered list, the
 # blank-line-separated blocks of the status brief. Measured 2026-09-23:
-# 247, 34, 190, 117, 116, 37, 23.
+# 247, 34, 190, 117, 116, 37, 24.
 ENTRY_COUNTS = [
     (DROUGHT, 225),
     ("example source two/Defining_domestic_water_consumption_based_on_perso.pdf", 37),

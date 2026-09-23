@@ -31,6 +31,7 @@ from authorai.references import (
     ENTRY_STARTS_FLOOR,
     HEADING_RUN_PAGES,
     MAX_REFERENCES,
+    MERGED_ENTRY_CHARS,
     PAGE_TEXT_MAX_CHARS,
     PAGE_TREE_CEILING,
     READER_ADDRESS_SPACE_BYTES,
@@ -1272,11 +1273,15 @@ def test_an_answer_short_twice_keeps_the_larger_and_flags_the_scan(answers, refe
 def test_a_merged_answer_is_retried_whatever_the_text_shows(references_log):
     """The live '5,117 tokens, 1 reference' shape: one object whose entry text
     holds the whole list. Its RAW entry, before the prefix cut, runs past
-    three times ENTRY_PREFIX_CHARS, which reads as merged even where the
-    text shows fewer than four entry starts; a full retry is kept, and a
-    second merged answer flags the scan."""
-    merged = _list(("Smith, J. (2020). A title. " * 20).strip())
-    assert len(merged.references[0].entry) > 3 * ENTRY_PREFIX_CHARS
+    MERGED_ENTRY_CHARS, which reads as merged even where the text shows
+    fewer than four entry starts; a full retry is kept, and a second merged
+    answer flags the scan. The line sits above the longest real entry: nine
+    Drought entries run 481-759 characters raw, and the merged answer that
+    was measured ran ~20,000."""
+    assert MERGED_ENTRY_CHARS == 1_000
+    merged = _list(("Smith, J. (2020). A title. " * 40).strip())
+    assert len(merged.references[0].entry) > MERGED_ENTRY_CHARS
+    assert len(_list(("Smith, J. (2020). A title. " * 28).strip()).references[0].entry) < 760
     llm = FakeLLM({ReferenceList: [merged, _list("a", "b")]})
     result = extract_references(llm, "m", "References\n" + ENTRY)
     assert [r.entry for r in result.references] == ["a", "b"]
@@ -1289,6 +1294,48 @@ def test_a_merged_answer_is_retried_whatever_the_text_shows(references_log):
     assert len(result.references) == 1
     assert len(result.references[0].entry) == ENTRY_PREFIX_CHARS
     assert result.possibly_incomplete is True
+    assert len(llm.parse_calls) == 2
+
+
+def test_a_real_entry_of_the_longest_measured_length_is_not_read_as_merged(references_log):
+    """An entry as long as the longest real one measured (759 characters
+    raw, a Drought entry) is one entry: no retry, no flag."""
+    real = _list("Zkhiri, W., Y. Tramblay, et al. (2019). " + "A long title. " * 51)
+    assert 700 < len(real.references[0].entry) < MERGED_ENTRY_CHARS
+    llm = FakeLLM({ReferenceList: real})
+    result = extract_references(llm, "m", "References\n" + ENTRY)
+    assert (len(result.references), result.possibly_incomplete) == (1, False)
+    assert len(llm.parse_calls) == 1
+    assert references_log.text == ""
+
+
+def test_the_retry_prefers_the_answer_that_passes_the_check_over_the_larger_one(references_log):
+    """First answer: four objects, one of them holding merged entries
+    (incomplete). Retry: three clean objects, exactly half the six starts
+    (complete). The clean answer is kept although it is smaller, and the
+    scan is not flagged; only when neither passes does the larger win."""
+    merged = ("Smith, J. (2020). A title. " * 40).strip()
+    first = _list("a", merged, "c", "d")
+    retry = _list("x", "y", "z")
+    llm = FakeLLM({ReferenceList: [first, retry]})
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert [r.entry for r in result.references] == ["x", "y", "z"]
+    assert result.possibly_incomplete is False
+    assert len(llm.parse_calls) == 2
+    assert "still looks incomplete" not in references_log.text
+
+
+def test_an_answer_of_exactly_half_the_entry_starts_is_not_retried(references_log):
+    """The boundary, pinned: three objects for six starts is not under half
+    — one call, no flag — while two is."""
+    assert entry_starts(SIX_ENTRIES) == 6
+    llm = FakeLLM({ReferenceList: _list("a", "b", "c")})
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert (len(result.references), result.possibly_incomplete) == (3, False)
+    assert len(llm.parse_calls) == 1
+    assert references_log.text == ""
+    llm = FakeLLM({ReferenceList: [_list("a", "b"), _list("a", "b")]})
+    assert extract_references(llm, "m", SIX_ENTRIES).possibly_incomplete is True
     assert len(llm.parse_calls) == 2
 
 

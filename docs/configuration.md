@@ -65,7 +65,7 @@ The split is deliberate: the accuracy-critical judgments (extraction, verdicts, 
 | `AUTHORAI_VALIDITY_MODEL` | `claude-opus-5` | The validity rubric over the whole report |
 | `AUTHORAI_CAPTION_MODEL` | `claude-haiku-4-5` | Figure descriptions (vision) baked into chunk text |
 | `AUTHORAI_METADATA_MODEL` | `claude-haiku-4-5` | Bibliographic metadata extraction for source credibility. A web page uses it only when its markup declares nothing beyond a title |
-| `AUTHORAI_REFERENCES_MODEL` | `claude-haiku-4-5` | The upload dialog's reference scan (`POST /api/references/scan`): reads the report's printed reference list into fields — title, authors, year, and the DOI or address the entry prints. The same kind of bounded task as metadata extraction |
+| `AUTHORAI_REFERENCES_MODEL` | `claude-haiku-4-5` | The upload dialog's reference scan (`POST /api/references/scan`): reads the report's printed reference list into fields — title, authors, year, and the DOI or address the entry prints. The same kind of bounded task as metadata extraction. The scan asks for `temperature` 0 (a transcription), so the model must accept the parameter: Haiku 4.5 does, while Sonnet 5 and Opus 4.7 and later refuse it with a 400 |
 
 ## Scoring
 
