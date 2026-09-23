@@ -451,8 +451,9 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     What this endpoint does NOT do: it creates no run, upload or job row
     (there is deliberately no database dependency here, so it cannot); it
     writes no file under uploads_dir (the spooled part is read in place); it
-    never fetches a cited work (a suggested address is syntax-checked only,
-    by the gate a pasted link passes); and it caches nothing — every call
+    never fetches a cited work (a suggested address passes the gate a pasted
+    link passes plus the fetcher's literal-address refusal, and is not
+    resolved or visited); and it caches nothing — every call
     reads the PDF and asks the model again.
 
     The file gets the same checks an upload gets (extension, size, magic),

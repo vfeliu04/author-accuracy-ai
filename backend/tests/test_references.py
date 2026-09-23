@@ -425,6 +425,47 @@ def test_an_unusable_address_is_dropped_and_the_next_one_tried(references_log):
     assert retrievability(record) == ("landing", "https://x.org/a")
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://127.0.0.1/x",  # loopback
+        "http://10.0.0.1/x",  # private
+        "http://[::1]/x",  # IPv6 loopback
+        "http://localhost/x",
+        "http://Localhost./x",  # case and a trailing dot do not make another host
+        "http://api.localhost/x",  # anything under .localhost is the local machine
+        "http://169.254.169.254/latest/meta-data",  # link-local: the cloud metadata service
+        "http://100.64.0.1/x",  # carrier-grade NAT
+        "http://224.0.0.1/x",  # multicast
+        "http://[::ffff:127.0.0.1]/x",  # loopback wrapped in IPv6
+    ],
+)
+def test_an_address_the_fetcher_would_refuse_is_never_offered(bad, references_log):
+    """The syntax gate passes these; the fetcher refuses them at ingest. A
+    link the app will not read is not offered: the record's next address is
+    tried instead, and a printed one is not offered at all."""
+    record = _record(url_for_pdf=bad, url_for_landing_page="https://x.org/a")
+    assert retrievability(record) == ("landing", "https://x.org/a"), bad
+    assert "WARNING" in references_log.text
+    assert "dropping the pdf address" in references_log.text
+    assert printed_url(Reference(entry="e", url=bad)) is None, bad
+
+
+def test_a_public_literal_address_or_a_name_is_offered():
+    """Only the address forms that can be judged without a network are
+    judged: a public literal passes, and a NAME is offered as it is — a name
+    that resolves to private space is refused at ingest by the fetch gate,
+    which is where the DNS lookup belongs."""
+    for url in (
+        "https://x.org/a.pdf",
+        "http://93.184.216.34/a.pdf",
+        "http://[2606:4700::1111]/a.pdf",
+        "https://internal.example.org/a.pdf",
+    ):
+        assert retrievability(_record(url_for_pdf=url)) == ("pdf", url), url
+        assert printed_url(Reference(entry="e", url=url)) == url, url
+
+
 def test_a_suggested_address_is_the_normalized_form():
     record = _record(url_for_pdf="HTTPS://X.org/a.pdf#page=3")
     assert retrievability(record) == ("pdf", "https://x.org/a.pdf")

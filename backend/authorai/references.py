@@ -17,9 +17,12 @@ copy (a PDF, or a landing page — for many genuinely open works Unpaywall's
 `url_for_pdf` is null and `url` is the landing page) is offered as a link the
 user may add; a closed work is listed as paywalled; a work without a DOI, or
 one the registry does not know, is unknown. Nothing is fetched here: an
-address is checked for syntax only, by the same gate a pasted link passes.
+address passes the gate a pasted link passes, plus the one refusal the
+fetcher would make without a network — a literal private or local address —
+so no link is offered that ingest would then refuse.
 """
 
+import ipaddress
 import re
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -31,7 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 from pypdf import PdfReader
 
 from authorai.credibility import clean_doi, get_json_with_retries
-from authorai.fetch import validate_source_url
+from authorai.fetch import is_public_address, url_host, validate_source_url
 from authorai.llm import LLM
 from authorai.log import setup_logger
 
@@ -240,12 +243,35 @@ class UnpaywallClient:
         )
 
 
+def offerable_url(url: str) -> str:
+    """The address in the form a pasted link takes, or ValueError when the
+    app would refuse the link: the syntax gate a pasted link passes, then the
+    one refusal the fetcher would make that needs no network. A LITERAL
+    address host must pass fetch.is_public_address — the gate the fetcher
+    applies to every resolved hop — and `localhost`, or any name under it,
+    is the local machine by definition. A NAME that resolves to private
+    space is deliberately not caught here: a pre-upload aid does no DNS,
+    and the fetch gate resolves and pins every hop at ingest, where such a
+    link is refused. An offer is only ever as good as that gate."""
+    normalized = validate_source_url(url)
+    host = url_host(normalized) or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        raise ValueError(f"Source URL {normalized!r} names the local machine")
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        return normalized  # a name: resolved, and gated, at ingest
+    if not is_public_address(literal):
+        raise ValueError(f"Source URL {normalized!r} names a private or reserved address")
+    return normalized
+
+
 def _usable(url: str, *, what: str) -> str | None:
-    """The address in the form a pasted link takes, or None when the syntax
-    gate refuses it — an address the app would not accept as a link is not
+    """The address in the form a pasted link takes, or None when the offer
+    gate refuses it — an address the app would not read as a link is not
     offered as one."""
     try:
-        return validate_source_url(url)
+        return offerable_url(url)
     except ValueError as exc:
         logger.warning("dropping the %s address Unpaywall offered: %s", what, exc)
         return None
@@ -283,17 +309,18 @@ def retrievability(record: dict | None) -> Resolved:
 
 
 def printed_url(reference: Reference) -> str | None:
-    """The address a DOI-less entry prints, syntax-checked, or None.
+    """The address a DOI-less entry prints, through the offer gate, or None.
 
     Only without a DOI: with one, the registry's verdict rules (a paywalled
     work is never offered, whatever its entry prints). The address is not
-    checked against anything — the frontend labels it "printed in the entry,
-    not checked" — so it passes exactly the gate a pasted link passes.
+    checked against any registry — the frontend labels it "printed in the
+    entry, not checked" — so it passes exactly the gate a suggested address
+    passes, and nothing more.
     """
     if reference.doi or not reference.url:
         return None
     try:
-        return validate_source_url(reference.url)
+        return offerable_url(reference.url)
     except ValueError as exc:
         logger.info("not offering the printed address: %s", exc)
         return None
