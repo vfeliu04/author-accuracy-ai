@@ -191,7 +191,7 @@ def _steers_the_path(doi: str) -> bool:
     "..;" and then "..". A dot INSIDE a segment (10.1016/j.heliyon.2024.e34730),
     or a ";" after ordinary text, is DOI punctuation and passes."""
     served = _as_served(doi)
-    if "\\" in doi or "\\" in served:
+    if "\\" in served:
         return True
     return any(segment.split(";", 1)[0] in _DOT_SEGMENTS for segment in served.split("/"))
 
