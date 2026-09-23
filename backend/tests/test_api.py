@@ -1647,7 +1647,10 @@ def test_reference_scan_without_a_contact_email_looks_nothing_up(tmp_path, monke
     a printed address is still offered, since it needs no lookup."""
     from authorai import api as apimod
 
-    settings = _settings(tmp_path)  # crossref_mailto unset
+    # Explicit, not "unset": a backend/.env that names a contact email (the
+    # dev setup, the live scratch server's symlink) would otherwise supply
+    # one, and this test would depend on the machine it runs on.
+    settings = _settings(tmp_path, crossref_mailto=None)
     assert settings.crossref_mailto is None
     fake = FakeLLM({ReferenceList: CITED})
     monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
