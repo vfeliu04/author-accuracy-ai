@@ -9,7 +9,7 @@ export function scannedReference(over: Partial<ScannedReference> = {}): ScannedR
     year: null,
     doi: null,
     url: null,
-    entry: "An entry as printed.",
+    label: null,
     retrievability: "unknown",
     suggested_url: null,
     ...over
