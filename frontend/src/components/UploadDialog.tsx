@@ -319,6 +319,10 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   // new answer lands.
   const scanning = scan.isFetching;
   const scanError = scanning ? null : scanMessage(scan.error);
+  // The server asked a part again and still got a short answer: the list is
+  // shown as it came, said to be possibly short, with the control a failed
+  // scan gets — hidden while a new scan runs, like the failure.
+  const incomplete = !scanning && scan.data?.limits.possibly_incomplete === true;
   const lookup = scan.data?.lookup;
   const cut = scan.data ? limitsNote(scan.data.limits) : null;
 
@@ -512,13 +516,14 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             </span>
           ) : null}
           {scanning ? <p className="modal__count">Scanning the report's references…</p> : null}
-          {scanError !== null ? (
-            <>
-              <p className="modal__error">{scanError}</p>
-              <button type="button" className="btn btn--ghost" onClick={() => void scan.refetch()}>
-                Try again
-              </button>
-            </>
+          {scanError !== null ? <p className="modal__error">{scanError}</p> : null}
+          {incomplete ? (
+            <p className="modal__count">The scan may have missed some entries</p>
+          ) : null}
+          {scanError !== null || incomplete ? (
+            <button type="button" className="btn btn--ghost" onClick={() => void scan.refetch()}>
+              Try again
+            </button>
           ) : null}
           {scan.data && scan.data.references.length === 0 ? (
             <p className="modal__count">No reference list found in this report</p>

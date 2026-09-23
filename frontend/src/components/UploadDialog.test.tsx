@@ -11,7 +11,11 @@ function pdf(name: string, bytes = 100): File {
   return new File([new Uint8Array(bytes)], name, { type: "application/pdf" });
 }
 
-const noLimits: ReferenceScan["limits"] = { text_truncated: false, references_dropped: 0 };
+const noLimits: ReferenceScan["limits"] = {
+  text_truncated: false,
+  references_dropped: 0,
+  possibly_incomplete: false
+};
 
 const emptyScan: ReferenceScan = {
   text_source: "none",
@@ -697,7 +701,8 @@ describe("UploadDialog reference checklist", () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([scannedReference({ title: "Work one" })], { status: "ok", detail: null }, {
         text_truncated: true,
-        references_dropped: 12
+        references_dropped: 12,
+        possibly_incomplete: false
       })
     );
     renderDialog();
@@ -712,7 +717,8 @@ describe("UploadDialog reference checklist", () => {
     const scan = vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([scannedReference({ title: "Work one" })], { status: "ok", detail: null }, {
         text_truncated: false,
-        references_dropped: 1
+        references_dropped: 1,
+        possibly_incomplete: false
       })
     );
     renderDialog();
@@ -898,6 +904,40 @@ describe("UploadDialog reference checklist", () => {
     expect((sourcesArg as File[]).length).toBe(17);
     expect(linksArg).toEqual(["https://a.org/one", "https://a.org/two", "https://a.org/three"]);
     expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+  });
+
+  it("says the scan may have missed entries, with the same Try again, and clears it on a full answer", async () => {
+    // The server's completeness guard could not get a full answer for a
+    // part (limits.possibly_incomplete): the list is shown, with one muted
+    // line and the control a failed scan gets, and asking again is the
+    // same refetch — a second answer without the flag clears both.
+    const scan = vi
+      .spyOn(v2, "scanReferences")
+      .mockResolvedValueOnce(
+        scanOf([scannedReference({ title: "Work one" })], { status: "ok", detail: null }, {
+          text_truncated: false,
+          references_dropped: 0,
+          possibly_incomplete: true
+        })
+      )
+      .mockResolvedValue(
+        scanOf([scannedReference({ title: "Work one" }), scannedReference({ title: "Work two" })])
+      );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(1)).toBeInTheDocument());
+    const line = screen.getByText("The scan may have missed some entries");
+    expect(line).toHaveClass("modal__count");
+    expect(line).not.toHaveClass("modal__error");
+    expect(screen.getByText("Work one")).toBeInTheDocument();
+    expect(screen.queryByText(/not shown|reference list/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(heading(2)).toBeInTheDocument());
+    expect(screen.getByText("Work two")).toBeInTheDocument();
+    expect(screen.queryByText("The scan may have missed some entries")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(2);
   });
 
   it("offers to try a failed scan again, and lists the works when it answers", async () => {
