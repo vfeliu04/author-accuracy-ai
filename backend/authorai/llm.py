@@ -95,6 +95,7 @@ class LLM(Protocol):
         output_type: type[ModelT],
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
+        temperature: float | None = None,
     ) -> ModelT: ...
 
     def parse_batch(
@@ -196,16 +197,25 @@ class AnthropicClient:
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
         timeout: float | None = None,
+        temperature: float | None = None,
     ) -> ModelT:
         # An explicit timeout lifts the SDK's non-streaming max_tokens guard —
         # used by the batch retry so a thinking-heavy item keeps its headroom.
         client = self._client if timeout is None else self._client.with_options(timeout=timeout)
+        # A sampling parameter reaches the request only when a caller sets
+        # one: Opus 4.7+ and Sonnet 5 refuse `temperature` with a 400 (its
+        # default value included), Haiku 4.5 accepts it — so the default here
+        # is "not sent", and the one caller that asks (the reference scan,
+        # pinned to Haiku, whose answer's shape varied between identical
+        # calls) states the model it relies on.
+        sampling = {} if temperature is None else {"temperature": temperature}
         response = client.messages.parse(
             model=model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": _content(prompt, images)}],
             output_format=output_type,
+            **sampling,
         )
         self._log_usage(model, response)
         if response.parsed_output is None:

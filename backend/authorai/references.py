@@ -691,11 +691,17 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     chunks = split_reference_text(closing_text)
 
     def extract(index: int) -> ReferenceList:
+        # Temperature 0: the reading is a transcription, and six identical
+        # live calls on one 37-entry list answered 37 / 1 / 37 / 37 / 1 / 1
+        # (MISTAKES 2026-09-23). Haiku 4.5, the pinned references model,
+        # accepts the parameter; Sonnet 5 and Opus 4.7+ refuse it with a
+        # 400, so `references_model` must stay a model that takes it.
         return llm.parse(
             model=model,
             system=REFERENCES_SYSTEM,
             prompt=_chunk_prompt(index, len(chunks), chunks[index]),
             output_type=ReferenceList,
+            temperature=0.0,
         )
 
     # Executor.map yields in submission order whatever order the calls finish

@@ -180,7 +180,15 @@ class FakeLLM:
         self.chat_calls: list[dict] = []
 
     def parse(
-        self, *, model, system, prompt, output_type, max_tokens=PARSE_MAX_TOKENS, images=None
+        self,
+        *,
+        model,
+        system,
+        prompt,
+        output_type,
+        max_tokens=PARSE_MAX_TOKENS,
+        images=None,
+        temperature=None,
     ):
         self.parse_calls.append(
             {
@@ -189,6 +197,7 @@ class FakeLLM:
                 "prompt": prompt,
                 "output_type": output_type,
                 "images": images,
+                "temperature": temperature,
             }
         )
         result = self._parse_results[output_type]

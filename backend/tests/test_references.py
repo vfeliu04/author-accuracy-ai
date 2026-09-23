@@ -790,6 +790,19 @@ def test_a_short_list_is_one_call_under_the_references_contract():
     assert call["images"] is None
 
 
+def test_the_references_call_is_sampled_at_temperature_zero():
+    """Six identical live calls on one 37-entry list answered 37 / 1 / 37 /
+    37 / 1 / 1 (MISTAKES 2026-09-23): the answer's SHAPE varied between
+    calls. The reading is a transcription, not a judgment that needs
+    variety, so the call asks for temperature 0 — a parameter Haiku 4.5, the
+    pinned references model, accepts (the claude-api skill: Sonnet 5 and
+    Opus 4.7+ refuse it with a 400, which is why the LLM protocol sends one
+    only when a caller asks for it)."""
+    llm = FakeLLM({ReferenceList: _list(ENTRY)})
+    extract_references(llm, "claude-haiku-4-5", "References\n" + ENTRY)
+    assert llm.parse_calls[0]["temperature"] == 0.0
+
+
 def test_split_reference_text_keeps_a_short_list_whole():
     assert split_reference_text("References\n" + ENTRY) == ["References\n" + ENTRY]
     assert split_reference_text("x" * REFERENCE_CHUNK_CHARS) == ["x" * REFERENCE_CHUNK_CHARS]
