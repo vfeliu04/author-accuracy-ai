@@ -4,8 +4,12 @@ for HTTP, FakeLLM for the model, a hand-built PDF for pypdf)."""
 
 import io
 import json
+import multiprocessing
+import os
 import re
+import resource
 import threading
+import time
 from concurrent.futures import wait
 
 import httpx
@@ -18,6 +22,8 @@ from authorai.references import (
     ENTRY_PREFIX_CHARS,
     HEADING_RUN_PAGES,
     MAX_REFERENCES,
+    PAGE_TREE_CEILING,
+    READER_ADDRESS_SPACE_BYTES,
     REFERENCE_CHUNK_CHARS,
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
@@ -34,7 +40,7 @@ from authorai.references import (
     retrievability,
     split_reference_text,
 )
-from tests.conftest import FakeLLM, pdf_with_pages
+from tests.conftest import FakeLLM, pdf_from_objects, pdf_with_pages
 
 ENTRY = "Smith, J. (2020). Water stress and cities. Journal of Hydrology, 12(3), 1-9."
 
@@ -245,17 +251,20 @@ def test_no_text_at_all_means_no_model_call():
 
 def test_read_pages_extracts_the_text_of_each_page():
     pdf = pdf_with_pages(["Page one", "Page two", "References\n" + ENTRY])
-    pages = read_pages(io.BytesIO(pdf))
+    pages = read_pages(io.BytesIO(pdf), timeout=30)
     assert [page.strip() for page in pages] == ["Page one", "Page two", "References\n" + ENTRY]
 
 
 def test_read_pages_reads_only_the_last_max_pages():
     pdf = pdf_with_pages(["one", "two", "three"])
-    assert [p.strip() for p in read_pages(io.BytesIO(pdf), max_pages=2)] == ["two", "three"]
+    assert [p.strip() for p in read_pages(io.BytesIO(pdf), timeout=30, max_pages=2)] == [
+        "two",
+        "three",
+    ]
 
 
 def test_read_pages_keeps_a_textless_page_as_an_empty_string():
-    assert [p.strip() for p in read_pages(io.BytesIO(pdf_with_pages([""])))] == [""]
+    assert [p.strip() for p in read_pages(io.BytesIO(pdf_with_pages([""])), timeout=30)] == [""]
 
 
 @pytest.mark.parametrize(
@@ -266,7 +275,7 @@ def test_read_pages_turns_any_pypdf_failure_into_a_value_error(junk):
     """The endpoint answers 400 for what it cannot read; pypdf's own exception
     family is not its contract."""
     with pytest.raises(ValueError, match="could not read"):
-        read_pages(io.BytesIO(junk))
+        read_pages(io.BytesIO(junk), timeout=30)
 
 
 def test_read_pages_opens_a_pdf_encrypted_with_an_empty_password():
@@ -280,7 +289,130 @@ def test_read_pages_opens_a_pdf_encrypted_with_an_empty_password():
     encrypted = io.BytesIO()
     writer.write(encrypted)
     assert PdfReader(io.BytesIO(encrypted.getvalue())).is_encrypted
-    assert [p.strip() for p in read_pages(encrypted)] == ["Restricted references"]
+    assert [p.strip() for p in read_pages(encrypted, timeout=30)] == ["Restricted references"]
+
+
+# --- read_pages: a bounded child, and a page tree bounded before it is walked --
+
+
+def _doubled_page_tree(depth: int, *, count: int) -> bytes:
+    """The hostile page tree the security review built: every interior
+    /Pages node lists ONE child twice, so a flatten with no visited set
+    (pypdf 3.17.4's) yields 2**depth pages from depth + 3 objects — 1,024
+    pages from a 1,149-byte file at depth 10, a billion at depth 30. `count`
+    is what the root DECLARES, which such a file may set to anything."""
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    for level in range(depth):
+        number = 2 + level
+        child = number + 1
+        declared = f" /Count {count}" if level == 0 else f" /Parent {number - 1} 0 R"
+        objects.append(f"<< /Type /Pages /Kids [{child} 0 R {child} 0 R]{declared} >>".encode())
+    leaf = 2 + depth
+    objects.append(f"<< /Type /Page /Parent {leaf - 1} 0 R /MediaBox [0 0 612 792] >>".encode())
+    return pdf_from_objects(objects)
+
+
+def _flat_page_tree(leaves: int, *, count: int) -> bytes:
+    """`leaves` textless pages under one root that declares `count` pages."""
+    kids = " ".join(f"{3 + index} 0 R" for index in range(leaves))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode(),
+        *[b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"] * leaves,
+    ]
+    return pdf_from_objects(objects)
+
+
+def _reader_that_never_answers(sender, path, *_args):
+    """A reader holding its whole budget: a file pypdf never finishes with."""
+    threading.Event().wait(60)
+
+
+def _reader_that_dies(sender, path, *_args):
+    """A reader the kernel ends (RLIMIT_CPU's SIGXCPU, RLIMIT_AS, jetsam)."""
+    os._exit(1)
+
+
+def test_read_pages_reads_in_a_child_that_is_gone_when_it_answers():
+    before = set(multiprocessing.active_children())
+    pdf = pdf_with_pages(["Page one", "References\n" + ENTRY])
+    pages = read_pages(io.BytesIO(pdf), timeout=30)
+    assert [page.strip() for page in pages] == ["Page one", "References\n" + ENTRY]
+    assert set(multiprocessing.active_children()) == before
+
+
+@pytest.mark.parametrize(("depth", "declared"), [(10, 1024), (30, 1)])
+def test_a_page_tree_that_doubles_at_every_level_is_refused_before_it_is_flattened(depth, declared):
+    """Refused by the walk, whatever the root declares: at depth 30 the
+    flatten would never finish, and the deadline would then read the file as
+    too costly — this is the refusal itself, in the time a child takes."""
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="could not read the PDF: .*page tree is not a tree"):
+        read_pages(io.BytesIO(_doubled_page_tree(depth, count=declared)), timeout=30)
+    assert time.perf_counter() - started < 10  # the child's start-up, not the tree
+
+
+def test_a_declared_page_count_over_the_ceiling_is_refused_before_the_tree_is_walked():
+    pdf = _flat_page_tree(2, count=PAGE_TREE_CEILING + 1)
+    with pytest.raises(ValueError, match=f"declares {PAGE_TREE_CEILING + 1} pages"):
+        read_pages(io.BytesIO(pdf), timeout=30)
+
+
+def test_a_page_tree_with_more_nodes_than_the_ceiling_is_refused_whatever_it_declares():
+    """The declared count is a claim; the walk is the bound."""
+    pdf = _flat_page_tree(PAGE_TREE_CEILING + 1, count=1)
+    with pytest.raises(ValueError, match=f"more than {PAGE_TREE_CEILING} nodes"):
+        read_pages(io.BytesIO(pdf), timeout=30)
+
+
+def test_a_page_tree_at_the_ceiling_still_reads_its_last_pages():
+    leaves = PAGE_TREE_CEILING - 1  # plus the root: exactly the ceiling
+    pages = read_pages(io.BytesIO(_flat_page_tree(leaves, count=leaves)), timeout=30)
+    assert pages == [""] * references.REFERENCE_MAX_PAGES
+
+
+def test_a_reader_that_overruns_its_budget_is_stopped_and_reads_as_too_costly(monkeypatch):
+    monkeypatch.setattr(references, "_read_in_child", _reader_that_never_answers)
+    before = set(multiprocessing.active_children())
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="could not read the PDF: it was too costly to read") as c:
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=0.5)
+    assert "0.5 seconds" in str(c.value)
+    assert time.perf_counter() - started < 15  # stopped at the deadline, never awaited
+    assert set(multiprocessing.active_children()) == before
+
+
+def test_a_reader_the_kernel_ends_reads_as_too_costly(monkeypatch, web_log):
+    monkeypatch.setattr(references, "_read_in_child", _reader_that_dies)
+    with pytest.raises(ValueError, match="too costly to read") as caught:
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
+    assert "the reader was stopped" in str(caught.value)
+    assert "exited without a result (exit code 1)" in web_log.text
+
+
+def test_the_reader_caps_its_address_space_without_loosening_an_inherited_cap(monkeypatch):
+    """Linux enforces RLIMIT_AS; the reader asks for the tighter of its own
+    cap and the one it inherited, and a platform that refuses the request
+    (macOS answers EINVAL, a ValueError from the resource module) leaves the
+    wall-clock and CPU bounds as the reader's limits — never a failed read."""
+    calls = []
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (2**29, resource.RLIM_INFINITY))
+    monkeypatch.setattr(resource, "setrlimit", lambda which, limits: calls.append((which, limits)))
+    references._limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    assert READER_ADDRESS_SPACE_BYTES > 2**29
+    assert calls == [(resource.RLIMIT_AS, (2**29, resource.RLIM_INFINITY))]
+    calls.clear()
+    monkeypatch.setattr(
+        resource, "getrlimit", lambda which: (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+    )
+    references._limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    assert calls == [(resource.RLIMIT_AS, (READER_ADDRESS_SPACE_BYTES, resource.RLIM_INFINITY))]
+
+    def refused(which, limits):
+        raise ValueError("current limit exceeds maximum limit")
+
+    monkeypatch.setattr(resource, "setrlimit", refused)
+    references._limit_address_space(READER_ADDRESS_SPACE_BYTES)  # tolerated
 
 
 # --- the models and the call ----------------------------------------------------

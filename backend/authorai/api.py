@@ -468,7 +468,7 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     settings: Settings = request.app.state.settings
     _validate_pdf(report, settings.max_upload_bytes)
     try:
-        pages = refsmod.read_pages(report.file)
+        pages = refsmod.read_pages(report.file, timeout=settings.extract_timeout_seconds)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{report.filename!r}: {exc}") from exc
     text, text_source = refsmod.reference_text(pages)

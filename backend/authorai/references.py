@@ -25,21 +25,26 @@ so no link is offered that ingest would then refuse.
 
 import ipaddress
 import re
+import resource
 import threading
+import traceback
 from bisect import bisect_right
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from itertools import accumulate
+from pathlib import Path
 from typing import BinaryIO, Literal
 from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, Field, field_validator
 from pypdf import PdfReader
+from pypdf.generic import IndirectObject
 
 from authorai.credibility import clean_doi, get_json_with_retries
 from authorai.fetch import is_public_address, url_host, validate_source_url
 from authorai.llm import LLM
 from authorai.log import setup_logger
+from authorai.web import ExtractionTimeoutError, end_with_parent, handover_file, in_bounded_child
 
 logger = setup_logger(__name__)
 
@@ -70,6 +75,27 @@ logger = setup_logger(__name__)
 REFERENCE_MAX_CHARS = 65_000
 MAX_REFERENCES = 300
 REFERENCE_MAX_PAGES = 600
+
+# What bounds the READ, as opposed to the result: pypdf flattens the whole
+# page tree before a page can be taken from its end, walking /Kids with no
+# visited set and no depth guard, so a tree whose interior nodes each list
+# one child twice yields 2**depth pages from a file of a few hundred bytes
+# (a billion at depth 30 — an hour of CPU, then no memory left). The read
+# therefore happens in a spawned child under the wall-clock budget, CPU
+# limit and parent-death watcher web.in_bounded_child gives a fetched page,
+# and before the child lets pypdf flatten anything it walks the tree itself:
+# the root's declared /Count over this ceiling is refused at once, and so
+# is a walk that reaches a node twice (a shared child, a cycle) or visits
+# more nodes than this — so the flatten it then permits costs at most this
+# many nodes, whatever the file declares. 10,000 is far past any report
+# the pipeline accepts (the layout pass takes seconds a page) while a real
+# tree of that size walks in milliseconds. The address-space cap is the
+# child's bound on what pypdf's FlateDecode can inflate (zlib.decompress
+# with no output limit in the pinned 3.17.4): Linux enforces RLIMIT_AS;
+# macOS refuses to set it, and there the deadline and the CPU limit remain
+# the reader's bounds.
+PAGE_TREE_CEILING = 10_000
+READER_ADDRESS_SPACE_BYTES = 1 << 30
 
 # The output budget, not the input, bounds one call: PARSE_MAX_TOKENS
 # (16,000) cannot carry a whole long list — the Drought list's ~224 entries
@@ -118,9 +144,13 @@ _HEADING = re.compile(
 )
 
 
-def read_pages(handle: BinaryIO, *, max_pages: int = REFERENCE_MAX_PAGES) -> list[str]:
+def read_pages(
+    handle: BinaryIO, *, timeout: float, max_pages: int = REFERENCE_MAX_PAGES
+) -> list[str]:
     """The text of the LAST `max_pages` pages, one string per page (empty for
-    a page without text, such as a scan).
+    a page without text, such as a scan), read in a child stopped after
+    `timeout` seconds of wall clock (the endpoint passes
+    Settings.extract_timeout_seconds).
 
     pypdf, not Docling: a layout pass is seconds per page, far too slow for a
     dialog that must answer while the user is still picking sources, and the
@@ -128,17 +158,117 @@ def read_pages(handle: BinaryIO, *, max_pages: int = REFERENCE_MAX_PAGES) -> lis
     xref tables real PDFs carry; a file encrypted with an empty user password
     (print/copy restrictions) is opened as readers do. Anything pypdf cannot
     read — its own exception family, or the KeyError/RecursionError a hostile
-    file provokes — is one ValueError, the caller's 400.
+    file provokes — is one ValueError, the caller's 400; so is a file the
+    child cannot finish with inside its budget (the deadline, the CPU or
+    address-space limit), which reads as "too costly", never as a 500. A
+    failure to hand the file to the child (no temp dir) is the server's, a
+    RuntimeError.
     """
+    handle.seek(0)  # from the start, as pypdf itself would read it
+    payload_path = handover_file(handle, "the report PDF")
     try:
-        reader = PdfReader(handle, strict=False)
-        if reader.is_encrypted:
-            reader.decrypt("")
-        pages = reader.pages
-        first = max(0, len(pages) - max_pages)
-        return [pages[index].extract_text() or "" for index in range(first, len(pages))]
+        kind, payload = in_bounded_child(
+            _read_in_child,
+            (max_pages,),
+            payload_path=payload_path,
+            url="the report PDF",
+            timeout=timeout,
+        )
+    except ExtractionTimeoutError as exc:
+        raise ValueError(
+            "could not read the PDF: it was too costly to read "
+            f"(took longer than {timeout:g} seconds)"
+        ) from exc
+    except RuntimeError as exc:  # exited without a result: killed by a limit, out of memory
+        raise ValueError(
+            "could not read the PDF: it was too costly to read (the reader was stopped)"
+        ) from exc
+    if kind == "result":
+        return payload
+    name, message, _child_traceback = payload
+    if kind == "value":  # the child's own refusal, worded for the user
+        raise ValueError(f"could not read the PDF: {message}")
+    raise ValueError(f"could not read the PDF ({name}: {message})")
+
+
+def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) -> None:
+    """The child's side of read_pages: the file opened and unlinked at once
+    (the open handle keeps it; a reader killed outright never reaches its
+    own removal), the pages, or the failure as a (kind, (type name, message,
+    traceback)) triple — a ValueError is the child's own refusal, anything
+    else is pypdf's."""
+    end_with_parent(cpu_seconds)
+    _limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    try:
+        with open(payload_path, "rb") as pdf_file:
+            Path(payload_path).unlink(missing_ok=True)
+            outcome = ("result", _last_pages(pdf_file, max_pages))
     except Exception as exc:  # noqa: BLE001 - every reader failure is "unreadable"
-        raise ValueError(f"could not read the PDF ({type(exc).__name__}: {exc})") from exc
+        kind = "value" if isinstance(exc, ValueError) else "other"
+        outcome = (kind, (type(exc).__name__, str(exc), traceback.format_exc()))
+    sender.send(outcome)
+    sender.close()
+
+
+def _limit_address_space(limit: int) -> None:
+    """Cap this process's address space at `limit` bytes, never loosening a
+    stricter limit it inherited. Enforced on Linux; macOS refuses the call
+    (EINVAL, which the resource module raises as ValueError), and the
+    refusal is not a reader failure: the deadline and the CPU limit hold."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    wanted = min(value for value in (limit, soft, hard) if value != resource.RLIM_INFINITY)
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (wanted, hard))
+    except (ValueError, OSError) as exc:
+        logger.debug("the platform refused an address-space limit for the reader: %s", exc)
+
+
+def _last_pages(handle: BinaryIO, max_pages: int) -> list[str]:
+    reader = PdfReader(handle, strict=False)
+    if reader.is_encrypted:
+        reader.decrypt("")
+    _bound_page_tree(reader)
+    pages = reader.pages
+    first = max(0, len(pages) - max_pages)
+    return [pages[index].extract_text() or "" for index in range(first, len(pages))]
+
+
+def _bound_page_tree(reader: PdfReader) -> None:
+    """Refuse a page tree that would cost more than PAGE_TREE_CEILING nodes
+    to flatten, BEFORE pypdf flattens it (see the constant). The declared
+    /Count is checked first, as a claim; the walk is the bound: every node
+    reached from the root, in pypdf's order, and a node reached twice — the
+    shared child that doubles the leaves at every level, or a cycle, which
+    pypdf's flatten never leaves — is refused at its second visit."""
+    catalog = reader.trailer["/Root"]
+    root = catalog.raw_get("/Pages")
+    count = root.get_object().get("/Count")
+    if isinstance(count, int) and count > PAGE_TREE_CEILING:
+        raise ValueError(
+            f"the file declares {count} pages, more than the {PAGE_TREE_CEILING} the scan can walk"
+        )
+    seen: set = set()
+    pending = [root]
+    while pending:
+        reference = pending.pop()
+        key = (
+            (reference.idnum, reference.generation)
+            if isinstance(reference, IndirectObject)
+            else id(reference)
+        )
+        if key in seen:
+            raise ValueError("the file's page tree is not a tree (a page node is reached twice)")
+        seen.add(key)
+        if len(seen) > PAGE_TREE_CEILING:
+            raise ValueError(f"the file's page tree has more than {PAGE_TREE_CEILING} nodes")
+        node = reference.get_object()
+        if not isinstance(node, dict):
+            continue
+        kids = node.get("/Kids")
+        if kids is not None:
+            kids = kids.get_object()
+        if isinstance(kids, list):
+            pending.extend(kids)
 
 
 def reference_text(

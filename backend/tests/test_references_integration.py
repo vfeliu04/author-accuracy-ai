@@ -61,7 +61,7 @@ def _slice(relative: str):
     if not path.exists():
         pytest.skip(f"example PDF not present: {path}")
     with path.open("rb") as handle:
-        pages = read_pages(handle)
+        pages = read_pages(handle, timeout=60)
     assert pages, "expected at least one page"
     return reference_text(pages)
 

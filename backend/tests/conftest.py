@@ -67,6 +67,26 @@ def references_log(caplog):
     yield from _attached_to(references_mod.logger, caplog)
 
 
+def pdf_from_objects(objects: list[bytes]) -> bytes:
+    """A real PDF file around the given object bodies, numbered from 1 with
+    object 1 the catalog: header, the objects, an xref table and a trailer.
+    The one place the file syntax is written, so a test that needs a page
+    tree or a font pypdf must READ a particular way builds only the objects."""
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
 def pdf_with_pages(pages: list[str]) -> bytes:
     """A real, minimal PDF written from raw PDF syntax — one page per string,
     an empty string making a page with no text (a scanned page's shape).
@@ -98,19 +118,7 @@ def pdf_with_pages(pages: list[str]) -> bytes:
         objects.append(
             b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
         )
-    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = []
-    for number, body in enumerate(objects, start=1):
-        offsets.append(len(out))
-        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
-    xref = len(out)
-    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
-    for offset in offsets:
-        out += f"{offset:010d} 00000 n \n".encode()
-    out += (
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
-    ).encode()
-    return bytes(out)
+    return pdf_from_objects(objects)
 
 
 def poison_providers(monkeypatch):

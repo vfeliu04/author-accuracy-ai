@@ -6,6 +6,8 @@ against an app that can't actually start.
 """
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -1510,6 +1512,53 @@ def test_reference_scan_rejects_what_it_cannot_read(
         )
     assert resp.status_code == expected_status, resp.text
     assert expected_detail in resp.json()["detail"]
+    _nothing_written(settings)
+
+
+def _reader_that_never_answers(sender, path, *_args):
+    """A reader holding its whole budget: a file pypdf never finishes with."""
+    threading.Event().wait(60)
+
+
+def test_reference_scan_of_a_report_too_costly_to_read_is_a_400_not_a_500(tmp_path, monkeypatch):
+    """The PDF is read in a bounded child (references.read_pages); a file
+    that holds the reader past Settings.extract_timeout_seconds is refused
+    like any file pypdf cannot open — a 400 naming the file and saying it
+    was too costly, never a 500 — and no model is constructed."""
+    from authorai import api as apimod
+    from authorai import references as refsmod
+
+    monkeypatch.setattr(refsmod, "_read_in_child", _reader_that_never_answers)
+    monkeypatch.setattr(
+        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
+    )
+    settings = _settings(tmp_path, extract_timeout_seconds=0.5)
+    app = create_app(settings, worker=_NoopWorker())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"].startswith(
+        "'report.pdf': could not read the PDF: it was too costly to read"
+    )
+    _nothing_written(settings)
+
+
+def test_reference_scan_reads_the_last_pages_of_a_long_report_promptly(tmp_path, monkeypatch):
+    """5,000 textless pages: the page-tree bound is linear in the tree, the
+    read covers the last 600 pages, and the answer is 'none' without a
+    model call — in seconds, not the minutes a hostile tree would take."""
+    from authorai import api as apimod
+
+    monkeypatch.setattr(
+        apimod, "AnthropicClient", lambda key: pytest.fail("constructed an LLM client")
+    )
+    settings = _settings(tmp_path)
+    started = time.perf_counter()
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report(pages=[""] * 5_000))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["text_source"] == "none"
+    assert time.perf_counter() - started < 20
     _nothing_written(settings)
 
 
