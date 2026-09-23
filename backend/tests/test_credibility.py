@@ -202,9 +202,27 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
     "10.1000/../../admin" would GET /admin on the registry; the DOI comes
     from the model, so the shape gate refuses it before it enters the path."""
     route = respx.route(host="api.crossref.org").mock(return_value=httpx.Response(404))
-    for bad in ("10.1000/../../admin", "10.1000/x/../../../etc", "10.1000/./x", "10.1000/a\\b"):
+    for bad in (
+        "10.1000/../../admin",
+        "10.1000/x/../../../etc",
+        "10.1000/./x",
+        "10.1000/a\\b",
+        "10.1000/..;/x",
+        "10.1000/x/.;y/z",
+    ):
         assert _client().by_doi(bad) is None, bad
     assert route.call_count == 0, [str(c.request.url) for c in route.calls]
+
+
+@respx.mock
+def test_a_semicolon_that_hides_no_dot_segment_is_requested_exactly():
+    """A ";" is legitimate DOI punctuation when the segment before it is not
+    a dot segment: the lookup goes out, quoted, as the DOI under /works/."""
+    route = respx.get(f"{CROSSREF_BASE}/works/10.1000/a%3Bb/c").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
+    )
+    assert _client().by_doi("10.1000/a;b/c") == {"title": ["Anything"]}
+    assert str(route.calls.last.request.url) == f"{CROSSREF_BASE}/works/10.1000/a%3Bb/c"
 
 
 @pytest.mark.parametrize(
@@ -217,12 +235,17 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
         "10.1000/.",
         "10.1000/..",
         "10.1000/a\\b",
+        "10.1000/..;/x",
+        "10.1000/x/.;y/z",
+        "10.1000/x/..;",
     ],
 )
 def test_clean_doi_rejects_a_dot_segment_or_a_backslash(doi, credibility_log):
     """A segment that IS "." or ".." steers the request path; a backslash is
-    a path separator to some servers. Both are refused as malformed, with
-    the same warning as any other shapeless DOI."""
+    a path separator to some servers; a servlet container drops a ";param"
+    suffix from a segment BEFORE normalizing, so "..;x" is ".." to it. All
+    are refused as malformed, with the same warning as any other shapeless
+    DOI."""
     assert clean_doi(doi) is None
     assert "Malformed DOI" in credibility_log.text
 
@@ -233,6 +256,7 @@ def test_clean_doi_keeps_dots_inside_a_segment():
     assert clean_doi(doi) == doi
     assert clean_doi(f"https://doi.org/{doi}") == doi
     assert clean_doi("10.1000/a.b.c/d.e") == "10.1000/a.b.c/d.e"
+    assert clean_doi("10.1000/a;b/c") == "10.1000/a;b/c"  # a ";" hiding no dot segment
 
 
 @respx.mock

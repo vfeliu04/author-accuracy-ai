@@ -433,9 +433,24 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
         "10.1000/x/.",
         "10.1000/..",
         "10.1000/a\\b",
+        "10.1000/..;/x",  # a servlet container drops ";..." before normalizing
+        "10.1000/x/.;y/z",
     ):
         assert _unpaywall().by_doi(bad) is None, bad
     assert route.call_count == 0, [str(c.request.url) for c in route.calls]
+
+
+@respx.mock
+def test_a_semicolon_that_hides_no_dot_segment_is_requested_exactly():
+    """A ";" after ordinary text is DOI punctuation, not a hidden dot
+    segment: the lookup goes out, quoted, as the DOI under /v2/."""
+    route = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/a%3Bb/c").mock(
+        return_value=httpx.Response(200, json=_record())
+    )
+    _unpaywall().by_doi("10.1000/a;b/c")
+    assert str(route.calls.last.request.url) == (
+        f"{UNPAYWALL_BASE}/v2/10.1000/a%3Bb/c?email=checker%40example.org"
+    )
 
 
 @respx.mock

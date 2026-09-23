@@ -156,9 +156,14 @@ def _steers_the_path(doi: str) -> bool:
     other than <endpoint>/<doi>. httpx applies RFC 3986 dot-segment removal
     to the path it sends, quoting notwithstanding, so "10.1000/../../admin"
     is a GET of /admin on the registry; a backslash is a path separator to
-    some servers. A dot INSIDE a segment (10.1016/j.heliyon.2024.e34730)
-    is ordinary DOI punctuation and passes."""
-    return "\\" in doi or any(segment in _DOT_SEGMENTS for segment in doi.split("/"))
+    some servers; and a servlet container drops a ";param" suffix from each
+    segment BEFORE it normalizes, so "..;x" is ".." to it — the segment is
+    judged with that suffix stripped. A dot INSIDE a segment
+    (10.1016/j.heliyon.2024.e34730), or a ";" after ordinary text, is DOI
+    punctuation and passes."""
+    if "\\" in doi:
+        return True
+    return any(segment.split(";", 1)[0] in _DOT_SEGMENTS for segment in doi.split("/"))
 
 
 def clean_doi(doi: str) -> str | None:
