@@ -16,6 +16,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -454,6 +455,24 @@ class ReferenceScan(BaseModel):
     references: list[ScannedReference]
 
 
+# How many reference scans may run at once. The handler is sync (its
+# blocking reads run on the threadpool, forty threads by default) and a
+# scan the dialog abandons — the report swapped, the dialog closed — runs
+# on: a threadpool thread cannot be cancelled and uvicorn does not stop the
+# app on a disconnect, so each abandoned scan keeps its thread, a reader
+# child of up to READER_MEMORY_BYTES (768 MiB) and its model calls until it
+# finishes or the deadline stops it. Without a bound, re-picking files
+# stacks N of those in the one process that also runs the jobs worker and
+# holds the database, on an 8 GB machine. Two covers the one live dialog
+# and a re-pick while its scan drains; a third is answered 429 at once —
+# no reader, no model call — with a plain message the dialog shows beside
+# its Try again control, so overlapping picks queue on the client. The
+# slot is taken after the cheap file checks (a bad file's 400 needs none)
+# and released on every exit.
+SCAN_CONCURRENCY = 2
+_scan_slots = threading.BoundedSemaphore(SCAN_CONCURRENCY)
+
+
 @router.post("/references/scan")
 def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> ReferenceScan:
     """List the works the report's own reference list cites, with whether a
@@ -480,10 +499,23 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     are useful without retrievability (references.resolve_retrievability
     holds that rule, and suggested_url which address a row offers). A model
     failure is not caught: 500, like chat. Sync, so its blocking reads run
-    on the threadpool.
+    on the threadpool — and bounded to SCAN_CONCURRENCY at once (see the
+    constant): past that, 429 before any reader or model work.
     """
     settings: Settings = request.app.state.settings
     _validate_pdf(report, settings.max_upload_bytes)
+    if not _scan_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429, detail="a reference scan is already running — try again in a moment"
+        )
+    try:
+        return _scan(report, settings)
+    finally:
+        _scan_slots.release()
+
+
+def _scan(report: UploadFile, settings: Settings) -> ReferenceScan:
+    """The scan itself, once its slot is held: the read, the model, the lookup."""
     try:
         pages = refsmod.read_pages(report.file, timeout=settings.extract_timeout_seconds)
     except ValueError as exc:

@@ -6,6 +6,7 @@ against an app that can't actually start.
 """
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -1771,3 +1772,101 @@ def test_reference_scan_survives_a_200_whose_body_is_not_json(tmp_path, monkeypa
 
 def test_reference_scan_needs_the_report_part(client):
     assert client.post(SCAN, headers=AUTH).status_code == 422
+
+
+class _HeldLLM(FakeLLM):
+    """A FakeLLM whose parse holds until released, counting the scans that
+    reached it — so a test can keep SCAN_CONCURRENCY scans in flight."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reached = threading.Semaphore(0)
+        self.release = threading.Event()
+
+    def parse(self, **kwargs):
+        self.reached.release()
+        assert self.release.wait(20), "the held scan was never released"
+        return super().parse(**kwargs)
+
+
+def _post_in_threads(client, count: int) -> tuple[list, list[threading.Thread]]:
+    results: list = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(client.post(SCAN, headers=AUTH, files=_scan_report()))
+        )
+        for _ in range(count)
+    ]
+    for thread in threads:
+        thread.start()
+    return results, threads
+
+
+def test_scans_past_the_concurrency_bound_are_refused_until_one_finishes(tmp_path, monkeypatch):
+    """SCAN_CONCURRENCY scans run at once; the next is a 429 with a plain
+    message, before any reader process or model call of its own; once a
+    scan finishes, a new one is a 200. A scan the dialog abandons runs on
+    (a threadpool thread cannot be cancelled), each holding a reader child
+    and the model calls, so overlapping picks queue on the client instead
+    of stacking on the server."""
+    from authorai import api as apimod
+    from authorai.api import SCAN_CONCURRENCY
+
+    fake = _HeldLLM({ReferenceList: CITED})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    settings = _settings(tmp_path)  # no contact email: no lookups
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        results, threads = _post_in_threads(client, SCAN_CONCURRENCY)
+        try:
+            for _ in range(SCAN_CONCURRENCY):
+                assert fake.reached.acquire(timeout=20), "a scan never reached the model"
+            refused = client.post(SCAN, headers=AUTH, files=_scan_report())
+        finally:
+            fake.release.set()
+            for thread in threads:
+                thread.join(20)
+        assert refused.status_code == 429, refused.text
+        assert refused.json() == {
+            "detail": "a reference scan is already running — try again in a moment"
+        }
+        assert [resp.status_code for resp in results] == [200] * SCAN_CONCURRENCY
+        assert len(fake.parse_calls) == SCAN_CONCURRENCY  # the refused scan asked nothing
+        again = client.post(SCAN, headers=AUTH, files=_scan_report())
+        assert again.status_code == 200, again.text
+        assert len(fake.parse_calls) == SCAN_CONCURRENCY + 1
+    _nothing_written(settings)
+
+
+def test_a_scan_that_fails_frees_its_slot(tmp_path, monkeypatch):
+    """A slot is held for the scan's whole run and released on every exit:
+    after a 400 (a read too costly) and a 500 (a model failure), a full
+    set of SCAN_CONCURRENCY scans still runs at once."""
+    from authorai import api as apimod
+    from authorai.api import SCAN_CONCURRENCY
+
+    class FailingLLM(FakeLLM):
+        def parse(self, **kwargs):
+            raise RuntimeError("the model is down")
+
+    settings = _settings(tmp_path)
+    app = create_app(settings, worker=_NoopWorker())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        # Past the file checks (the magic bytes are there), refused by pypdf.
+        unreadable = {"report": ("report.pdf", b"%PDF-1.4 fake pdf content", "application/pdf")}
+        resp = client.post(SCAN, headers=AUTH, files=unreadable)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["detail"].startswith("'report.pdf': could not read the PDF")
+        monkeypatch.setattr(apimod, "AnthropicClient", lambda key: FailingLLM())
+        assert client.post(SCAN, headers=AUTH, files=_scan_report()).status_code == 500
+
+        fake = _HeldLLM({ReferenceList: CITED})
+        monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+        results, threads = _post_in_threads(client, SCAN_CONCURRENCY)
+        try:
+            for _ in range(SCAN_CONCURRENCY):
+                assert fake.reached.acquire(timeout=20), "a slot was not freed"
+        finally:
+            fake.release.set()
+            for thread in threads:
+                thread.join(20)
+        assert [resp.status_code for resp in results] == [200] * SCAN_CONCURRENCY
