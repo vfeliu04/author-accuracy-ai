@@ -35,6 +35,11 @@ dependencies = [
     # web.py imports lxml.etree directly (one C-level pass applies its tree
     # edits); trafilatura brings lxml in, but a direct import is declared.
     "lxml==6.1.1",
+    # Bibliography scan (references.py): fast text of a report's closing pages
+    # for a pre-upload aid. Docling's layout pipeline is seconds per page;
+    # pypdf reads the same files in well under a second and needs no layout.
+    # Not a docling dependency (docling uses pypdfium2), so it is pinned here.
+    "pypdf==3.17.4",
 ]
 
 [project.optional-dependencies]

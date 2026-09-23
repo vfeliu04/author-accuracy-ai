@@ -57,6 +57,60 @@ def credibility_log(caplog):
     yield from _attached_to(credibility_mod.logger, caplog)
 
 
+@pytest.fixture()
+def references_log(caplog):
+    """caplog, capturing authorai.references's records."""
+    from authorai import references as references_mod
+
+    yield from _attached_to(references_mod.logger, caplog)
+
+
+def pdf_with_pages(pages: list[str]) -> bytes:
+    """A real, minimal PDF written from raw PDF syntax — one page per string,
+    an empty string making a page with no text (a scanned page's shape).
+
+    Hand-built rather than written by a library so the tests exercise pypdf's
+    READING of an ordinary xref-table file offline, not a writer's round
+    trip. Helvetica is one of the standard 14 fonts every reader must carry,
+    so no font is embedded; text is Latin-1.
+    """
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(len(pages)))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for i, text in enumerate(pages):
+        content_number = 5 + 2 * i
+        objects.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> "
+            + f"/Contents {content_number} 0 R >>".encode()
+        )
+        operators = ["BT", "/F1 12 Tf", "72 720 Td", "14 TL"]
+        for line in text.split("\n"):
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            operators.append(f"({escaped}) Tj T*")
+        operators.append("ET")
+        stream = "\n".join(operators).encode("latin-1")
+        objects.append(
+            b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+        )
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
 def poison_providers(monkeypatch):
     """Make any provider work during an ingest reuse a test failure — not just
     calls: CONSTRUCTING a client already means the dedup path leaked. The one
