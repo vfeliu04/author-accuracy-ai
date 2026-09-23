@@ -248,7 +248,7 @@ export type ScannedReference = {
   year: number | null;
   doi: string | null; // only when printed in the entry
   url: string | null; // only when printed in the entry
-  entry: string; // the printed text, verbatim — shown when the title is null
+  entry: string; // the first 160 characters as printed — shown when the title is null
   retrievability: Retrievability;
   // The link the user may add: set for "pdf" and "landing", and for an entry
   // that printed a URL but no DOI (then retrievability stays "unknown": the

@@ -4,6 +4,7 @@ for HTTP, FakeLLM for the model, a hand-built PDF for pypdf)."""
 
 import io
 import json
+import re
 import threading
 from concurrent.futures import wait
 
@@ -12,9 +13,12 @@ import pytest
 import respx
 
 from authorai import references
+from authorai.llm import PARSE_MAX_TOKENS
 from authorai.references import (
-    HEADING_RUN_GAP,
+    ENTRY_PREFIX_CHARS,
+    HEADING_RUN_PAGES,
     MAX_REFERENCES,
+    REFERENCE_CHUNK_CHARS,
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
     UNPAYWALL_BASE,
@@ -28,6 +32,7 @@ from authorai.references import (
     read_pages,
     reference_text,
     retrievability,
+    split_reference_text,
 )
 from tests.conftest import FakeLLM, pdf_with_pages
 
@@ -36,16 +41,21 @@ ENTRY = "Smith, J. (2020). Water stress and cities. Journal of Hydrology, 12(3),
 
 # --- reference_text: where the bibliography is ---------------------------------
 
+SECOND_ENTRY = "Jones, K. (2019). Rivers under stress. Nature Water, 1(1), 2-3."
+BODY = "Body text continues. " * 200  # a page of prose with no heading
+
 
 def test_slices_from_the_last_references_heading():
     """A report can print 'References' more than once (a chapter's own list
     far earlier); the bibliography starts at the LAST one when the earlier
-    one lies farther back than HEADING_RUN_GAP — the cap plays no part in
-    where the slice starts."""
+    one lies more than HEADING_RUN_PAGES pages back — the cap plays no part
+    in where the slice starts."""
     pages = [
         "Intro. See References for details.",
         "References\nChapter 1's own short list.",
-        "Body text continues. " * 600,  # 12,600 characters: more than a page run
+        BODY,
+        BODY,
+        BODY,  # three pages between the two headings: more than a run
         "References\n" + ENTRY,
     ]
     text, source = reference_text(pages, max_chars=100)
@@ -53,14 +63,11 @@ def test_slices_from_the_last_references_heading():
     assert text == "References\n" + ENTRY
 
 
-SECOND_ENTRY = "Jones, K. (2019). Rivers under stress. Nature Water, 1(1), 2-3."
-
-
 def test_a_running_header_does_not_cut_a_multi_page_bibliography_short():
     """Each page of a long bibliography carries 'References' as a running
     header. The LAST match is on the last page; slicing from it alone would
-    lose every earlier entry. Headings at most HEADING_RUN_GAP apart are one
-    section, so the slice starts at the earliest of them."""
+    lose every earlier entry. Headings at most HEADING_RUN_PAGES pages apart
+    are one section, so the slice starts at the earliest of them."""
     first = "References\n" + ENTRY
     second = "45\nReferences\n" + SECOND_ENTRY
     text, source = reference_text([first, second])
@@ -68,55 +75,69 @@ def test_a_running_header_does_not_cut_a_multi_page_bibliography_short():
     assert text == first + "\n" + second
 
 
-def test_a_chapter_list_farther_back_than_a_page_run_stays_excluded():
-    """A chapter-end reference list 25,000 characters before the closing
-    bibliography is a separate section: the slice starts at the LAST heading
-    and keeps every one of the final list's 120 entries (10,940 characters,
-    well under the cap), with the chapter list out. Under a cap-sized merge
-    window the chapter list would have been joined and the cap would have
-    cut the final list short."""
+def test_a_run_of_headers_joins_by_chaining_each_page_to_the_one_before():
+    """Four consecutive pages each carry the running header. The first sits
+    three pages before the last — more than HEADING_RUN_PAGES — so a rule
+    measuring every heading against the LAST one would drop page 0, and a
+    rule stepping back once would start at page 2. Only chaining, each
+    heading judged against the one before it, starts at page 0 and keeps
+    all four pages' entries."""
+    pages = [f"References\nEntry on page {i}. " + ENTRY for i in range(4)]
+    text, source = reference_text(pages)
+    assert source == "heading"
+    assert text == "\n".join(pages)
+    assert all(f"Entry on page {i}." in text for i in range(4))
+
+
+def test_a_chapter_list_several_pages_back_stays_excluded():
+    """A chapter-end reference list four pages before the closing bibliography
+    is a separate section: the slice starts at the LAST heading and keeps
+    every one of the final list's 120 entries, with the chapter list out.
+    The pages between are short, so a rule measured in characters would
+    have joined the two lists — page distance does not depend on how dense
+    the pages are."""
     chapter_list = "References\n" + SECOND_ENTRY
     final_entries = [f"Final ref {i}. " + ENTRY for i in range(120)]
     final_list = "References\n" + "\n".join(final_entries)
-    assert len(final_list) == 10_940
-    text, source = reference_text([chapter_list, "b" * 25_000, final_list])
+    sparse_page = "A short page.\n"
+    text, source = reference_text([chapter_list, sparse_page, sparse_page, sparse_page, final_list])
     assert source == "heading"
     assert text == final_list
     assert all(entry in text for entry in final_entries)
     assert SECOND_ENTRY not in text
 
 
-def _pages_with_headings_apart(gap: int) -> list[str]:
-    """Two pages whose heading words start exactly `gap` characters apart
-    in the joined text (the join adds one newline)."""
-    first = "References\n" + "x" * (gap - len("References\n") - 1)
-    return [first, "References\n" + ENTRY]
+def _pages_with_headings_apart(pages_apart: int) -> list[str]:
+    """Pages whose two headings sit exactly `pages_apart` pages apart: one on
+    the first page, the other on page `pages_apart`, short pages between."""
+    return ["References\n" + SECOND_ENTRY, *["Body."] * (pages_apart - 1), "References\n" + ENTRY]
 
 
-def test_headings_exactly_one_run_gap_apart_are_one_section():
-    """The boundary is inclusive: a gap of exactly HEADING_RUN_GAP joins, so
-    the slice starts at the earlier heading. A mutant that compares with "<"
-    instead of "<=" fails here."""
-    pages = _pages_with_headings_apart(HEADING_RUN_GAP)
+def test_headings_exactly_one_run_apart_are_one_section():
+    """The boundary is inclusive: headings HEADING_RUN_PAGES pages apart (a
+    header printed on alternate pages — recto or verso) join, so the slice
+    starts at the earlier heading. A mutant that compares with "<" instead
+    of "<=" fails here."""
+    pages = _pages_with_headings_apart(HEADING_RUN_PAGES)
     text, source = reference_text(pages)
     assert source == "heading"
     assert text == "\n".join(pages)
 
 
-def test_headings_one_more_than_a_run_gap_apart_are_two_sections():
-    """One character past the gap and the earlier heading is a separate
-    section: the slice starts at the last heading."""
-    pages = _pages_with_headings_apart(HEADING_RUN_GAP + 1)
+def test_headings_one_page_more_than_a_run_apart_are_two_sections():
+    """One page past the run and the earlier heading is a separate section:
+    the slice starts at the last heading."""
+    pages = _pages_with_headings_apart(HEADING_RUN_PAGES + 1)
     text, source = reference_text(pages)
     assert source == "heading"
     assert text == "References\n" + ENTRY
 
 
 def test_a_contents_page_mention_far_earlier_stays_excluded():
-    """A table of contents prints 'References' on a line of its own, far
-    before the bibliography: more than HEADING_RUN_GAP back from the last
-    heading, so the slice still starts at the bibliography."""
-    pages = ["Contents\nReferences\n45", "x" * 100_000, "References\n" + ENTRY]
+    """A table of contents prints 'References' on a line of its own, many
+    pages before the bibliography: more than HEADING_RUN_PAGES pages back
+    from the last heading, so the slice still starts at the bibliography."""
+    pages = ["Contents\nReferences\n45", *[BODY] * 10, "References\n" + ENTRY]
     text, source = reference_text(pages)
     assert source == "heading"
     assert text == "References\n" + ENTRY
@@ -229,7 +250,29 @@ def test_read_pages_opens_a_pdf_encrypted_with_an_empty_password():
 # --- the models and the call ----------------------------------------------------
 
 
-def test_extract_references_sends_the_closing_text_under_the_references_contract():
+def _list(*entries: str) -> ReferenceList:
+    return ReferenceList(references=[Reference(entry=entry) for entry in entries])
+
+
+def _lines(count: int) -> str:
+    """A reference list of `count` one-line entries, numbered so a test can
+    tell which lines a chunk carried; 340 lines is ~30,000 characters."""
+    return "\n".join(f"Ref {i:04d}. {ENTRY}" for i in range(count))
+
+
+def _answer_by_part(answers: dict[int, ReferenceList]):
+    """A FakeLLM answer keyed on the part number the prompt names — the same
+    answer for a chunk whatever order the pool runs the chunks in."""
+
+    def answer(prompt: str) -> ReferenceList:
+        match = re.search(r"part (\d+) of (\d+)", prompt)
+        assert match, prompt[:80]
+        return answers[int(match.group(1))]
+
+    return answer
+
+
+def test_a_short_list_is_one_call_under_the_references_contract():
     wanted = ReferenceList(
         references=[
             Reference(
@@ -240,12 +283,124 @@ def test_extract_references_sends_the_closing_text_under_the_references_contract
     llm = FakeLLM({ReferenceList: wanted})
     result = extract_references(llm, "claude-haiku-4-5", "References\n" + ENTRY)
     assert result == wanted
+    assert len(llm.parse_calls) == 1
     call = llm.parse_calls[0]
     assert call["model"] == "claude-haiku-4-5"
     assert call["system"] == REFERENCES_SYSTEM
-    assert ENTRY in call["prompt"]
+    assert call["prompt"] == "CLOSING PAGES:\n\nReferences\n" + ENTRY
+    assert "part" not in call["prompt"]
     assert call["output_type"] is ReferenceList
     assert call["images"] is None
+
+
+def test_split_reference_text_keeps_a_short_list_whole():
+    assert split_reference_text("References\n" + ENTRY) == ["References\n" + ENTRY]
+    assert split_reference_text("x" * REFERENCE_CHUNK_CHARS) == ["x" * REFERENCE_CHUNK_CHARS]
+
+
+def test_split_reference_text_cuts_a_long_list_at_line_breaks_in_order():
+    """A 30,000-character list is three chunks of at most REFERENCE_CHUNK_CHARS,
+    none cutting inside a line: every line reaches exactly one chunk, whole
+    and in order, and no chunk is a sliver."""
+    text = _lines(340)
+    assert 29_000 <= len(text) <= 31_000
+    chunks = split_reference_text(text)
+    assert len(chunks) == 3
+    assert all(len(chunk) <= REFERENCE_CHUNK_CHARS for chunk in chunks)
+    assert [line for chunk in chunks for line in chunk.split("\n")] == text.split("\n")
+    assert all(len(chunk) > REFERENCE_CHUNK_CHARS // 2 for chunk in chunks[:-1])
+
+
+def test_split_reference_text_prefers_a_blank_line_between_entries():
+    """Entries set apart by blank lines are cut between entries, so a cut
+    splits an entry only when a chunk-sized stretch has no blank line."""
+    entries = [f"Entry {i}. {ENTRY}\nsecond line of {i}" for i in range(200)]
+    text = "\n\n".join(entries)
+    chunks = split_reference_text(text)
+    assert len(chunks) == 2
+    assert [entry for chunk in chunks for entry in chunk.split("\n\n")] == entries
+
+
+def test_split_reference_text_cuts_a_line_longer_than_a_chunk_at_a_space():
+    """A PDF whose text lost its line breaks: no line break to cut at, so the
+    last space serves and, with none, the cap itself — the output budget
+    holds either way."""
+    words = ("word " * 5_000).strip()
+    chunks = split_reference_text(words)
+    assert len(chunks) == 3
+    assert all(len(chunk) <= REFERENCE_CHUNK_CHARS for chunk in chunks)
+    assert " ".join(chunks) == words
+    solid = "x" * 25_000
+    chunks = split_reference_text(solid)
+    assert [len(chunk) for chunk in chunks] == [12_000, 12_000, 1_000]
+    assert "".join(chunks) == solid
+
+
+def test_a_long_list_is_read_in_parts_and_concatenated_in_part_order():
+    """A 30,000-character list is three calls, each part's prompt naming the
+    part and carrying whole lines only, under the one system prompt; the
+    answer is the parts' answers in part order, whatever order the pool
+    finished them in."""
+    text = _lines(340)
+    answers = {1: _list("a1", "a2"), 2: _list("b1"), 3: _list("c1", "c2", "c3")}
+    llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
+    result = extract_references(llm, "m", text)
+    assert [r.entry for r in result.references] == ["a1", "a2", "b1", "c1", "c2", "c3"]
+    assert len(llm.parse_calls) == 3
+    assert all(call["system"] == REFERENCES_SYSTEM for call in llm.parse_calls)
+    assert all(call["model"] == "m" for call in llm.parse_calls)
+    prompts = sorted(call["prompt"] for call in llm.parse_calls)
+    for number, prompt in enumerate(prompts, start=1):
+        assert prompt.startswith(f"CLOSING PAGES, part {number} of 3")
+        assert "may begin or end in the middle of an entry" in prompt
+        assert "never completed" in prompt
+    bodies = [prompt.split("\n\n", 1)[1] for prompt in prompts]
+    assert bodies == split_reference_text(text)
+    assert [line for body in bodies for line in body.split("\n")] == text.split("\n")
+
+
+def test_a_boundary_inside_an_entry_yields_two_fragments_never_a_merged_entry():
+    """An entry a cut splits across two parts comes back as its two printed
+    fragments, each listed by the part that saw it. The code joins the
+    parts' answers and never welds fragments: it cannot know two entries
+    were one, and a wrong weld would be an entry the page does not print."""
+    text = _lines(340)
+    head = "Long, A. (2021). A title that continues"
+    tail = "on the next line. Journal, 3(1), 1-2."
+    answers = {1: _list("Ref 0138.", head), 2: _list(tail, "Ref 0140."), 3: _list("Ref 0339.")}
+    llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
+    result = extract_references(llm, "m", text)
+    entries = [r.entry for r in result.references]
+    assert entries == ["Ref 0138.", head, tail, "Ref 0140.", "Ref 0339."]
+
+
+def test_a_failing_part_fails_the_whole_extraction():
+    """No partial bibliography: a part whose call fails raises, as the single
+    call did, so the endpoint answers 500 rather than a list with a silent
+    hole in it."""
+    text = _lines(340)
+
+    def answer(prompt: str) -> ReferenceList:
+        if "part 2 of 3" in prompt:
+            raise RuntimeError("LLM call produced no parseable ReferenceList")
+        return _list("ok")
+
+    with pytest.raises(RuntimeError, match="no parseable ReferenceList"):
+        extract_references(FakeLLM({ReferenceList: answer}), "m", text)
+
+
+def test_entries_are_cut_to_the_prefix_length_verbatim(references_log):
+    """The prompt asks for the first ENTRY_PREFIX_CHARS characters; a model
+    that returns more is cut to exactly that prefix in code, without a
+    warning (the prefix is the contract), and a shorter entry is untouched."""
+    printed = "Long, A., Longer, B., & Longest, C. (2020). " + "A title that runs on. " * 12
+    assert len(printed) > ENTRY_PREFIX_CHARS
+    result = extract_references(FakeLLM({ReferenceList: _list(printed, "short")}), "m", "R")
+    assert result.references[0].entry == printed[:ENTRY_PREFIX_CHARS]
+    assert len(result.references[0].entry) == ENTRY_PREFIX_CHARS
+    assert result.references[1].entry == "short"
+    assert references_log.text == ""
+    assert f"first {ENTRY_PREFIX_CHARS} characters" in REFERENCES_SYSTEM
 
 
 def test_extract_references_caps_the_list_in_code_with_a_warning(references_log):
@@ -260,6 +415,21 @@ def test_extract_references_caps_the_list_in_code_with_a_warning(references_log)
     assert result.references[-1].entry == f"entry {MAX_REFERENCES - 1}"
     assert f"{MAX_REFERENCES + 5} references" in references_log.text
     assert "WARNING" in references_log.text
+
+
+def test_the_cap_applies_to_the_parts_concatenated(references_log):
+    """Three parts of 120 entries each are 360, over MAX_REFERENCES: the
+    first 300 in part order are kept, and the warning counts the parts."""
+    text = _lines(340)
+    answers = {n: _list(*(f"p{n}-{i}" for i in range(120))) for n in (1, 2, 3)}
+    result = extract_references(FakeLLM({ReferenceList: _answer_by_part(answers)}), "m", text)
+    entries = [r.entry for r in result.references]
+    assert len(entries) == MAX_REFERENCES == 300
+    assert entries[0] == "p1-0"
+    assert entries[119] == "p1-119"
+    assert entries[120] == "p2-0"
+    assert entries[-1] == "p3-59"
+    assert "360 references over 3 parts" in references_log.text
 
 
 def test_extract_references_returns_a_short_list_untouched(references_log):
@@ -296,17 +466,34 @@ def test_the_schema_sent_to_the_api_carries_no_constraint_it_might_reject():
         "maximum",
     ):
         assert keyword not in dumped, keyword
-    assert references.MAX_REFERENCES == 150
-    assert references.REFERENCE_MAX_CHARS == 60_000
-    assert references.HEADING_RUN_GAP == 12_000
+    assert references.MAX_REFERENCES == 300
+    assert references.REFERENCE_MAX_CHARS == 65_000
+    assert references.REFERENCE_CHUNK_CHARS == 12_000
+    assert references.ENTRY_PREFIX_CHARS == 160
+    assert references.HEADING_RUN_PAGES == 2
     assert references.REFERENCE_MAX_PAGES == 600
 
 
+def test_a_chunks_worst_case_output_fits_the_parse_budget_with_margin():
+    """The output budget is the design constraint (MISTAKES 2026-09-23): a
+    dense list prints an entry every ~120 characters, and one entry with a
+    160-character `entry`, title, authors, year, DOI and JSON keys is ~100
+    output tokens, so a chunk's worst case must sit well under
+    PARSE_MAX_TOKENS. Raising REFERENCE_CHUNK_CHARS re-runs this arithmetic."""
+    entries_per_chunk = REFERENCE_CHUNK_CHARS // 120
+    tokens_per_entry = ENTRY_PREFIX_CHARS // 4 + 60
+    assert entries_per_chunk * tokens_per_entry <= PARSE_MAX_TOKENS * 2 // 3
+
+
 def test_the_prompt_asks_for_every_entry_of_a_long_list():
-    """The cap admits 150 entries, so the model must not stop early or
-    summarize a long list: the contract says so in words."""
-    assert "may be long" in REFERENCES_SYSTEM
-    assert "every entry" in REFERENCES_SYSTEM
+    """The cap admits 300 entries, so the model must not stop early or
+    summarize a long list, and a list read in parts must list a fragment as
+    printed: the contract says so in words."""
+    contract = " ".join(REFERENCES_SYSTEM.split())  # the prompt wraps at 80 columns
+    assert "may be long" in contract
+    assert "every entry" in contract
+    assert "arrives in parts" in contract
+    assert "never completed" in contract
 
 
 # --- Unpaywall: the one registry-GET policy, on a second registry --------------
@@ -462,6 +649,11 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
         "10.1000/a\\b",
         "10.1000/..;/x",  # a servlet container drops ";..." before normalizing
         "10.1000/x/.;y/z",
+        "10.1000/..%3B/x",  # the same, with the ";" percent-encoded
+        "10.1000/%2e%2e/x",  # a server decodes before it normalizes
+        "10.1000/%252e%252e/x",  # ... and a decoding proxy in front of it decodes once more
+        "10.1000/x%2F..%2F..%2Fadmin",  # encoded slashes become segments on such a server
+        "10.1000/a%5Cb",  # an encoded backslash
     ):
         assert _unpaywall().by_doi(bad) is None, bad
     assert route.call_count == 0, [str(c.request.url) for c in route.calls]
@@ -470,13 +662,22 @@ def test_a_doi_that_would_steer_the_request_path_makes_no_request():
 @respx.mock
 def test_a_semicolon_that_hides_no_dot_segment_is_requested_exactly():
     """A ";" after ordinary text is DOI punctuation, not a hidden dot
-    segment: the lookup goes out, quoted, as the DOI under /v2/."""
+    segment: the lookup goes out, quoted, as the DOI under /v2/. Encoded in
+    the DOI itself it is still ordinary text — that DOI goes out exactly as
+    given, its "%" quoted once more, never decoded into something else."""
     route = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/a%3Bb/c").mock(
         return_value=httpx.Response(200, json=_record())
     )
     _unpaywall().by_doi("10.1000/a;b/c")
     assert str(route.calls.last.request.url) == (
         f"{UNPAYWALL_BASE}/v2/10.1000/a%3Bb/c?email=checker%40example.org"
+    )
+    encoded = respx.get(f"{UNPAYWALL_BASE}/v2/10.1000/a%253Bb/c").mock(
+        return_value=httpx.Response(200, json=_record())
+    )
+    _unpaywall().by_doi("10.1000/a%3Bb/c")
+    assert str(encoded.calls.last.request.url) == (
+        f"{UNPAYWALL_BASE}/v2/10.1000/a%253Bb/c?email=checker%40example.org"
     )
 
 

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import pytest
 from pydantic import BaseModel
 
@@ -136,14 +138,20 @@ class FakeLLM:
     """Canned LLM for tests: returns pre-set objects per output type and
     records every call so tests can assert on prompts.
 
-    A parse_results value may be a single instance (returned every call) or a
+    A parse_results value may be a single instance (returned every call), a
     list of instances popped in call order — verification tests need a
-    different Verdict per claim.
+    different Verdict per claim — or a callable taking the prompt and
+    returning the instance. The callable is for callers that parse in
+    PARALLEL (the chunked reference scan): there, pop order would follow the
+    pool's scheduling and a list could hand chunk 2's answer to chunk 1 on
+    one run in ten, while an answer keyed on the prompt's own content is the
+    same under every interleaving.
     """
 
     def __init__(
         self,
-        parse_results: dict[type, BaseModel | list[BaseModel]] | None = None,
+        parse_results: dict[type, BaseModel | list[BaseModel] | Callable[[str], BaseModel]]
+        | None = None,
         image_description: str = "A fake description.",
         chat_answer: str = "A fake answer.",
     ):
@@ -169,6 +177,8 @@ class FakeLLM:
         result = self._parse_results[output_type]
         if isinstance(result, list):
             return result.pop(0)
+        if callable(result):
+            return result(prompt)
         return result
 
     def parse_batch(
