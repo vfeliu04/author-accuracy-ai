@@ -743,6 +743,13 @@ def _list(*entries: str) -> ReferenceList:
     return ReferenceList(references=[Reference(entry=entry) for entry in entries])
 
 
+def _cited(*names: str) -> list[Reference]:
+    """References that each print a DOI, told apart by name: entry `n`, DOI
+    `10.1000/n` — the spelling _FakeUnpaywall.by_doi reads the name back
+    from."""
+    return [Reference(entry=name, doi=f"10.1000/{name}") for name in names]
+
+
 def _lines(count: int) -> str:
     """A reference list of `count` one-line entries, numbered so a test can
     tell which lines a chunk carried; 340 lines is ~30,000 characters."""
@@ -1553,7 +1560,7 @@ def test_a_registry_that_answers_too_slowly_hits_the_lookup_deadline(monkeypatch
     monkeypatch.setattr(references, "LOOKUP_DEADLINE_SECONDS", 0.3)
     fake = _FakeUnpaywall(blocking={"slow"})
     names = ["fast", "slow1", "slow2", "slow3", "slow4", "queued"]
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in names]
+    refs = _cited(*names)
     started = time.perf_counter()
     try:
         with pytest.raises(RegistryUnavailable, match="timed out after 0.3 seconds") as caught:
@@ -1575,7 +1582,7 @@ def test_the_lookup_is_capped_at_max_references(monkeypatch):
             return_value=httpx.Response(200, json=_record(is_oa=False))
         )
     # No route for the third: a request for it would make respx raise.
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("one", "two", "three")]
+    refs = _cited("one", "two", "three")
     assert lookup_retrievability(_unpaywall(), refs) == [
         ("paywalled", None),
         ("paywalled", None),
@@ -1622,7 +1629,7 @@ def test_the_first_outage_cancels_the_rest_and_keeps_what_was_resolved(monkeypat
         return_value=httpx.Response(200, json=_record(is_oa=False))
     )
     names = ["down", *(f"slow{i}" for i in range(in_flight)), "late1", "late2"]
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in names]
+    refs = _cited(*names)
     client = _unpaywall()
     try:
         with pytest.raises(RegistryUnavailable, match="HTTP 503") as caught:
@@ -1672,7 +1679,7 @@ def test_the_failing_worker_itself_never_requests_the_next_queued_lookup(monkeyp
     late = respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/10\.1000/late\d").mock(
         return_value=httpx.Response(200, json=_record(is_oa=False))
     )
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("down", "late1", "late2")]
+    refs = _cited("down", "late1", "late2")
     client = _unpaywall()
     try:
         with pytest.raises(RegistryUnavailable, match="HTTP 503") as caught:
@@ -1729,7 +1736,7 @@ def test_a_decoding_error_from_the_registry_is_the_registry_failure_not_a_500(mo
     late = respx.get(url__regex=rf"{UNPAYWALL_BASE}/v2/10\.1000/late\d").mock(
         return_value=httpx.Response(200, json=_record(is_oa=False))
     )
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("lie", "late1", "late2")]
+    refs = _cited("lie", "late1", "late2")
     client = _unpaywall()
     try:
         with pytest.raises(RegistryUnavailable, match="DecodingError") as caught:
@@ -1752,7 +1759,7 @@ def test_any_lookup_failure_ends_the_lookup_like_an_outage(monkeypatch, failure)
     registry failure, sets the flag the workers check, and cancels the queue."""
     monkeypatch.setattr(references, "LOOKUP_WORKERS", 1)
     fake = _FakeUnpaywall(raising={"down": failure})
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("down", "late1", "late2")]
+    refs = _cited("down", "late1", "late2")
     with pytest.raises(RegistryUnavailable, match=type(failure).__name__) as caught:
         lookup_retrievability(fake, refs)
     assert fake.calls == ["10.1000/down"]
@@ -1786,7 +1793,7 @@ def test_an_escape_from_the_caller_thread_cancels_the_queued_lookups(monkeypatch
             yield future
 
     monkeypatch.setattr(references, "as_completed", as_completed_once_late1_is_in_flight)
-    refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("bad", "late1", "late2")]
+    refs = _cited("bad", "late1", "late2")
     # Released on a timer, never by the test body: a teardown that WAITS for
     # the in-flight lookup would otherwise hang the suite instead of failing.
     threading.Timer(0.5, fake.release.set).start()
