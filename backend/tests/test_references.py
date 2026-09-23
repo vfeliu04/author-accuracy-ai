@@ -36,17 +36,51 @@ ENTRY = "Smith, J. (2020). Water stress and cities. Journal of Hydrology, 12(3),
 
 
 def test_slices_from_the_last_references_heading():
-    """A report can print 'References' more than once (a chapter's own list, a
-    running header); the bibliography is the LAST one."""
+    """A report can print 'References' more than once (a chapter's own list
+    far earlier); the bibliography starts at the LAST one when the earlier
+    one lies farther back than the cap."""
     pages = [
         "Intro. See References for details.",
         "References\nChapter 1's own short list.",
-        "Body text continues.",
+        "Body text continues. " * 10,
         "References\n" + ENTRY,
     ]
+    text, source = reference_text(pages, max_chars=100)
+    assert source == "heading"
+    assert text == "References\n" + ENTRY
+
+
+SECOND_ENTRY = "Jones, K. (2019). Rivers under stress. Nature Water, 1(1), 2-3."
+
+
+def test_a_running_header_does_not_cut_a_multi_page_bibliography_short():
+    """Each page of a long bibliography carries 'References' as a running
+    header. The LAST match is on the last page; slicing from it alone would
+    lose every earlier entry. Headings within one cap-length span are one
+    section, so the slice starts at the earliest of them."""
+    first = "References\n" + ENTRY
+    second = "45\nReferences\n" + SECOND_ENTRY
+    text, source = reference_text([first, second])
+    assert source == "heading"
+    assert text == first + "\n" + second
+
+
+def test_a_contents_page_mention_far_earlier_stays_excluded():
+    """A table of contents prints 'References' on a line of its own, far
+    before the bibliography: outside the cap's reach back from the last
+    heading, so the slice still starts at the bibliography."""
+    pages = ["Contents\nReferences\n45", "x" * 100_000, "References\n" + ENTRY]
     text, source = reference_text(pages)
     assert source == "heading"
     assert text == "References\n" + ENTRY
+
+
+def test_the_slice_and_its_cap_start_at_the_heading_word():
+    """Blank lines and indentation before the heading are matched by the
+    pattern but are not bibliography: they do not count against the cap."""
+    text, source = reference_text(["Body", "\n\n   References\n" + "x" * 100], max_chars=20)
+    assert source == "heading"
+    assert text == ("References\n" + "x" * 100)[:20]
 
 
 @pytest.mark.parametrize(

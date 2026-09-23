@@ -54,10 +54,12 @@ TextSource = Literal["heading", "tail", "none"]
 
 # A line that IS a reference-list heading — optionally numbered ("7.
 # References"), optionally colon-terminated, nothing else on the line. A
-# mid-line mention ("see References") never matches. Extend the alternation
-# only with evidence: a miss falls back to the document tail, which still works.
+# mid-line mention ("see References") never matches. Group 1 is the heading
+# itself, where a slice starts: the leading `\s*` may have consumed blank
+# lines, which are not bibliography. Extend the alternation only with
+# evidence: a miss falls back to the document tail, which still works.
 _HEADING = re.compile(
-    r"^\s*(?:\d+[.\s]*)?(?:references|bibliography|works cited|reference list|literature cited)"
+    r"^\s*((?:\d+[.\s]*)?(?:references|bibliography|works cited|reference list|literature cited))"
     r"\s*:?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -91,21 +93,28 @@ def reference_text(
 ) -> tuple[str, TextSource]:
     """The closing text the model should read, and where it came from.
 
-    From the LAST reference-list heading forward when the report prints one
+    From the report's reference-list heading forward when it prints one
     (the 51-page Drought report drops from 72,699 to 4,443 characters), else
     the last `max_chars` of the document (two of four test reports print no
     heading). No text at all is ("", "none"): a scanned PDF must not yield an
     invented bibliography, so the caller makes no model call on that value.
+
+    Which heading: the LAST one — a chapter's own list or a contents-page
+    line comes earlier — except that a bibliography spanning several pages
+    prints its heading on each as a running header, and slicing from the
+    last of those would drop every earlier page. So headings within one
+    cap's length before the last are one section, and the slice starts at
+    the earliest of them; a mention farther back stays excluded.
     """
     text = "\n".join(pages)
     if not text.strip():
         return "", "none"
-    last = None
-    for match in _HEADING.finditer(text):
-        last = match
-    if last is not None:
-        return text[last.start() : last.start() + max_chars].strip(), "heading"
-    return text[-max_chars:].strip(), "tail"
+    headings = [match.start(1) for match in _HEADING.finditer(text)]
+    if not headings:
+        return text[-max_chars:].strip(), "tail"
+    last = headings[-1]
+    start = next(position for position in headings if position >= last - max_chars)
+    return text[start : start + max_chars].strip(), "heading"
 
 
 class Reference(BaseModel):
