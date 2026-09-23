@@ -104,6 +104,19 @@ describe("familyNames", () => {
   it("skips blank authors", () => {
     expect(familyNames(["", "  ", "et al."])).toEqual([]);
   });
+
+  // The "et al." rule used to start with `[,\s]*` before `\b`, which
+  // backtracks from every position of a long run of separators: 6 s on a
+  // 60,000-character author, run again on every source or link change. The
+  // model's output is the only bound on an author's length.
+  it("takes under 50 ms on a 60,000-character author, whatever it holds", () => {
+    const inputs = [",".repeat(60_000) + "x", "A" + " ".repeat(60_000) + "B", "Smith, J.".repeat(7_000)];
+    for (const input of inputs) {
+      const started = performance.now();
+      familyNames([input]);
+      expect(performance.now() - started).toBeLessThan(50);
+    }
+  });
 });
 
 describe("alreadyAdded", () => {
