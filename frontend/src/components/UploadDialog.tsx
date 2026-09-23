@@ -269,11 +269,17 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   // limit's own message, with Verify disabled, until a tick or a source goes
   // — never as a click that adds what fits and asks for another. A typed link
   // is checked only on Add or Verify, so it is committed first and counted then.
-  const tooManySources = sourceCount + ticked.length > MAX_SOURCES;
+  // The ticks count toward the minimum too — a report with ticked copies alone
+  // may go, since Verify adds them — and so they are counted wherever the
+  // reader counts: the Sources header, the footer line and the button, which
+  // says how many it will add. A tick the registry chose is never sent
+  // uncounted. Not in sourceCount itself: that is what the dialog holds now.
+  const tickedCount = ticked.length;
+  const tooManySources = sourceCount + tickedCount > MAX_SOURCES;
   const tooBig = totalBytes > MAX_TOTAL_BYTES;
   const canSubmit =
     report !== null &&
-    (sourceCount > 0 || hasTypedLink) &&
+    (sourceCount > 0 || tickedCount > 0 || hasTypedLink) &&
     !tooManySources &&
     !tooBig &&
     !create.isPending;
@@ -281,8 +287,15 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const countParts = [
     fileCount > 0 ? plural(fileCount, "file") : null,
     links.length > 0 ? plural(links.length, "link") : null,
+    tickedCount > 0 ? plural(tickedCount, "ticked link") : null,
     fileCount > 0 ? formatBytes(totalBytes) : null
   ].filter((part): part is string => part !== null);
+  const sourcesLabel = tickedCount > 0 ? `${sourceCount} + ${tickedCount} ticked` : `${sourceCount}`;
+  const verifyLabel = create.isPending
+    ? "Uploading…"
+    : tickedCount > 0
+      ? `Verify with ${plural(tickedCount, "link")}`
+      : "Verify report";
 
   const submit = () => {
     if (!report) return;
@@ -386,7 +399,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             </button>
           )}
 
-          <span className="field-label">Sources ({sourceCount})</span>
+          <span className="field-label">Sources ({sourcesLabel})</span>
           {sourceCount === 0 ? (
             <button
               type="button"
@@ -602,7 +615,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               Cancel
             </button>
             <button type="button" className="btn btn--primary" disabled={!canSubmit} onClick={submit}>
-              {create.isPending ? "Uploading…" : "Verify report"}
+              {verifyLabel}
             </button>
           </div>
         </div>

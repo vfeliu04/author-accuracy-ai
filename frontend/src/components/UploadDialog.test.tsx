@@ -57,7 +57,8 @@ function fileInput(): HTMLInputElement {
   return input as HTMLInputElement;
 }
 
-const verify = () => screen.getByRole("button", { name: /Verify report|Uploading/ });
+const verify = () =>
+  screen.getByRole("button", { name: /^Verify (report|with \d+ links?)$|Uploading/ });
 const linkInput = () => screen.getByLabelText("Add a link") as HTMLInputElement;
 const typeLink = (value: string) => fireEvent.change(linkInput(), { target: { value } });
 const clickAdd = () => fireEvent.click(screen.getByRole("button", { name: "Add" }));
@@ -577,12 +578,12 @@ describe("UploadDialog reference checklist", () => {
     renderDialog();
     const files = [pdf("report.pdf"), ...Array.from({ length: 18 }, (_, i) => pdf(`doc${i}.pdf`))];
     fireEvent.change(fileInput(), { target: { files } });
-    await waitFor(() => expect(screen.getByText("Sources (18)")).toBeInTheDocument());
     await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    expect(screen.getByText("Sources (18 + 3 ticked)")).toBeInTheDocument();
 
     fireEvent.click(addLinks());
     expect(screen.getByText("Added 2 of 3 — at most 20 sources per verification.")).toBeInTheDocument();
-    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
+    expect(screen.getByText("Sources (20 + 1 ticked)")).toBeInTheDocument();
     expect(
       Array.from(document.querySelectorAll(".file-row__name.file-row__host"), (row) => row.textContent)
     ).toEqual(["a.org/one", "a.org/two"]);
@@ -594,6 +595,7 @@ describe("UploadDialog reference checklist", () => {
     expect(verify()).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox", { name: /Work three/ }));
     expect(screen.queryByText("At most 20 sources per verification.")).not.toBeInTheDocument();
+    expect(screen.getByText("Sources (20)")).toBeInTheDocument();
     expect(verify()).toBeEnabled();
   });
 
@@ -864,7 +866,7 @@ describe("UploadDialog reference checklist", () => {
     fireEvent.click(verify());
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(create).not.toHaveBeenCalled();
-    expect(screen.getByText("Sources (18)")).toBeInTheDocument();
+    expect(screen.getByText("Sources (18 + 3 ticked)")).toBeInTheDocument();
     expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /Work three/ })).toBeChecked();
 
@@ -895,7 +897,7 @@ describe("UploadDialog reference checklist", () => {
 
     // 17 sources and 3 ticks are exactly 20, which the limit allows.
     fireEvent.click(screen.getByRole("button", { name: "Remove doc0.pdf" }));
-    expect(screen.getByText("Sources (17)")).toBeInTheDocument();
+    expect(screen.getByText("Sources (17 + 3 ticked)")).toBeInTheDocument();
     expect(screen.queryByText("At most 20 sources per verification.")).not.toBeInTheDocument();
     expect(verify()).toBeEnabled();
     fireEvent.click(verify());
@@ -904,6 +906,69 @@ describe("UploadDialog reference checklist", () => {
     expect((sourcesArg as File[]).length).toBe(17);
     expect(linksArg).toEqual(["https://a.org/one", "https://a.org/two", "https://a.org/three"]);
     expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
+  });
+
+  it("counts the ticked copies where the reader counts: the header, the footer and the Verify button", async () => {
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        scannedReference({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+        scannedReference({ title: "Work two", retrievability: "landing", suggested_url: "https://b.org/two" }),
+        scannedReference({ title: "Work three", retrievability: "paywalled" })
+      ])
+    );
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), pdf("s.pdf")] } });
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+    typeLink("https://c.org/added");
+    clickAdd();
+
+    // Two ticks pending: every count says so, and the button says what it adds.
+    expect(screen.getByText("Sources (2 + 2 ticked)")).toBeInTheDocument();
+    expect(screen.getByText("2 files · 1 link · 2 ticked links · 200 B")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify with 2 links" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work two/ }));
+    expect(screen.getByText("Sources (2 + 1 ticked)")).toBeInTheDocument();
+    expect(screen.getByText("2 files · 1 link · 1 ticked link · 200 B")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify with 1 link" })).toBeEnabled();
+
+    // Add commits the tick: it is a link now, and no count calls it ticked.
+    fireEvent.click(addLinks());
+    expect(screen.getByText("Sources (3)")).toBeInTheDocument();
+    expect(screen.getByText("2 files · 2 links · 200 B")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify report" })).toBeEnabled();
+    expect(screen.queryByText(/ticked/)).not.toBeInTheDocument();
+  });
+
+  it("verifies a report against ticked copies alone, since Verify adds them, and holds with none", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        scannedReference({ title: "Work one", retrievability: "pdf", suggested_url: "https://a.org/one" }),
+        scannedReference({ title: "Work two", retrievability: "pdf", suggested_url: "https://b.org/two" })
+      ])
+    );
+    const onClose = renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(2)).toBeInTheDocument());
+    expect(screen.getByText("Sources (0 + 2 ticked)")).toBeInTheDocument();
+    expect(screen.getByText("1 file · 2 ticked links · 100 B")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify with 2 links" })).toBeEnabled();
+
+    // Unticked, the copies count for nothing: a report alone cannot go.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work one/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work two/ }));
+    expect(screen.getByText("Sources (0)")).toBeInTheDocument();
+    expect(screen.getByText("1 file · 100 B")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify report" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Work one/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Verify with 1 link" }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    const [, sourcesArg, linksArg] = create.mock.calls[0];
+    expect(sourcesArg).toEqual([]);
+    expect(linksArg).toEqual(["https://a.org/one"]);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
   it("says the scan may have missed entries, with the same Try again, and clears it on a full answer", async () => {
