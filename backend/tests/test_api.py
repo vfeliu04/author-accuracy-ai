@@ -1469,7 +1469,11 @@ def test_reference_scan_lists_cited_works_and_writes_nothing(tmp_path, monkeypat
     body = resp.json()
     assert body["text_source"] == "heading"
     assert body["lookup"] == {"status": "ok", "detail": None}
-    assert body["limits"] == {"text_truncated": False, "references_dropped": 0}
+    assert body["limits"] == {
+        "text_truncated": False,
+        "references_dropped": 0,
+        "possibly_incomplete": False,
+    }
     assert [(r["retrievability"], r["suggested_url"]) for r in body["references"]] == [
         ("pdf", "https://x.org/o.pdf"),
         ("paywalled", None),
@@ -1566,14 +1570,56 @@ def test_reference_scan_reports_a_reference_list_cut_by_the_text_cap(tmp_path, m
     fake = FakeLLM({ReferenceList: CITED})
     monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
     settings = _settings(tmp_path)
-    lines = ("Author, A. (2020). Work. J. 1.\n" * (REFERENCE_MAX_CHARS // 30 + 100)).rstrip()
+    # Prose-shaped lines: the test is about the character cap, and a list of
+    # two thousand entry-shaped lines answered with four references would
+    # rightly trip the completeness guard (which has its own test above).
+    lines = ("A line of closing text, no entry.\n" * (REFERENCE_MAX_CHARS // 34 + 100)).rstrip()
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
         resp = client.post(SCAN, headers=AUTH, files=_scan_report(pages=["References\n" + lines]))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["text_source"] == "heading"
-    assert body["limits"] == {"text_truncated": True, "references_dropped": 0}
+    assert body["limits"] == {
+        "text_truncated": True,
+        "references_dropped": 0,
+        "possibly_incomplete": False,
+    }
     assert all(len(call["prompt"]) < REFERENCE_MAX_CHARS for call in fake.parse_calls)
+
+
+@respx.mock
+def test_reference_scan_reports_an_answer_that_still_looks_incomplete(
+    tmp_path, monkeypatch, references_log
+):
+    """The live '1 reference' shape, end to end: a page with four lines
+    shaped like an entry's start and a model answering one entry twice.
+    The part is asked once more (two calls), the answer kept, and the
+    dialog is told the scan may have missed entries — the flag in
+    `limits`, next to the caps, with the warning in the log."""
+    from authorai import api as apimod
+
+    cited = [("Open", 2021), ("Closed", 2019), ("Web", 2020), ("Plain", 2018)]
+    page = "References\n" + "\n".join(
+        f"{name}, A. ({year}). A paper. J. {i}." for i, (name, year) in enumerate(cited)
+    )
+    one = ReferenceList(references=[Reference(entry="Open, A. (2021). A paper. J. 0.")])
+    settings = _settings(tmp_path, crossref_mailto="checker@example.org")
+    fake = FakeLLM({ReferenceList: [one, one]})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report(pages=("Body.", page)))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["limits"] == {
+        "text_truncated": False,
+        "references_dropped": 0,
+        "possibly_incomplete": True,
+    }
+    assert [r["entry"] for r in body["references"]] == ["Open, A. (2021). A paper. J. 0."]
+    assert len(fake.parse_calls) == 2
+    assert "1 references for about 4 entry starts" in references_log.text
+    assert "still looks incomplete after a retry" in references_log.text
+    _nothing_written(settings)
 
 
 def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypatch):
@@ -1588,7 +1634,7 @@ def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypa
     assert resp.json() == {
         "text_source": "none",
         "lookup": {"status": "ok", "detail": None},
-        "limits": {"text_truncated": False, "references_dropped": 0},
+        "limits": {"text_truncated": False, "references_dropped": 0, "possibly_incomplete": False},
         "references": [],
     }
     _nothing_written(settings)
@@ -1647,7 +1693,11 @@ def test_reference_scan_survives_a_blank_entry(tmp_path, monkeypatch):
         ("", "Titled work"),
         ("Printed, P. (2019). As printed.", None),
     ]
-    assert body["limits"] == {"text_truncated": False, "references_dropped": 1}
+    assert body["limits"] == {
+        "text_truncated": False,
+        "references_dropped": 1,
+        "possibly_incomplete": False,
+    }
     assert body["references"][0] == {
         "title": "Titled work",
         "authors": ["Titled, T."],

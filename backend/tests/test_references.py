@@ -24,6 +24,7 @@ from authorai import references
 from authorai.llm import PARSE_MAX_TOKENS
 from authorai.references import (
     ENTRY_PREFIX_CHARS,
+    ENTRY_STARTS_FLOOR,
     HEADING_RUN_PAGES,
     MAX_REFERENCES,
     PAGE_TREE_CEILING,
@@ -38,6 +39,7 @@ from authorai.references import (
     ReferenceList,
     RegistryUnavailable,
     UnpaywallClient,
+    entry_starts,
     extract_references,
     lookup_retrievability,
     printed_url,
@@ -756,6 +758,42 @@ def _lines(count: int) -> str:
     return "\n".join(f"Ref {i:04d}. {ENTRY}" for i in range(count))
 
 
+_LINE_CHARS = len(_lines(1))
+
+
+def _prose(count: int) -> str:
+    """`count` lines of _lines's length, none shaped like the start of an
+    entry (no year after a period or paren, no surname-comma-initial, no
+    leading number): a test about how the parts are read and joined stays
+    clear of the completeness guard, which would ask again about a part
+    answered with two entries where the text shows a hundred."""
+    filler = "prose that no rule reads as the start of an entry " * 2
+    return "\n".join(f"Line {i:04d} {filler}"[:_LINE_CHARS] for i in range(count))
+
+
+# Six entries in the shapes the example reports print (pypdf text, cited by
+# file): an author-year line (2024 GHI), a paren-dated one (Drought), an
+# organisation with the year after a paren (the water article), a wrapped
+# author list whose year opens the NEXT line (2024 GHI, Black et al.), a
+# bracket-numbered one (disruptions) and a dot-numbered one — around a
+# heading, a letter header, a continuation line and that wrapped year line,
+# which are not starts. entry_starts reads 6 here.
+SIX_ENTRIES = "\n".join(
+    [
+        "References",
+        "A",
+        "Agarwal, B. 2019. “Does Group Farming Empower Rural Women? Lessons from India’s ",
+        "Experiments.” Journal of Peasant Studies 47 (4): 841–872. https://doi.org/10.1080/03066",
+        "Addis Standard. (2024, January 10). News: Four million Ethiopians on the brink.",
+        "Australian Standards/New Zealand Standards (AS/NZS) 2016 Water Efficient Products.",
+        "Black, R. E., C. G. Victora, S. P. Walker, Z. A. Bhutta, P. Christian, et al. ",
+        "2013. “Maternal and Child Undernutrition and Overweight.” Lancet  832 (9890): 427–451.",
+        "[5]Z.B. Anis, H.U.U. Rahman, N. Khalid, Effect of food quality, Sustainability 14 (2022).",
+        "1. Smith J, Jones K. Title of the paper. Journal. 2020;12:1-9.",
+    ]
+)
+
+
 def _answer_by_part(answers: dict[int, ReferenceList]):
     """A FakeLLM answer keyed on the part number the prompt names — the same
     answer for a chunk whatever order the pool runs the chunks in."""
@@ -882,7 +920,7 @@ def test_a_long_list_is_read_in_parts_and_concatenated_in_part_order():
     part and carrying whole lines only, under the one system prompt; the
     answer is the parts' answers in part order, whatever order the pool
     finished them in."""
-    text = _lines(340)
+    text = _prose(340)
     answers = {1: _list("a1", "a2"), 2: _list("b1"), 3: _list("c1", "c2", "c3")}
     llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
     result = extract_references(llm, "m", text)
@@ -905,7 +943,7 @@ def test_a_boundary_inside_an_entry_yields_two_fragments_never_a_merged_entry():
     fragments, each listed by the part that saw it. The code joins the
     parts' answers and never welds fragments: it cannot know two entries
     were one, and a wrong weld would be an entry the page does not print."""
-    text = _lines(340)
+    text = _prose(340)
     head = "Long, A. (2021). A title that continues"
     tail = "on the next line. Journal, 3(1), 1-2."
     answers = {1: _list("Ref 0138.", head), 2: _list(tail, "Ref 0140."), 3: _list("Ref 0339.")}
@@ -937,7 +975,7 @@ def test_a_long_lists_parts_are_read_four_at_a_time():
     workers, or a serial loop, leaves the first call waiting alone until
     the barrier times out and breaks — the extraction then raises
     BrokenBarrierError instead of hanging."""
-    text = _lines(480)
+    text = _prose(480)
     assert len(split_reference_text(text)) == references.LOOKUP_WORKERS == 4
     barrier = threading.Barrier(references.LOOKUP_WORKERS, timeout=5)
 
@@ -950,6 +988,156 @@ def test_a_long_lists_parts_are_read_four_at_a_time():
     assert not barrier.broken
     assert len(llm.parse_calls) == 4
     assert [r.entry for r in result.references] == ["ok"] * 4
+
+
+# --- the completeness guard --------------------------------------------------
+
+
+def test_entry_starts_counts_the_lines_that_open_an_entry():
+    """The yardstick: lines in the shapes the example reports print (see
+    SIX_ENTRIES) count; a heading, a letter header, a continuation line, a
+    wrapped DOI, a section heading, prose with a year, a dated access note
+    and a footnote-numbered entry (the Hunger Hotspots report — a known
+    limit, which can only ever mean no retry) do not."""
+    assert entry_starts(SIX_ENTRIES) == 6
+    assert entry_starts("") == 0
+    for line in [
+        "References",
+        "A",
+        "Experiments.” Journal of Peasant Studies 47 (4): 841–872. https://doi.org/10.1080/03066",
+        "150.2019.1628020.",
+        "2013. “Maternal and Child Undernutrition and Overweight.” Lancet  832 (9890): 427–451.",
+        "1. Introduction",
+        "2. Hunger in 2025",
+        "6. Indicators at a Glance (Real and Fabricated)",
+        "In 2023, water stress rose across the basin.",
+        "Global Water Stress and Hunger Assessment 2025",
+        "Accessed July 16, 2025. https://acleddata.com/conflict-index/.",
+        "199  International Crisis Group. 2024. Crisis Watch Sudan.",
+    ]:
+        assert entry_starts(line) == 0, line
+    for line in [
+        "   Agarwal, B. 2019. “Does Group Farming Empower Rural Women?",  # indented
+        "FAO. 1997a. Irrigation in the near east region in figures. Rome: FAO.",
+        "WHO (2020) Guidelines on drinking water.",
+        "[1]L. Abuabara, K. Werner-Masters, A. Paucar-Caceres, Daily food planning",
+        "3) World Health Organization. Global report. 2021.",
+        "Bezner Kerr, R., S. Madsen, M. Stüber, J. Liebert, S. Enloe, N. Borghino,",
+    ]:
+        assert entry_starts(line) == 1, line
+
+
+def test_a_line_continuing_an_author_list_is_not_a_second_start():
+    """The Drought list wraps long author lists in a narrow column, so
+    'Segadlo, N. (2019).' opens a line of its own: one entry, counted once
+    — a line after one ending in a comma, an ampersand or 'and' continues
+    the list. Alone, the same line is a start."""
+    first = "Adaawen, S., Rademacher-Schulz, C., Schraven, B., &"
+    second = "Segadlo, N. (2019). Drought, migration, and conflict"
+    assert entry_starts(f"{first}\n{second}") == 1
+    assert entry_starts(second) == 1
+    assert entry_starts("Bezner Kerr, R., S. Madsen, M. Stüber, J. Liebert, and\n" + second) == 1
+
+
+def test_a_short_answer_is_retried_once_and_the_full_retry_kept(references_log):
+    """The live '1 reference' shape: the text shows six entry starts and the
+    answer holds one. The part is asked again with the same prompt, the
+    retry's six are kept, and the scan is not flagged."""
+    llm = FakeLLM({ReferenceList: [_list("one"), _list(*"abcdef")]})
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert [r.entry for r in result.references] == list("abcdef")
+    assert result.possibly_incomplete is False
+    assert len(llm.parse_calls) == 2
+    assert llm.parse_calls[0]["prompt"] == llm.parse_calls[1]["prompt"]
+    assert "1 references for about 6 entry starts" in references_log.text
+    assert "possibly incomplete" not in references_log.text
+
+
+@pytest.mark.parametrize("answers", [["one"], ["a", "b"]], ids=["first-smaller", "first-larger"])
+def test_an_answer_short_twice_keeps_the_larger_and_flags_the_scan(answers, references_log):
+    """Both answers fall under half the six starts: the one with more
+    references is kept whichever came first, and the scan says it may be
+    incomplete — a WARNING with both counts, and the flag the dialog shows."""
+    first, second = (_list(*answers), _list(*(["one"] if answers != ["one"] else ["a", "b"])))
+    llm = FakeLLM({ReferenceList: [first, second]})
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert [r.entry for r in result.references] == ["a", "b"]
+    assert result.possibly_incomplete is True
+    assert len(llm.parse_calls) == 2
+    assert "WARNING" in references_log.text
+    assert "still looks incomplete after a retry" in references_log.text
+    assert "2 references for about 6 entry starts" in references_log.text
+
+
+def test_a_merged_answer_is_retried_whatever_the_text_shows(references_log):
+    """The live '5,117 tokens, 1 reference' shape: one object whose entry text
+    holds the whole list. Its RAW entry, before the prefix cut, runs past
+    three times ENTRY_PREFIX_CHARS, which reads as merged even where the
+    text shows fewer than four entry starts; a full retry is kept, and a
+    second merged answer flags the scan."""
+    merged = _list(("Smith, J. (2020). A title. " * 20).strip())
+    assert len(merged.references[0].entry) > 3 * ENTRY_PREFIX_CHARS
+    llm = FakeLLM({ReferenceList: [merged, _list("a", "b")]})
+    result = extract_references(llm, "m", "References\n" + ENTRY)
+    assert [r.entry for r in result.references] == ["a", "b"]
+    assert result.possibly_incomplete is False
+    assert len(llm.parse_calls) == 2
+    assert "entries merged into one object" in references_log.text
+
+    llm = FakeLLM({ReferenceList: [merged, merged]})
+    result = extract_references(llm, "m", "References\n" + ENTRY)
+    assert len(result.references) == 1
+    assert len(result.references[0].entry) == ENTRY_PREFIX_CHARS
+    assert result.possibly_incomplete is True
+    assert len(llm.parse_calls) == 2
+
+
+def test_a_good_answer_is_neither_retried_nor_flagged(references_log):
+    llm = FakeLLM({ReferenceList: _list(*"abcdef")})
+    result = extract_references(llm, "m", SIX_ENTRIES)
+    assert result.possibly_incomplete is False
+    assert len(llm.parse_calls) == 1
+    assert references_log.text == ""
+
+
+def test_a_text_with_few_entry_starts_never_triggers_the_guard(references_log):
+    """Under ENTRY_STARTS_FLOOR starts — the fake reports show one or two in
+    their prose — an empty answer is the right answer for a document with
+    no list, and half of three is not a count to hold the model to: no
+    retry, no flag. At the floor the ratio applies."""
+    assert ENTRY_STARTS_FLOOR == 4
+    three = "\n".join(SIX_ENTRIES.split("\n")[:6])
+    assert entry_starts(three) == 3
+    llm = FakeLLM({ReferenceList: _list()})
+    result = extract_references(llm, "m", three)
+    assert (result.references, result.possibly_incomplete) == ([], False)
+    assert len(llm.parse_calls) == 1
+    assert references_log.text == ""
+    four = three + "\n" + "[5]Z.B. Anis, H.U.U. Rahman, N. Khalid, Effect of food quality (2022)."
+    assert entry_starts(four) == 4
+    llm = FakeLLM({ReferenceList: [_list("one"), _list("one")]})
+    assert extract_references(llm, "m", four).possibly_incomplete is True
+    assert len(llm.parse_calls) == 2
+
+
+def test_one_short_part_flags_the_whole_scan_after_its_own_retry(references_log):
+    """Three parts of ~113 entry starts each; part 2 answers one entry both
+    times, the others 120. Only part 2 is asked again (four calls), the
+    parts' answers are joined as ever, and the scan is flagged once."""
+    text = _lines(340)
+    answers = {
+        1: _list(*(f"p1-{i}" for i in range(120))),
+        2: _list("one"),
+        3: _list(*(f"p3-{i}" for i in range(120))),
+    }
+    llm = FakeLLM({ReferenceList: _answer_by_part(answers)})
+    result = extract_references(llm, "m", text)
+    assert len(result.references) == 241
+    assert result.references[120].entry == "one"
+    assert result.possibly_incomplete is True
+    assert len(llm.parse_calls) == 4
+    assert sum("part 2 of 3" in call["prompt"] for call in llm.parse_calls) == 2
+    assert references_log.text.count("still looks incomplete") == 1
 
 
 def test_entries_are_cut_to_the_prefix_length_verbatim(references_log):
@@ -1026,7 +1214,11 @@ def test_the_cap_applies_to_the_parts_concatenated(references_log):
 def test_extract_references_returns_a_short_list_untouched(references_log):
     two = ReferenceList(references=[Reference(entry="a"), Reference(entry="b")])
     result = extract_references(FakeLLM({ReferenceList: two}), "m", "References")
-    assert (result.references, result.dropped) == (two.references, 0)
+    assert (result.references, result.dropped, result.possibly_incomplete) == (
+        two.references,
+        0,
+        False,
+    )
     assert references_log.text == ""
 
 

@@ -438,10 +438,13 @@ class LookupStatus(BaseModel):
 class ScanLimits(BaseModel):
     # What the scan's caps took, so the dialog can say the list was read in
     # part instead of presenting the unread works as absent from the user's
-    # sources: the closing text cut at REFERENCE_MAX_CHARS, and the rows
-    # dropped — past MAX_REFERENCES, or blank with nothing to act on.
+    # sources: the closing text cut at REFERENCE_MAX_CHARS, the rows
+    # dropped — past MAX_REFERENCES, or blank with nothing to act on — and
+    # whether a part's answer still looked incomplete after its one retry
+    # (references.ENTRY_STARTS_FLOOR), so the dialog can offer the scan again.
     text_truncated: bool
     references_dropped: int
+    possibly_incomplete: bool
 
 
 class ReferenceScan(BaseModel):
@@ -488,9 +491,12 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     text, text_source, text_truncated = refsmod.reference_text(pages)
     references: list[refsmod.Reference] = []
     dropped = 0
+    possibly_incomplete = False
     if text_source != "none":
         llm = AnthropicClient(settings.anthropic_api_key)
-        references, dropped = refsmod.extract_references(llm, settings.references_model, text)
+        references, dropped, possibly_incomplete = refsmod.extract_references(
+            llm, settings.references_model, text
+        )
 
     lookup = refsmod.resolve_retrievability(references, settings.crossref_mailto)
     if lookup.status == "unavailable":
@@ -502,7 +508,11 @@ def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> 
     return ReferenceScan(
         text_source=text_source,
         lookup=LookupStatus(status=lookup.status, detail=lookup.detail),
-        limits=ScanLimits(text_truncated=text_truncated, references_dropped=dropped),
+        limits=ScanLimits(
+            text_truncated=text_truncated,
+            references_dropped=dropped,
+            possibly_incomplete=possibly_incomplete,
+        ),
         references=[
             ScannedReference(
                 **reference.model_dump(),

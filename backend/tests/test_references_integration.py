@@ -177,3 +177,60 @@ def test_the_largest_real_list_splits_into_the_chunks_the_cost_comment_counts():
     lines = [line for line in text.split("\n") if line.strip()]
     assert [line for chunk in chunks for line in chunk.split("\n") if line.strip()] == lines
     assert "Zkhiri, W., Y. Tramblay" in chunks[-1]
+
+
+# The completeness guard's yardstick (references.entry_starts), measured on
+# every real slice: (relative path, the count of entries it must land within
+# 40 % of, where that count comes from). The live model's good answers where
+# they were measured (the reviewer's six calls: 37 for the article, 225 for
+# the Drought list); elsewhere a count independent of the heuristic — the
+# ". YYYY. " token the Global Hunger Index and REPORT19 styles print once
+# per entry, the highest bracket number of the numbered list, the
+# blank-line-separated blocks of the status brief. Measured 2026-09-23:
+# 247, 34, 190, 117, 116, 37, 23.
+ENTRY_COUNTS = [
+    (DROUGHT, 225),
+    ("example source two/Defining_domestic_water_consumption_based_on_perso.pdf", 37),
+    (GHI_2024, 199),
+    (GHI_2025, 131),
+    ("example source one/disruptions_in_the_food_supply_chain.pdf", 106),
+    ("example source two/REPORT19.pdf", 30),
+    ("example source two/Status_Brief_C_TRN_11.pdf", 22),
+]
+
+# The reports with no reference list — the two fakes, the two short reports
+# and the footnote-numbered Hunger Hotspots report, whose "199  UNHCR.
+# 2024." lines the heuristic does not read (a known limit) — must stay
+# under the guard's floor, so a scan of them is never asked twice or
+# flagged for the empty list that is its right answer. Measured: 1, 2, 0,
+# 2, 1.
+NO_LIST = [
+    "Water_Stress_Fake_Report.pdf",
+    "example source one/World_Hunger_Fake.pdf",
+    "example source two/WSG-Water-Consumption-Report-2021-FV.pdf",
+    "example source one/2025_world_hunger.pdf",
+    "example source one/HH_Nov24-May25_FINAL.pdf",
+]
+
+
+def test_every_example_pdf_is_calibrated():
+    assert {relative for relative, _ in ENTRY_COUNTS} | set(NO_LIST) == {
+        relative for relative, *_ in CASES
+    }
+
+
+@pytest.mark.parametrize(("relative", "count"), ENTRY_COUNTS)
+def test_entry_starts_lands_within_forty_percent_of_the_real_lists_count(relative, count):
+    from authorai.references import entry_starts
+
+    text, _, _ = _slice(relative)
+    starts = entry_starts(text)
+    assert 0.6 * count <= starts <= 1.4 * count, f"{relative}: {starts} starts for {count} entries"
+
+
+@pytest.mark.parametrize("relative", NO_LIST)
+def test_entry_starts_stays_under_the_guards_floor_on_a_report_without_a_list(relative):
+    from authorai.references import ENTRY_STARTS_FLOOR, entry_starts
+
+    text, _, _ = _slice(relative)
+    assert entry_starts(text) < ENTRY_STARTS_FLOOR, f"{relative}: {entry_starts(text)}"

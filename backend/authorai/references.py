@@ -158,6 +158,24 @@ AUTHOR_MAX_CHARS = 200
 REFERENCE_CHUNK_CHARS = 12_000
 ENTRY_PREFIX_CHARS = 160
 
+# The completeness guard (extract_references). Measured live, six identical
+# calls on a 37-entry list answered 37 / 1 / 37 / 37 / 1 / 1 references:
+# the model either closed the list after one short object or put every
+# entry into one object's text. The prompt's rule against both is not a
+# control on its own, so code holds each part's answer against a cheap
+# count of the lines that look like the START of an entry (entry_starts):
+# an answer under COMPLETE_FRACTION of that count, where the text shows at
+# least ENTRY_STARTS_FLOOR starts (under four, prose alone shows one or two
+# and an empty list is the right answer), or any entry whose RAW text runs
+# past MERGED_ENTRY_CHARS — three prefixes: entries merged into one object
+# — is asked for once more with the same prompt; the answer with more
+# references is kept, and one that still looks incomplete flags the scan
+# (Extraction.possibly_incomplete, the response's limits field) instead of
+# passing for the whole list.
+ENTRY_STARTS_FLOOR = 4
+COMPLETE_FRACTION = 0.5
+MERGED_ENTRY_CHARS = 3 * ENTRY_PREFIX_CHARS
+
 # How far apart, in PAGES, two heading matches may sit and still be one
 # section: a bibliography that spans several pages repeats its heading on
 # each page as a running header, and some layouts print it on alternate
@@ -662,13 +680,78 @@ def _bounded(reference: Reference) -> Reference:
     )
 
 
+# The guard's yardstick: three shapes of an entry's first line, copied from
+# the example reports' pypdf text, each read one line at a time and bounded
+# to the line (no MULTILINE scan of the joined text — see _HEADING; the
+# leading-space runs are possessive for the same reason). An author-year
+# line: a year after a period or a closing paren and spaces, or after an
+# open paren — "Agarwal, B. 2019.", "Addis Standard. (2024,", "… (AS/NZS)
+# 2016 Water", "WHO (2020)" — never a bare "In 2023," or a wrapped DOI's
+# ".2019.". A numbered line — "[1]L. Abuabara, K. …", "1. Smith J, Jones
+# K." — that also holds a comma or such a year, which a section heading
+# ("1. Introduction", "2. Hunger in 2025") does not. A surname-comma-
+# initial line — "Black, R. E., C. G. Victora, …" — whose year only comes
+# on the next line. A line after one ending in a comma, an ampersand or
+# "and" continues a wrapped author list (the Drought list's narrow column)
+# and is not a second start. Calibrated on all 12 example PDFs
+# (test_references_integration.py): 247 for the Drought list the model
+# read as 225, 34 for the article's 37, within 10 % of the independent
+# token counts on the two Global Hunger Index lists, and 0-2 on the
+# reports with no list. Footnote-numbered lists ("199  UNHCR. 2024.") are
+# not read — a known limit that can only mean no retry, never a wrong
+# flag.
+_YEAR_TOKEN = r"(?:[.)][ \t]+|\()(?:19|20)\d{2}(?!\d)"
+_AUTHOR_YEAR = re.compile(r"[ \t]*+[A-Z][^\n]{1,80}?" + _YEAR_TOKEN)
+_NUMBERED = re.compile(
+    r"[ \t]*+\[?\d{1,3}[\].)][ \t]*+(?=\S)[^\n]{0,200}?(?:,|" + _YEAR_TOKEN + ")"
+)
+_AUTHOR_INITIAL = re.compile(r"[ \t]*+[A-Z][A-Za-z'’\- ]{1,40},[ \t]++[A-Z]\.")
+_LIST_CONTINUES = (",", "&", " and")
+
+
+def entry_starts(text: str) -> int:
+    """How many lines of `text` look like the start of a reference entry
+    (the shapes above) — the count a part's answer is held against."""
+    count = 0
+    previous = ""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not previous.endswith(_LIST_CONTINUES) and (
+            _AUTHOR_YEAR.match(line) or _NUMBERED.match(line) or _AUTHOR_INITIAL.match(line)
+        ):
+            count += 1
+        previous = stripped
+    return count
+
+
+def _incomplete(starts: int, answer: ReferenceList) -> str | None:
+    """Why `answer` looks like one of the two live failure shapes — fewer
+    objects than COMPLETE_FRACTION of the entry starts in the text, or an
+    entry holding merged entries — worded with both counts, or None for an
+    answer that passes. One predicate, so the retry and the flag agree."""
+    returned = len(answer.references)
+    if starts >= ENTRY_STARTS_FLOOR and returned < COMPLETE_FRACTION * starts:
+        return f"{returned} references for about {starts} entry starts in the text"
+    longest = max((len(reference.entry) for reference in answer.references), default=0)
+    if longest > MERGED_ENTRY_CHARS:
+        return (
+            f"an entry of {longest} characters, over {MERGED_ENTRY_CHARS}: "
+            "entries merged into one object"
+        )
+    return None
+
+
 class Extraction(NamedTuple):
-    """The references kept, and how many rows were dropped on the way —
-    blank rows and the rows past MAX_REFERENCES — reported to the dialog as
-    the scan's `limits.references_dropped`."""
+    """The references kept, how many rows were dropped on the way — blank
+    rows and the rows past MAX_REFERENCES — reported to the dialog as the
+    scan's `limits.references_dropped`, and whether a part's answer still
+    looked incomplete after its retry (`limits.possibly_incomplete`)."""
 
     references: list[Reference]
     dropped: int
+    possibly_incomplete: bool
 
 
 def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
@@ -681,6 +764,12 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     schema, where structured outputs may not honour them and a validation
     failure would fail the whole scan instead of trimming it.
 
+    Each chunk's answer is held against the text it read (the completeness
+    guard, see ENTRY_STARTS_FLOOR): one that looks incomplete is asked for
+    once more with the same prompt, the answer with more references is
+    kept, and one that still looks incomplete flags the whole scan as
+    possibly incomplete — a warning either way, never silently.
+
     A chunk whose call fails fails the scan — the endpoint's 500, as for any
     model failure. The other chunks' entries are not returned in its place:
     a bibliography with a silent hole would tell the dialog that the unread
@@ -689,28 +778,57 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     those in flight, at most LOOKUP_WORKERS, finish and are discarded.
     """
     chunks = split_reference_text(closing_text)
+    total = len(chunks)
 
-    def extract(index: int) -> ReferenceList:
-        # Temperature 0: the reading is a transcription, and six identical
-        # live calls on one 37-entry list answered 37 / 1 / 37 / 37 / 1 / 1
-        # (MISTAKES 2026-09-23). Haiku 4.5, the pinned references model,
-        # accepts the parameter; Sonnet 5 and Opus 4.7+ refuse it with a
-        # 400, so `references_model` must stay a model that takes it.
-        return llm.parse(
-            model=model,
-            system=REFERENCES_SYSTEM,
-            prompt=_chunk_prompt(index, len(chunks), chunks[index]),
-            output_type=ReferenceList,
-            temperature=0.0,
+    def extract(index: int) -> tuple[ReferenceList, bool]:
+        prompt = _chunk_prompt(index, total, chunks[index])
+        starts = entry_starts(chunks[index])
+
+        def ask() -> ReferenceList:
+            # Temperature 0: the reading is a transcription, and six
+            # identical live calls on one 37-entry list answered 37 / 1 /
+            # 37 / 37 / 1 / 1 (MISTAKES 2026-09-23). Haiku 4.5, the pinned
+            # references model, accepts the parameter; Sonnet 5 and Opus
+            # 4.7+ refuse it with a 400, so `references_model` must stay a
+            # model that takes it.
+            return llm.parse(
+                model=model,
+                system=REFERENCES_SYSTEM,
+                prompt=prompt,
+                output_type=ReferenceList,
+                temperature=0.0,
+            )
+
+        answer = ask()
+        why = _incomplete(starts, answer)
+        if why is None:
+            return answer, False
+        logger.warning(
+            "part %d of %d looks incomplete (%s) — asking once more", index + 1, total, why
         )
+        retry = ask()
+        if len(retry.references) > len(answer.references):
+            answer = retry
+        why = _incomplete(starts, answer)
+        if why is None:
+            return answer, False
+        logger.warning(
+            "part %d of %d still looks incomplete after a retry (%s) — "
+            "the scan is flagged as possibly incomplete",
+            index + 1,
+            total,
+            why,
+        )
+        return answer, True
 
     # Executor.map yields in submission order whatever order the calls finish
     # in, raises a failure when its chunk's turn comes, and on the way out
     # cancels the chunks not yet started; leaving the block waits for the
     # in-flight ones.
     with ThreadPoolExecutor(max_workers=LOOKUP_WORKERS) as pool:
-        parts = list(pool.map(extract, range(len(chunks))))
-    answered = [_bounded(reference) for part in parts for reference in part.references]
+        parts = list(pool.map(extract, range(total)))
+    possibly_incomplete = any(flagged for _, flagged in parts)
+    answered = [_bounded(reference) for part, _ in parts for reference in part.references]
     references = [reference for reference in answered if actionable(reference)]
     if len(references) < len(answered):
         logger.warning(
@@ -726,7 +844,7 @@ def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
             MAX_REFERENCES,
         )
         references = references[:MAX_REFERENCES]
-    return Extraction(references, len(answered) - len(references))
+    return Extraction(references, len(answered) - len(references), possibly_incomplete)
 
 
 # --- Unpaywall ------------------------------------------------------------------
