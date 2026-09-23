@@ -1692,6 +1692,36 @@ def test_reference_scan_answers_502_when_the_model_answer_cannot_be_read_twice(
     _nothing_written(settings)
 
 
+def test_reference_scan_never_offers_a_cut_address(tmp_path, monkeypatch):
+    """A 5,000-character printed address is not offered — `url` null,
+    `suggested_url` null — while a normal one is, unchecked: a printed
+    address is never cut to the link gate's length, which a cut one would
+    pass as a link the page never printed."""
+    from authorai import api as apimod
+
+    settings = _settings(tmp_path)  # crossref_mailto unset: no lookup, no network
+    long_url = "https://x.org/" + "x" * 4_986
+    assert len(long_url) == 5_000
+    answer = ReferenceList(
+        references=[
+            Reference(label="Long 2020", title="A long address", url=long_url),
+            Reference(label="Normal 2021", title="A page", url="https://x.org/page#top"),
+        ]
+    )
+    fake = FakeLLM({ReferenceList: answer})
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(SCAN, headers=AUTH, files=_scan_report())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [(r["title"], r["url"], r["suggested_url"]) for r in body["references"]] == [
+        ("A long address", None, None),
+        ("A page", "https://x.org/page#top", "https://x.org/page"),
+    ]
+    assert body["limits"]["references_dropped"] == 0
+    _nothing_written(settings)
+
+
 def test_reference_scan_of_a_textless_pdf_makes_no_model_call(tmp_path, monkeypatch):
     """A scanned (image-only) PDF has no text to read: the answer is 'none'
     and an empty list — the model is never asked, so it cannot invent a

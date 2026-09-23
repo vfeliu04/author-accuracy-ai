@@ -170,14 +170,18 @@ READER_WATCH_INTERVAL_SECONDS = 0.25
 TITLE_MAX_CHARS = 500
 MAX_AUTHORS = 50
 AUTHOR_MAX_CHARS = 200
-# The printed address and DOI likewise: a row that has only one of them is
-# still actionable, and the dialog labels it by that value and shows it as
-# the row's tooltip, so an uncut one reached the DOM whole. An address
-# longer than the link gate's MAX_URL_LENGTH can never become a link
-# (offerable_url refuses it, so it is never suggested), and clean_doi
-# refuses a DOI over its own 256 (credibility.DOI_MAX_CHARS) before any
-# lookup — 300 leaves that refusal its say, and its log line, on a DOI
-# that is merely too long rather than absurd.
+# The printed address and DOI are bounded too — a row that has only one of
+# them is still actionable, and the dialog labels it by that value and
+# shows it as the row's tooltip, so an unbounded one reached the DOM
+# whole — but DROPPED past the bound (_bounded: None, with a warning),
+# never cut: they are identifiers, and a cut one names something else. A
+# printed address cut to the link gate's MAX_URL_LENGTH is exactly the
+# length the gate accepts, so the offer gate would pass it and the dialog
+# would offer a link the page never printed; dropped, the row offers
+# nothing, and is dropped itself when nothing else names the work.
+# clean_doi refuses a DOI over its own 256 (credibility.DOI_MAX_CHARS)
+# before any lookup — 300 leaves that refusal its say, and its log line,
+# on a DOI that is merely too long rather than absurd.
 URL_FIELD_MAX_CHARS = MAX_URL_LENGTH
 DOI_FIELD_MAX_CHARS = 300
 
@@ -790,18 +794,29 @@ def _chunk_prompt(index: int, total: int, chunk: str) -> str:
     )
 
 
+def _identifier(value: str | None, cap: int, *, what: str) -> str | None:
+    """A printed address or DOI as printed, or None past `cap`: dropped
+    with a warning, never cut — cut, an identifier names something else,
+    and a cut address of the link gate's own length would pass the gate
+    (see URL_FIELD_MAX_CHARS)."""
+    if value is not None and len(value) > cap:
+        logger.warning("dropping a printed %s of %d characters, over %d", what, len(value), cap)
+        return None
+    return value
+
+
 def _bounded(reference: Reference) -> Reference:
     """The reference with `label` cut to LABEL_MAX_CHARS — the prompt asks
-    for a short key, and the model does not always keep it short — and the
-    title, author names, address and DOI to their caps (see the
-    constants)."""
+    for a short key, and the model does not always keep it short — the
+    title and author names cut to their caps, and a printed address or DOI
+    over its cap dropped, never cut (see the constants)."""
     return reference.model_copy(
         update={
             "label": reference.label[:LABEL_MAX_CHARS] if reference.label else reference.label,
             "title": reference.title[:TITLE_MAX_CHARS] if reference.title else reference.title,
             "authors": [name[:AUTHOR_MAX_CHARS] for name in reference.authors[:MAX_AUTHORS]],
-            "url": reference.url[:URL_FIELD_MAX_CHARS] if reference.url else reference.url,
-            "doi": reference.doi[:DOI_FIELD_MAX_CHARS] if reference.doi else reference.doi,
+            "url": _identifier(reference.url, URL_FIELD_MAX_CHARS, what="address"),
+            "doi": _identifier(reference.doi, DOI_FIELD_MAX_CHARS, what="DOI"),
         }
     )
 
@@ -911,10 +926,11 @@ class Extraction(NamedTuple):
 def extract_references(llm: LLM, model: str, closing_text: str) -> Extraction:
     """The model's reading of the closing text: one structured call per
     REFERENCE_CHUNK_CHARS chunk, LOOKUP_WORKERS at a time, the answers
-    concatenated in chunk order, every field cut to its cap (`_bounded`:
-    the label to LABEL_MAX_CHARS, title and authors to theirs), rows that
-    are not `actionable` dropped (counted in a warning), and the list cut
-    to MAX_REFERENCES in code. The caps are deliberately NOT in the schema,
+    concatenated in chunk order, every field bounded (`_bounded`: the
+    label cut to LABEL_MAX_CHARS, title and authors to theirs, an address
+    or DOI over its cap dropped rather than cut), rows that are not
+    `actionable` dropped (counted in a warning), and the list cut to
+    MAX_REFERENCES in code. The caps are deliberately NOT in the schema,
     where structured outputs may not honour them and a validation failure
     would fail the whole scan instead of trimming it.
 

@@ -1553,28 +1553,57 @@ def test_titles_and_authors_are_cut_in_code_after_parsing_like_the_label():
     assert (TITLE_MAX_CHARS, MAX_AUTHORS, AUTHOR_MAX_CHARS) == (500, 50, 200)
 
 
-def test_a_printed_address_and_doi_are_cut_in_code_like_the_other_fields():
-    """The two fields _bounded did not cut: a row that has only one of them
-    is still actionable, and the dialog labels it by that value and shows
-    it as the row's tooltip, so a model-written 60,000-character address
-    reached the DOM whole. An address longer than fetch.MAX_URL_LENGTH can
-    never become a link (offerable_url refuses it, so it is never
-    suggested), and clean_doi refuses a DOI over 256 characters, so the
-    cuts change nothing real."""
+def test_an_over_long_printed_address_or_doi_is_dropped_never_cut(references_log):
+    """A printed address or DOI is an identifier: cut, it names something
+    else, and a cut address under the link gate's length would pass the
+    gate and be offered as the link the page never printed. So one over
+    URL_FIELD_MAX_CHARS or DOI_FIELD_MAX_CHARS is dropped from the row
+    (None, with a warning) and never truncated — the row stays when
+    something else names the work, and is dropped like any row that
+    names nothing when not. The other fields are shown, not looked up, so
+    their cuts stay cuts."""
     long = "x" * 60_000
     answer = ReferenceList(
         references=[
+            Reference(title="By address", url="https://x.org/" + long),
+            Reference(title="By DOI", doi="10.1000/" + long),
             Reference(url="https://x.org/" + long),
-            Reference(doi="10.1000/" + long),
+            Reference(title="Short", url="https://x.org/p", doi="10.1000/p"),
         ]
     )
     result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
-    by_url, by_doi = result.references
-    assert len(by_url.url) == URL_FIELD_MAX_CHARS == MAX_URL_LENGTH == 2048
-    assert by_url.url.startswith("https://x.org/")
-    assert len(by_doi.doi) == DOI_FIELD_MAX_CHARS == 300
-    assert by_doi.doi.startswith("10.1000/")
-    assert result.dropped == 0  # a cut row is still the row
+    by_url, by_doi, short = result.references
+    assert (by_url.title, by_url.url) == ("By address", None)
+    assert (by_doi.title, by_doi.doi) == ("By DOI", None)
+    assert (short.url, short.doi) == ("https://x.org/p", "10.1000/p")
+    assert result.dropped == 1  # the row with the address alone names nothing
+    assert (URL_FIELD_MAX_CHARS, MAX_URL_LENGTH, DOI_FIELD_MAX_CHARS) == (2048, 2048, 300)
+    assert "dropping a printed address of 60014 characters, over 2048" in references_log.text
+    assert "dropping a printed DOI of 60008 characters, over 300" in references_log.text
+    assert "dropping 1 of 4 references" in references_log.text
+
+
+def test_the_offer_gate_never_sees_a_cut_address():
+    """A 5,000-character printed address, cut to the gate's 2048, would
+    have passed the gate (it is exactly the limit) and been offered as a
+    link the page never printed. Dropped instead, the row offers nothing;
+    a normal printed address is offered as before."""
+    from authorai.references import suggested_url
+
+    long_url = "https://x.org/" + "x" * 4_986
+    assert len(long_url) == 5_000
+    answer = ReferenceList(
+        references=[
+            Reference(title="Long", url=long_url),
+            Reference(title="Normal", url="https://x.org/paper#top"),
+        ]
+    )
+    result = extract_references(FakeLLM({ReferenceList: answer}), "m", "References")
+    long, normal = result.references
+    assert long.url is None
+    assert suggested_url(long, None) is None
+    assert normal.url == "https://x.org/paper#top"
+    assert suggested_url(normal, None) == "https://x.org/paper"
 
 
 def test_extract_references_caps_the_list_in_code_with_a_warning(references_log):
