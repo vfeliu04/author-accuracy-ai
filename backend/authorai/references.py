@@ -189,9 +189,10 @@ def split_reference_text(text: str, *, chunk_chars: int = REFERENCE_CHUNK_CHARS)
     near the start cannot make a tiny chunk), else at the window's last
     line break — never inside a line. A line longer than a whole chunk (a
     PDF whose text lost its line breaks) is cut at its last space or, with
-    none, at the cap: the output budget is the harder bound. The separator
-    at a cut is dropped; every line reaches exactly one chunk, intact and
-    in order.
+    none, at the cap: the output budget is the harder bound. Only the
+    separator at a cut is dropped — the line break(s) there, or the one
+    space — so a line that opens a chunk keeps its indentation; every line
+    reaches exactly one chunk, intact and in order.
     """
     chunks: list[str] = []
     rest = text
@@ -205,7 +206,11 @@ def split_reference_text(text: str, *, chunk_chars: int = REFERENCE_CHUNK_CHARS)
         if cut <= 0:
             cut = chunk_chars
         chunks.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n ")
+        rest = rest[cut:]
+        # The separator at the cut and nothing else: every line break there
+        # (a blank line is two), or the one space of a space cut. A hard cut
+        # sits on no separator. The next line's indentation is the line's.
+        rest = rest.lstrip("\n") if rest.startswith("\n") else rest.removeprefix(" ")
     chunks.append(rest)
     return chunks
 

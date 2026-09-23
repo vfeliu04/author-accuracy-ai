@@ -357,6 +357,19 @@ def test_split_reference_text_prefers_a_blank_line_between_entries():
     assert [entry for chunk in chunks for entry in chunk.split("\n\n")] == entries
 
 
+def test_a_cut_keeps_the_next_lines_indentation():
+    """Bibliographies print continuation lines with a hanging indent. Only
+    the line break(s) at a cut are dropped, so the line that opens the next
+    chunk keeps its leading spaces and every line reaches its chunk intact
+    — the docstring's word. At a space cut the one space still goes, and a
+    hard cut drops nothing (the other test's join checks hold both)."""
+    text = "\n".join("   " + line for line in _lines(340).split("\n"))
+    chunks = split_reference_text(text)
+    assert len(chunks) == 3
+    assert all(chunk.startswith("   Ref ") for chunk in chunks)
+    assert [line for chunk in chunks for line in chunk.split("\n")] == text.split("\n")
+
+
 def test_a_blank_line_early_in_the_window_does_not_make_a_sliver():
     """The blank-line cut is taken only in the second half of the window. A
     blank line 200 characters into a 12,000-character window, with no later
