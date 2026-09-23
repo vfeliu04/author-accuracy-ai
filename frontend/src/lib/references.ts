@@ -60,9 +60,10 @@ export function normalizeTitle(title: string): string {
 // The "et al." rule matches the words alone: the separators before them are
 // dropped by the trim and the name's own trailing strip, and a `[,\s]*` in
 // front of `\b` would backtrack from every position of a long separator run
-// (quadratic: seconds on a 60,000-character author). An author comes from
-// the model with no length bound of its own, so one is set here before any
-// pattern runs; no printed name comes near it.
+// (quadratic: seconds on a 60,000-character author). The server already cuts
+// each name to 200 characters (references.py AUTHOR_MAX_CHARS); this larger
+// bound is the client's own guard, so no pattern here runs over an unbounded
+// string whatever the server sends. No printed name comes near either.
 const AUTHOR_MAX_CHARS = 500;
 const ET_AL = /\bet\s+al\.?\s*$/iu;
 const INITIAL = /^(?:\p{L}\.?(?:-\p{L}\.?)*|\p{Lu}{1,3})$/u;
