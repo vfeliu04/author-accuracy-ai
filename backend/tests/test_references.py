@@ -1372,6 +1372,7 @@ class _FakeUnpaywall:
         self.raising = raising or {}
         self.blocking = blocking
         self.release = threading.Event()
+        self.in_flight = threading.Event()  # set once a blocking lookup has begun
         self.calls: list[str] = []
         self._lock = threading.Lock()
 
@@ -1382,6 +1383,7 @@ class _FakeUnpaywall:
         if name in self.raising:
             raise self.raising[name]
         if any(name.startswith(prefix) for prefix in self.blocking):
+            self.in_flight.set()
             assert self.release.wait(10), f"{doi} was never released"
         return _record(url_for_pdf=f"https://x.org/{name}.pdf")
 
@@ -1452,6 +1454,16 @@ def test_an_escape_from_the_caller_thread_cancels_the_queued_lookups(monkeypatch
         return real(record)
 
     monkeypatch.setattr(references, "retrievability", failing)
+    real_as_completed = references.as_completed
+
+    def as_completed_once_late1_is_in_flight(futures, timeout=None):
+        # The race, decided: the caller reads `bad` only once the worker
+        # has dequeued late1 and is inside its request.
+        for future in real_as_completed(futures, timeout=timeout):
+            assert fake.in_flight.wait(5), "the worker never reached late1"
+            yield future
+
+    monkeypatch.setattr(references, "as_completed", as_completed_once_late1_is_in_flight)
     refs = [Reference(entry=n, doi=f"10.1000/{n}") for n in ("bad", "late1", "late2")]
     # Released on a timer, never by the test body: a teardown that WAITS for
     # the in-flight lookup would otherwise hang the suite instead of failing.
