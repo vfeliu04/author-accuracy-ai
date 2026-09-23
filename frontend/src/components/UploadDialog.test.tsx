@@ -787,6 +787,36 @@ describe("UploadDialog reference checklist", () => {
     }
   });
 
+  it("cuts a long label for display and keeps the whole text on hover", async () => {
+    // The server cuts a title at 500 characters and an entry at 160, and a
+    // printed address at nothing at all; the row shows at most 300 of any of
+    // them, with the whole text as the row's tooltip in place of the entry.
+    const title = `Title ${"t".repeat(600)}`;
+    const url = `https://c.org/${"u".repeat(2400)}`;
+    const exact = "x".repeat(300);
+    vi.spyOn(v2, "scanReferences").mockResolvedValue(
+      scanOf([
+        scannedReference({ title }),
+        scannedReference({ entry: "", url }),
+        scannedReference({ title: exact })
+      ])
+    );
+    renderDialog();
+    await addReport();
+    await waitFor(() => expect(heading(3)).toBeInTheDocument());
+
+    const byTitle = screen.getByText(`${title.slice(0, 300)}…`);
+    expect(byTitle).toHaveClass("file-row__name");
+    expect(byTitle.closest(".file-row")).toHaveAttribute("title", title);
+    const byUrl = screen.getByText(`${url.slice(0, 300)}…`);
+    expect(byUrl.closest(".file-row")).toHaveAttribute("title", url);
+    // At the limit nothing is cut, and the printed entry stays the tooltip.
+    expect(screen.getByText(exact).closest(".file-row")).toHaveAttribute("title", "An entry as printed.");
+    for (const name of document.querySelectorAll(".file-row__name")) {
+      expect((name.textContent ?? "").length).toBeLessThanOrEqual(301);
+    }
+  });
+
   it("lists a suggested address the dialog would refuse without a tick, saying why", async () => {
     vi.spyOn(v2, "scanReferences").mockResolvedValue(
       scanOf([

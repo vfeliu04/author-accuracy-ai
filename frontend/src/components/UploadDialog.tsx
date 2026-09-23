@@ -13,6 +13,11 @@ import { alreadyAdded, stem } from "../lib/references";
 const MAX_SOURCES = 20;
 const MAX_FILE_BYTES = 50_000_000;
 const MAX_TOTAL_BYTES = 200_000_000;
+// The most of a cited work's name a row shows; the whole text is its tooltip.
+// The server cuts a title at 500 characters and an entry at 160, and the
+// model writes the DOI and the address that name a row with neither: this is
+// the dialog's own bound, whatever the server sends.
+const LABEL_MAX_CHARS = 300;
 
 function isPdf(file: File): boolean {
   return file.name.toLowerCase().endsWith(".pdf");
@@ -553,9 +558,13 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           {missing.map(({ ref, index, refused }) => {
             // The title, else the printed text; a row the scan kept for its
             // DOI or address alone, with no text, is named by that. Never a
-            // blank label or tooltip.
-            const label = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
-            const tooltip = ref.entry || label;
+            // blank label or tooltip. A name past the display bound is cut,
+            // and the whole of it is then the tooltip in place of the entry,
+            // which the server cut at 160 and so need not hold the tail.
+            const full = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
+            const cut = full.length > LABEL_MAX_CHARS;
+            const label = cut ? `${full.slice(0, LABEL_MAX_CHARS)}…` : full;
+            const tooltip = cut ? full : ref.entry || full;
             const tag = copyTag(ref, lookup?.status ?? "ok");
             // A row with an address the dialog would take is a label around
             // its tick box; one with no address, or a refused one, is a plain
