@@ -8,8 +8,10 @@ import multiprocessing
 import os
 import re
 import resource
+import sys
 import threading
 import time
+import types
 from concurrent.futures import wait
 
 import httpx
@@ -24,6 +26,8 @@ from authorai.references import (
     MAX_REFERENCES,
     PAGE_TREE_CEILING,
     READER_ADDRESS_SPACE_BYTES,
+    READER_MEMORY_BYTES,
+    READER_MEMORY_EXIT_CODE,
     REFERENCE_CHUNK_CHARS,
     REFERENCE_MAX_CHARS,
     REFERENCES_SYSTEM,
@@ -40,6 +44,7 @@ from authorai.references import (
     retrievability,
     split_reference_text,
 )
+from authorai.web import ExtractionTimeoutError, handover_file, in_bounded_child
 from tests.conftest import FakeLLM, pdf_from_objects, pdf_with_pages
 
 ENTRY = "Smith, J. (2020). Water stress and cities. Journal of Hydrology, 12(3), 1-9."
@@ -499,12 +504,13 @@ def _reader_that_dies(sender, path, *_args):
     os._exit(1)
 
 
-def test_read_pages_reads_in_a_child_that_is_gone_when_it_answers():
+def test_read_pages_reads_in_a_child_that_is_gone_when_it_answers(web_log):
     before = set(multiprocessing.active_children())
     pdf = pdf_with_pages(["Page one", "References\n" + ENTRY])
     pages = read_pages(io.BytesIO(pdf), timeout=30)
     assert [page.strip() for page in pages] == ["Page one", "References\n" + ENTRY]
     assert set(multiprocessing.active_children()) == before
+    assert "exited without a result" not in web_log.text  # the watchdog let it finish
 
 
 @pytest.mark.parametrize(("depth", "declared"), [(10, 1024), (30, 1)])
@@ -579,6 +585,114 @@ def test_the_reader_caps_its_address_space_without_loosening_an_inherited_cap(mo
 
     monkeypatch.setattr(resource, "setrlimit", refused)
     references._limit_address_space(READER_ADDRESS_SPACE_BYTES)  # tolerated
+
+
+# --- the memory watchdog: the bound RLIMIT_AS cannot give on macOS ------------
+
+
+def _reader_that_inflates(sender, path, max_pages, cpu_seconds):
+    """The real reader with pypdf's part replaced by what a FlateDecode bomb
+    does to it: 900 MB resident, and KEPT resident — rewritten page by page,
+    as a reader works over inflated data; an idle buffer is compressed away
+    under memory pressure on macOS, and no peak would be seen — until the
+    watchdog ends the process. The address-space cap is lifted so the
+    allocation succeeds on Linux too and the watchdog is what stops it."""
+    references.READER_ADDRESS_SPACE_BYTES = 8 << 30
+
+    def inflate(handle, max_pages):
+        view = memoryview(bytearray(b"\xa5") * (900 * 2**20))
+        while True:
+            for offset in range(0, len(view), 16384):
+                view[offset] ^= 1
+
+    references._last_pages = inflate
+    references._read_in_child(sender, path, max_pages, cpu_seconds)
+
+
+def _reader_that_hits_the_address_space_cap(sender, path, max_pages, cpu_seconds):
+    """The real reader where pypdf's allocation fails: RLIMIT_AS on Linux."""
+
+    def refuse(handle, max_pages):
+        raise MemoryError
+
+    references._last_pages = refuse
+    references._read_in_child(sender, path, max_pages, cpu_seconds)
+
+
+def test_a_reader_that_inflates_past_the_memory_bound_is_stopped_by_the_watchdog(
+    monkeypatch, web_log
+):
+    monkeypatch.setattr(references, "_read_in_child", _reader_that_inflates)
+    before = set(multiprocessing.active_children())
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="too costly to read"):
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
+    assert time.perf_counter() - started < 15  # the watchdog, not the deadline
+    assert f"exited without a result (exit code {READER_MEMORY_EXIT_CODE})" in web_log.text
+    assert set(multiprocessing.active_children()) == before
+
+
+def test_a_reader_that_hits_the_address_space_cap_reads_as_too_costly(monkeypatch, web_log):
+    monkeypatch.setattr(references, "_read_in_child", _reader_that_hits_the_address_space_cap)
+    with pytest.raises(ValueError, match="too costly to read"):
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
+    assert f"exited without a result (exit code {READER_MEMORY_EXIT_CODE})" in web_log.text
+
+
+def test_the_watchdog_ends_the_process_only_once_the_peak_passes_the_bound(monkeypatch):
+    """In this process, with the measurement and the exit replaced: no exit
+    at the bound, the exit with the reader's own code past it, and a daemon
+    thread — one that never holds the child open after a clean read."""
+    stop = threading.Event()
+    peak = {"bytes": READER_MEMORY_BYTES}
+    exits: list[int] = []
+    monkeypatch.setattr(references, "peak_resident_bytes", lambda: peak["bytes"])
+    monkeypatch.setattr(references.os, "_exit", lambda code: (exits.append(code), stop.set()))
+    thread = references._watch_memory(interval=0.01, stop=stop)
+    try:
+        assert thread.daemon
+        time.sleep(0.1)
+        assert exits == []
+        peak["bytes"] = READER_MEMORY_BYTES + 1
+        thread.join(2)
+        assert not thread.is_alive()
+        assert exits == [READER_MEMORY_EXIT_CODE]
+    finally:
+        stop.set()
+        thread.join(2)
+
+
+def test_peak_resident_bytes_reads_ru_maxrss_in_each_platforms_unit(monkeypatch):
+    monkeypatch.setattr(resource, "getrusage", lambda who: types.SimpleNamespace(ru_maxrss=1024))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert references.peak_resident_bytes() == 1024  # bytes
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert references.peak_resident_bytes() == 1024 * 1024  # kilobytes
+
+
+def _reader_that_finishes_with_the_watchdog_running(sender, path, *_args):
+    """A reader whose read is done: it returns with the watchdog still up."""
+    references._watch_memory()
+
+
+def test_the_watchdog_does_not_hold_the_reader_open_after_a_clean_finish(web_log):
+    """The child's interpreter waits for its non-daemon threads at exit: a
+    watchdog that were one would hold the process open — forever, it loops
+    — until the deadline stopped it. The parent sees the child's own exit
+    at once, as EOF on the result pipe, well inside the budget."""
+    payload = handover_file(b"unused", "the report PDF")
+    started = time.perf_counter()
+    with pytest.raises(RuntimeError) as caught:
+        in_bounded_child(
+            _reader_that_finishes_with_the_watchdog_running,
+            (),
+            payload_path=payload,
+            url="the report PDF",
+            timeout=10,
+        )
+    assert not isinstance(caught.value, ExtractionTimeoutError)
+    assert time.perf_counter() - started < 5
+    assert "exited without a result" in web_log.text
 
 
 # --- the models and the call ----------------------------------------------------

@@ -24,8 +24,10 @@ so no link is offered that ingest would then refuse.
 """
 
 import ipaddress
+import os
 import re
 import resource
+import sys
 import threading
 import traceback
 from bisect import bisect_right
@@ -102,6 +104,29 @@ REFERENCE_MAX_PAGES = 600
 # the reader's bounds.
 PAGE_TREE_CEILING = 10_000
 READER_ADDRESS_SPACE_BYTES = 1 << 30
+
+# The memory bound where the address-space cap is not one. macOS refuses
+# RLIMIT_AS, and there a FlateDecode bomb — 1.17 MB that inflates to 1.2 GB
+# — was read in 43 seconds at 1.27 GB resident, inside the deadline, and
+# the scan went on. So the child also runs a watchdog thread (_watch_memory,
+# started before pypdf runs) that reads the process's peak resident size
+# every quarter second — ru_maxrss, which macOS reports in BYTES and Linux
+# in KILOBYTES; peak_resident_bytes normalises by platform — and ends the
+# process with READER_MEMORY_EXIT_CODE once it passes READER_MEMORY_BYTES,
+# which read_pages reports as "too costly to read". zlib releases the GIL
+# while it inflates, so the thread gets its turn during the very call that
+# grows the process; a quarter second bounds the overshoot (inflate runs at
+# about a gigabyte a second: a few hundred MB past the line, on an 8 GB
+# machine). 768 MiB is more than five times what the largest example report
+# needs (139 MiB for the 66-page 2024 GHI, interpreter included: pypdf holds
+# a page's streams, not the file). Where RLIMIT_AS is enforced (Linux) it
+# stays the first line of defence, and the MemoryError it raises ends the
+# child with the same code. The exit code is one no other ending uses:
+# Python's 1 is an unhandled exception and 2 a usage error; a signal reads
+# as a negative status.
+READER_MEMORY_BYTES = 768 * 1024 * 1024
+READER_MEMORY_EXIT_CODE = 75
+READER_WATCH_INTERVAL_SECONDS = 0.25
 
 # Every other model-written field is bounded in code after parsing too
 # (extract_references), for the same reason the entry is: a title or an
@@ -278,13 +303,19 @@ def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) 
     (the open handle keeps it; a reader killed outright never reaches its
     own removal), the pages, or the failure as a (kind, (type name, message,
     traceback)) triple — a ValueError is the child's own refusal, anything
-    else is pypdf's."""
+    else is pypdf's. A MemoryError is not reported but exited on, with
+    READER_MEMORY_EXIT_CODE like the watchdog: it is the memory bound
+    (RLIMIT_AS, where enforced), and a process past it may not manage the
+    report."""
     end_with_parent(cpu_seconds)
     _limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    _watch_memory()
     try:
         with open(payload_path, "rb") as pdf_file:
             Path(payload_path).unlink(missing_ok=True)
             outcome = ("result", _last_pages(pdf_file, max_pages))
+    except MemoryError:  # the address-space cap, or an allocation no machine could make
+        os._exit(READER_MEMORY_EXIT_CODE)
     except Exception as exc:  # noqa: BLE001 - every reader failure is "unreadable"
         kind = "value" if isinstance(exc, ValueError) else "other"
         outcome = (kind, (type(exc).__name__, str(exc), traceback.format_exc()))
@@ -303,6 +334,35 @@ def _limit_address_space(limit: int) -> None:
         resource.setrlimit(resource.RLIMIT_AS, (wanted, hard))
     except (ValueError, OSError) as exc:
         logger.debug("the platform refused an address-space limit for the reader: %s", exc)
+
+
+def peak_resident_bytes() -> int:
+    """This process's peak resident size in bytes: ru_maxrss, which macOS
+    reports in bytes and Linux in kilobytes."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == "darwin" else peak * 1024
+
+
+def _watch_memory(
+    limit: int = READER_MEMORY_BYTES,
+    interval: float = READER_WATCH_INTERVAL_SECONDS,
+    stop: threading.Event | None = None,
+) -> threading.Thread:
+    """Start the thread that ends this process with READER_MEMORY_EXIT_CODE
+    once its peak resident size passes `limit` bytes, looking every
+    `interval` seconds (see READER_MEMORY_BYTES). A daemon thread: it never
+    holds the process open once the read has finished. `stop` ends the
+    watch (the tests; the reader lets the thread die with the process)."""
+    stop = stop or threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(interval):
+            if peak_resident_bytes() > limit:
+                os._exit(READER_MEMORY_EXIT_CODE)
+
+    thread = threading.Thread(target=watch, name="memory-watchdog", daemon=True)
+    thread.start()
+    return thread
 
 
 def _last_pages(handle: BinaryIO, max_pages: int) -> list[str]:
