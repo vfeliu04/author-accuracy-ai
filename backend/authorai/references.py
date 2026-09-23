@@ -131,15 +131,30 @@ LOOKUP_WORKERS = 4
 
 TextSource = Literal["heading", "tail", "none"]
 
-# A line that IS a reference-list heading — optionally numbered ("7.
-# References"), optionally colon-terminated, nothing else on the line. A
-# mid-line mention ("see References") never matches. Group 1 is the heading
-# itself, where a slice starts: the leading `\s*` may have consumed blank
-# lines, which are not bibliography. Extend the alternation only with
-# evidence: a miss falls back to the document tail, which still works.
+# A line that IS a reference-list heading, in the forms pypdf prints from
+# real reports (the lines are pinned in the tests, cited by file and page):
+# optionally numbered ("7. References", "39Literature Cited" — a page number
+# glued before it), optionally colon-terminated, and — the running-header
+# forms — with a page number after it ("BIBLIOGRAPHY    51") or a title on
+# either side of a "|" ("2024 Global Hunger Index | Bibliography  51", "52
+# Bibliography  | 2024 Global Hunger Index"); nothing else on the line. A
+# mid-line mention ("see References"), a title glued to a sentence's end
+# ("…175–179. BIBLIOGRAPHY", which such a page also carries as a footer) or
+# a contents leader ("Works Cited ....... 40") never matches. The `heading`
+# group is the heading itself: the leading `\s*` may have consumed blank
+# lines, which are not bibliography. `before`, `page` and `after` mark a
+# running header, which names its PAGE rather than a position on it — see
+# reference_text. Extend the forms only with evidence: a miss falls back to
+# the document tail, which still works.
 _HEADING = re.compile(
-    r"^\s*((?:\d+[.\s]*)?(?:references|bibliography|works cited|reference list|literature cited))"
-    r"\s*:?\s*$",
+    r"^\s*(?P<heading>"
+    r"(?P<before>[^\n|]*\|[^\S\n]*)?"
+    r"(?:\d+[.\s]*)?"
+    r"(?:references|bibliography|works cited|reference list|literature cited)"
+    r"[^\S\n]*:?"
+    r"(?P<page>[^\S\n]+\d{1,4})?"
+    r"[^\S\n]*(?P<after>\|[^\n]*)?"
+    r")[^\S\n]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -310,20 +325,31 @@ def reference_text(
     it, not against the last one, so a run of any length joins. A heading
     farther back than that — a chapter's list, a contents line — stays
     excluded.
+
+    Where on that page: at the heading word for a plain heading (the list
+    starts under it, whatever the page held before), but at the START of
+    the page for a running-header form — a page number after the heading
+    or a "|"-decorated title, as the GHI reports print on every page of
+    their bibliography — because a running header names the page, and
+    pypdf emits a footer at the END of the page's text: anchoring there
+    would drop the first page's entries, which lie before it.
     """
     text = "\n".join(pages)
     if not text.strip():
         return "", "none"
-    headings = [match.start(1) for match in _HEADING.finditer(text)]
-    if not headings:
+    matches = list(_HEADING.finditer(text))
+    if not matches:
         return text[-max_chars:].strip(), "tail"
+    headings = [match.start("heading") for match in matches]
     # Where each page starts in the joined text (the join adds one newline).
     page_starts = list(accumulate((len(page) + 1 for page in pages[:-1]), initial=0))
     heading_pages = [bisect_right(page_starts, position) - 1 for position in headings]
     index = len(headings) - 1
     while index > 0 and heading_pages[index] - heading_pages[index - 1] <= HEADING_RUN_PAGES:
         index -= 1
-    start = headings[index]
+    match = matches[index]
+    running = any(match.group(name) for name in ("before", "page", "after"))
+    start = page_starts[heading_pages[index]] if running else headings[index]
     return text[start : start + max_chars].strip(), "heading"
 
 

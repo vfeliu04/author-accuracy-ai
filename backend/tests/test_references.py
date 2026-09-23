@@ -193,6 +193,33 @@ def test_the_slice_and_its_cap_start_at_the_heading_word():
     assert text == ("References\n" + "x" * 100)[:20]
 
 
+# Lines exactly as pypdf prints them from the example reports (file, page
+# index in the PDF), so the rule is judged on real running headers, contents
+# lines and page numbers, not on hand-typed headings alone.
+REAL_HEADING_LINES = [
+    "BIBLIOGRAPHY    51",  # 2024 Global Wolrd Hunger Index.pdf p5: the contents line
+    "Literature Cited 39",  # REPORT19.pdf p4: the contents line
+    "39Literature Cited",  # REPORT19.pdf p46: the page number glued before the heading
+    "2024 Global Hunger Index | Bibliography  51",  # 2024 GHI p52: a running footer
+    "52 Bibliography  | 2024 Global Hunger Index",  # 2024 GHI p53: the verso footer
+    "2025 Global Hunger Index | Bibliography  51",  # example source two/2025.pdf p52
+    "References ",  # disruptions_in_the_food_supply_chain.pdf p18
+    "WORKS CITED",  # Drought Hotspots 2023-2025_ENG.pdf p38
+]
+REAL_NON_HEADING_LINES = [
+    # 2024 GHI p52: the section title glued to the page's last entry — the
+    # shape of a sentence-end mention, so not a heading; the page is found
+    # through its footer (test_a_running_footer_anchors_the_slice_at_its_page_start)
+    "Nutrition  22 (1): 175–179. BIBLIOGRAPHY",
+    "the-state-of-food-security-and-nutrition-in-the-world/en .BIBLIOGRAPHY",  # 2025.pdf p52
+    "Source: Authors, based on sources listed in Appendix A and previous GHI "
+    "publications included in the bibliography.",  # 2024 GHI p43
+    "Works Cited  ...............................  40TABLE OF CONTENTS",  # Drought p3
+    "Demand Consumer preferences [51,89] ",  # disruptions p6: "references" inside a word
+    "Intro. See References for details.",
+]
+
+
 @pytest.mark.parametrize(
     "heading",
     [
@@ -205,6 +232,7 @@ def test_the_slice_and_its_cap_start_at_the_heading_word():
         "Reference list:",
         "Literature cited",
         "   References   ",
+        *REAL_HEADING_LINES,
     ],
 )
 def test_every_heading_form_is_recognised(heading):
@@ -214,11 +242,47 @@ def test_every_heading_form_is_recognised(heading):
     assert text.endswith(ENTRY)
 
 
-def test_a_mid_line_mention_is_not_a_heading():
-    """Only a line that IS the heading counts — 'see References' in prose is
-    not where the bibliography starts."""
-    text, source = reference_text(["Intro. See References for details.", ENTRY])
+@pytest.mark.parametrize("line", REAL_NON_HEADING_LINES)
+def test_a_mid_line_mention_is_not_a_heading(line):
+    """Only a line that IS the heading counts — 'see References' in prose,
+    a title glued to a sentence's end, a contents leader — is not where the
+    bibliography starts."""
+    text, source = reference_text(["Body text.", line + "\n" + ENTRY])
     assert source == "tail"
+
+
+FOOTER_RECTO = "2024 Global Hunger Index | Bibliography  51"
+FOOTER_VERSO = "52 Bibliography  | 2024 Global Hunger Index"
+
+
+def test_a_running_footer_anchors_the_slice_at_its_page_start():
+    """The GHI reports print no heading line: the bibliography's pages carry
+    a running footer, which pypdf emits at the END of each page's text. A
+    heading with a page number or a running-header decoration names the
+    PAGE, so the slice starts where that page starts — at its entries, not
+    after them — and the run of footers reaches back to the first page."""
+    first = ENTRY + "\nNutrition  22 (1): 175–179. BIBLIOGRAPHY\n" + FOOTER_RECTO
+    second = SECOND_ENTRY + "\n" + FOOTER_VERSO
+    text, source = reference_text([BODY, first, second])
+    assert source == "heading"
+    assert text.startswith(ENTRY)
+    assert text.endswith(FOOTER_VERSO)
+    assert BODY not in text
+
+
+def test_a_plain_heading_still_anchors_at_the_heading_word():
+    """A heading line without a page number or decoration is where the list
+    starts, whatever precedes it on the page."""
+    text, source = reference_text([BODY, "Conclusions end here.\nReferences\n" + ENTRY])
+    assert source == "heading"
+    assert text == "References\n" + ENTRY
+
+
+def test_a_contents_line_with_a_page_number_far_from_the_list_stays_excluded():
+    pages = ["Contents\nBIBLIOGRAPHY    51", BODY, BODY, BODY, ENTRY + "\n" + FOOTER_RECTO]
+    text, source = reference_text(pages)
+    assert source == "heading"
+    assert text == ENTRY + "\n" + FOOTER_RECTO
 
 
 def test_no_heading_falls_back_to_the_document_tail():

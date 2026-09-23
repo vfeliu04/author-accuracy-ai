@@ -1,10 +1,12 @@
 """Real-PDF check of the bibliography text slice — excluded in CI (needs the
 example PDFs). Run locally with: python -m pytest -m integration -q
 
-Where each report's reference list is found was measured on the real files;
-these bounds hold the measurement so a regression in the heading rule, the
-run-gap rule or the page reader is visible on the real files. Re-measure
-and re-pin when a rule or a cap changes.
+EVERY example PDF is swept: where each report's reference list is found was
+measured on the real files, and these bounds hold the measurement so a
+regression in the heading rule, the run-gap rule or the page reader is
+visible on the real files — a rule that parses PDF text is judged on the
+spread of real shapes, not on one report. Re-measure and re-pin when a rule
+or a cap changes.
 """
 
 from pathlib import Path
@@ -16,6 +18,9 @@ pytestmark = pytest.mark.integration
 EXAMPLES = Path(__file__).resolve().parents[2] / "example_sources"
 
 DROUGHT = "example source two/Drought Hotspots 2023-2025_ENG.pdf"
+
+GHI_2024 = "example source one/2024 Global Wolrd Hunger Index.pdf"
+GHI_2025 = "example source two/2025.pdf"
 
 CASES = [
     # (relative path, expected text_source, (min chars, max chars), the text
@@ -47,11 +52,84 @@ CASES = [
         "REFERENCES\nAdler, I. 2011 Domestic water demand management",
         None,
     ),
+    # The two Global Hunger Index reports print no heading LINE: their
+    # bibliography (pages 52-58 of 66, and 52-56 of 62) carries a running
+    # footer on each page — "2024 Global Hunger Index | Bibliography  51",
+    # "52 Bibliography  | 2024 Global Hunger Index" — which pypdf emits at
+    # the END of the page's text, after the page's entries and after the
+    # section title glued to the last entry ("…175–179. BIBLIOGRAPHY", not
+    # a heading). A running header names its page, so the slice starts at
+    # the first footer's PAGE start: the first entry under "A". Before the
+    # rule both fell to the tail: 65,000 characters starting in the
+    # appendix tables (105 and 16,685 characters of them) — and the 2024
+    # list, 47,005 characters plus the imprint pages after it, is cut by
+    # the cap at 64,895 (the cap, stripped), the 2025 list reaches its end.
+    (
+        GHI_2024,
+        "heading",
+        (64_895, 64_895),
+        "A\nAgarwal, B. 2019. “Does Group Farming Empower Rural Women?",
+        None,
+    ),
+    (
+        GHI_2025,
+        "heading",
+        (48_315, 48_315),
+        "A\nACLED (Armed Conflict Location and Event Data). 2024.",
+        None,
+    ),
+    # A plain heading mid-page (after the body's last paragraph), 25,085 characters to the end.
+    (
+        "example source one/disruptions_in_the_food_supply_chain.pdf",
+        "heading",
+        (25_085, 25_085),
+        "References \n[1]L. Abuabara, K. Werner-Masters",
+        None,
+    ),
+    # The page number glued BEFORE the heading ("39Literature Cited", page 46
+    # of 50) is read as a numbered heading; the contents line "Literature
+    # Cited 39" on page 4 is a running-header form but 42 pages back, so it
+    # stays excluded. 8,148 characters to the end.
+    (
+        "example source two/REPORT19.pdf",
+        "heading",
+        (8_148, 8_148),
+        "39Literature Cited\nAlcamo, Joseph, Petra Doll",
+        None,
+    ),
+    # The page number on the line BEFORE the heading is absorbed by the
+    # numbered-heading prefix, harmlessly: 7,678 characters to the end.
+    (
+        "example source two/Status_Brief_C_TRN_11.pdf",
+        "heading",
+        (7_678, 7_678),
+        "8 \nReferences \n \nBallesteros, C., Lincke, D.",
+        None,
+    ),
+    # No heading LINE at all (a footnote-style report, 56 pages): the last
+    # 65,000 characters of the document.
+    ("example source one/HH_Nov24-May25_FINAL.pdf", "tail", (65_000, 65_000), None, None),
+    # No heading: the whole (short) document is the tail.
+    ("example source one/2025_world_hunger.pdf", "tail", (33_000, 33_200), None, None),
+    (
+        "example source two/WSG-Water-Consumption-Report-2021-FV.pdf",
+        "tail",
+        (2_600, 2_800),
+        None,
+        None,
+    ),
     # No heading: the whole (short) document is the tail, 4,519 characters stripped.
     ("Water_Stress_Fake_Report.pdf", "tail", (4_000, 5_000), None, None),
     # No heading: the whole (short) document is the tail, 5,664 characters stripped.
     ("example source one/World_Hunger_Fake.pdf", "tail", (5_000, 6_000), None, None),
 ]
+
+
+def test_every_example_pdf_is_pinned():
+    """The sweep covers every example file: a new sample gets a measured
+    case, never a silent miss."""
+    present = {str(path.relative_to(EXAMPLES)) for path in EXAMPLES.rglob("*.pdf")}
+    assert present == {relative for relative, *_ in CASES}
 
 
 def _slice(relative: str):
