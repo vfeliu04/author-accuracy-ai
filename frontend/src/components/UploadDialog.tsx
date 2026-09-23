@@ -78,16 +78,24 @@ function scanMessage(error: Error | null): string | null {
   return error !== null && error.name !== "AbortError" ? error.message : null;
 }
 
+// The parts that apply, as one line; null when none does.
+function joined(parts: (string | null)[], separator: string): string | null {
+  const present = parts.filter((part): part is string => part !== null);
+  return present.length === 0 ? null : present.join(separator);
+}
+
 // What the scan's caps cut, in one line: a list read or kept in part must not
 // pass for the whole one, since the works past the cut are unread, not absent.
 function limitsNote({ text_truncated, references_dropped }: ReferenceScan["limits"]): string | null {
-  const parts = [
-    text_truncated ? "Read the first part of a long reference list" : null,
-    references_dropped > 0
-      ? `${references_dropped === 1 ? "1 entry" : `${references_dropped} entries`} not shown`
-      : null
-  ].filter((part): part is string => part !== null);
-  return parts.length === 0 ? null : parts.join(" — ");
+  return joined(
+    [
+      text_truncated ? "Read the first part of a long reference list" : null,
+      references_dropped > 0
+        ? `${references_dropped === 1 ? "1 entry" : `${references_dropped} entries`} not shown`
+        : null
+    ],
+    " — "
+  );
 }
 
 export default function UploadDialog({ onClose }: { onClose: () => void }) {
@@ -229,16 +237,17 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
       added += 1;
     }
     setLinks(next);
-    const why = [
-      capped ? `at most ${MAX_SOURCES} sources per verification.` : null,
-      refused.length > 0
-        ? `${refused.length} couldn't be added: ${Array.from(new Set(refused)).join(" ")}`
-        : null
-    ].filter((part): part is string => part !== null);
+    const why = joined(
+      [
+        capped ? `at most ${MAX_SOURCES} sources per verification.` : null,
+        refused.length > 0
+          ? `${refused.length} couldn't be added: ${Array.from(new Set(refused)).join(" ")}`
+          : null
+      ],
+      " "
+    );
     setAddNote(
-      why.length === 0
-        ? null
-        : { of: scan.data, text: `Added ${added} of ${wanted.length} — ${why.join(" ")}` }
+      why === null ? null : { of: scan.data, text: `Added ${added} of ${wanted.length} — ${why}` }
     );
     return { next, capped };
   };
