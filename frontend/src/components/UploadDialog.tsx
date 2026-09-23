@@ -539,34 +539,31 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
             const label = ref.title ?? (ref.entry || ref.doi || ref.url || "(untitled entry)");
             const tooltip = ref.entry || label;
             const tag = copyTag(ref, lookup?.status ?? "ok");
-            if (ref.suggested_url === null || refused !== null) {
-              return (
-                <div className="file-row" key={index} title={tooltip}>
-                  <span className="file-row__check" aria-hidden />
-                  <span className="file-row__name">{label}</span>
-                  {ref.suggested_url !== null ? (
-                    <span className="file-row__host" title={ref.suggested_url}>
-                      {linkHost(ref.suggested_url)}
-                    </span>
-                  ) : null}
-                  <span className="file-row__size">{refused ?? tag}</span>
-                </div>
-              );
-            }
+            // A row with an address the dialog would take is a label around
+            // its tick box; one with no address, or a refused one, is a plain
+            // row that shows the refusal in place of the tag.
+            const tickable = ref.suggested_url !== null && refused === null;
+            const Row = tickable ? "label" : "div";
             return (
-              <label className="file-row" key={index} title={tooltip}>
-                <input
-                  type="checkbox"
-                  className="file-row__check"
-                  checked={checked.has(index)}
-                  onChange={() => toggle(index)}
-                />
+              <Row className="file-row" key={index} title={tooltip}>
+                {tickable ? (
+                  <input
+                    type="checkbox"
+                    className="file-row__check"
+                    checked={checked.has(index)}
+                    onChange={() => toggle(index)}
+                  />
+                ) : (
+                  <span className="file-row__check" aria-hidden />
+                )}
                 <span className="file-row__name">{label}</span>
-                <span className="file-row__host" title={ref.suggested_url}>
-                  {linkHost(ref.suggested_url)}
-                </span>
-                <span className="file-row__size">{tag}</span>
-              </label>
+                {ref.suggested_url !== null ? (
+                  <span className="file-row__host" title={ref.suggested_url}>
+                    {linkHost(ref.suggested_url)}
+                  </span>
+                ) : null}
+                <span className="file-row__size">{refused ?? tag}</span>
+              </Row>
             );
           })}
           {addable.length > 0 ? (
