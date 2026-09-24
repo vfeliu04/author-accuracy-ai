@@ -148,15 +148,71 @@ def extract_metadata(llm: LLM, model: str, opening_text: str) -> SourceMetadata:
 
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:)\s*", re.IGNORECASE)
 _DOI_SHAPE = re.compile(r"^10\.\d{4,9}/\S+$")
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+# Bounds on a DOI candidate BEFORE it is judged as served, because that
+# judgment decodes it repeatedly and a nested chain ("%2525…2e") shrinks by
+# two characters a pass — quadratic, 30 s for 240k characters, and on the
+# web path a page's own citation_doi reached it inside the reader's whole
+# budget. No real DOI approaches 256 characters (the longest registered run
+# a little over 100), and the most decoding a request meets is one proxy
+# and one server, so three passes reach anything such a chain can hide:
+# "%25252e" is a dot to a hop chain three deep, "%2525252e" to no real one.
+DOI_MAX_CHARS = 256
+DOI_DECODE_PASSES = 3
+
+
+def _as_served(doi: str) -> str:
+    """The DOI as a server may read it before it normalizes the path:
+    percent-decoded until nothing changes, at most DOI_DECODE_PASSES times.
+    One decoding turns "%2e%2e" into ".."; a server that decodes once still
+    sees "%252e%252e" as "%2e%2e", but one that decodes twice (a proxy in
+    front of it) sees "..", so the gate assumes the most decoding any hop
+    chain may do — a fixed number, not "until stable", which is quadratic
+    on a nested chain (see DOI_DECODE_PASSES)."""
+    for _ in range(DOI_DECODE_PASSES):
+        decoded = unquote(doi)
+        if decoded == doi:
+            break
+        doi = decoded
+    return doi
+
+
+def _steers_the_path(doi: str) -> bool:
+    """True when the DOI, quoted into a request path, would name a resource
+    other than <endpoint>/<doi>. httpx applies RFC 3986 dot-segment removal
+    to the path it sends, quoting notwithstanding, so "10.1000/../../admin"
+    is a GET of /admin on the registry; a backslash is a path separator to
+    some servers; a servlet container drops a ";param" suffix from each
+    segment BEFORE it normalizes, so "..;x" is ".." to it; and a server
+    decodes "%2e%2e" (or, behind a decoding proxy, "%252e%252e") to ".."
+    before either step. So the DOI is judged as served: percent-decoded
+    until stable, then each segment without its ";" suffix — "..%3B" reads
+    "..;" and then "..". A dot INSIDE a segment (10.1016/j.heliyon.2024.e34730),
+    or a ";" after ordinary text, is DOI punctuation and passes."""
+    served = _as_served(doi)
+    if "\\" in served:
+        return True
+    return any(segment.split(";", 1)[0] in _DOT_SEGMENTS for segment in served.split("/"))
 
 
 def clean_doi(doi: str) -> str | None:
     """Strip the URL/`doi:` prefixes the extractor is told not to emit but
     sometimes does, and reject anything that is not DOI-shaped — an
     unvalidated string in the request path would silently look up a
-    DIFFERENT DOI (fragments are dropped, `?` starts a query string)."""
+    DIFFERENT DOI (fragments are dropped, `?` starts a query string) or, with
+    a "." or ".." segment, a different ENDPOINT. The one gate for every
+    registry client (Crossref here, Unpaywall in references.py), so the DOI
+    a model extracted never steers a request path."""
     candidate = _DOI_PREFIX.sub("", doi.strip())
-    if not _DOI_SHAPE.match(candidate):
+    if len(candidate) > DOI_MAX_CHARS:  # before the decoding below, which the length prices
+        logger.warning(
+            "Malformed DOI (%d characters, over %d) — skipping DOI lookup",
+            len(candidate),
+            DOI_MAX_CHARS,
+        )
+        return None
+    if not _DOI_SHAPE.match(candidate) or _steers_the_path(candidate):
         logger.warning("Malformed DOI %r — skipping DOI lookup", doi)
         return None
     return candidate
@@ -205,7 +261,7 @@ def _same_isbn(ours: str, theirs: str) -> bool:
     return our_core is not None and our_core == their_core
 
 
-def _get_json_with_retries(
+def get_json_with_retries(
     client: httpx.Client, url: str, params: dict | None, *, retries: int, provider: str
 ) -> dict | None:
     """The one registry-GET policy, shared by every provider client: 200 is a
@@ -213,7 +269,9 @@ def _get_json_with_retries(
     429/5xx and transport failures retry with backoff and then RAISE —
     treating a throttled or down registry as "not found" would silently
     downgrade verification tiers and make credibility scores non-reproducible
-    between runs of identical inputs."""
+    between runs of identical inputs. Public because the bibliography scan's
+    Unpaywall client (references.py) is a registry client too: one policy,
+    not a second copy that can drift."""
     failure = ""
     for attempt in range(retries + 1):
         try:
@@ -222,12 +280,22 @@ def _get_json_with_retries(
             failure = f"{type(exc).__name__}: {exc}"
         else:
             if response.status_code == 200:
-                payload = response.json()
+                # A 200 whose body is not a JSON object is a malfunction
+                # (a captive portal or CDN error page, proxy interference),
+                # not an answer — every registry envelopes in an object.
+                # Treating it as "not found" would silently downgrade tiers,
+                # and letting httpx's JSONDecodeError (a ValueError) escape
+                # would give callers a second failure type: the pooled
+                # Unpaywall lookup catches RuntimeError alone, and turned
+                # the decode error into a 500.
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"{provider} returned 200 with a body that is not JSON ({url}) — "
+                        "malformed registry response"
+                    ) from exc
                 if not isinstance(payload, dict):
-                    # A 200 whose body is not a JSON object is a malfunction
-                    # (proxy/CDN interference), not an answer — both registries
-                    # always envelope in an object. Treating it as "not found"
-                    # would silently downgrade tiers.
                     raise RuntimeError(
                         f"{provider} returned 200 with a non-object body ({url}) — "
                         "malformed registry response"
@@ -242,6 +310,18 @@ def _get_json_with_retries(
         if attempt < retries:
             time.sleep(1.0 * (attempt + 1))
     raise RuntimeError(f"{provider} gave no answer after {retries + 1} attempts ({url}): {failure}")
+
+
+def registry_client(
+    mailto: str | None, *, base_url: str | None = None, timeout: float
+) -> httpx.Client:
+    """The one httpx client shape for every registry (Crossref and the ISBN
+    catalogues here, Unpaywall in references.py): the operator's contact in
+    the User-Agent, as the registries ask, and the caller's timeout. Whether
+    a contact is required (Unpaywall) or merely polite (Crossref) is each
+    client's own rule, decided before this is called."""
+    agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
+    return httpx.Client(base_url=base_url or "", timeout=timeout, headers={"User-Agent": agent})
 
 
 class IsbnClient:
@@ -262,14 +342,13 @@ class IsbnClient:
     """
 
     def __init__(self, mailto: str | None, timeout: float = ISBN_TIMEOUT):
-        agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
-        self._client = httpx.Client(timeout=timeout, headers={"User-Agent": agent})
+        self._client = registry_client(mailto, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
 
     def _get_json(self, url: str, params: dict) -> dict | None:
-        return _get_json_with_retries(
+        return get_json_with_retries(
             self._client, url, params, retries=ISBN_RETRIES, provider="ISBN provider"
         )
 
@@ -356,16 +435,13 @@ class CrossrefClient:
                 "CROSSREF_MAILTO is not set — using Crossref's anonymous pool "
                 "(slower, and impolite for sustained use)"
             )
-        agent = f"AuthorAI/2.0 (mailto:{mailto})" if mailto else "AuthorAI/2.0"
-        self._client = httpx.Client(
-            base_url=CROSSREF_BASE, timeout=timeout, headers={"User-Agent": agent}
-        )
+        self._client = registry_client(mailto, base_url=CROSSREF_BASE, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
-        payload = _get_json_with_retries(
+        payload = get_json_with_retries(
             self._client, path, params, retries=CROSSREF_RETRIES, provider="Crossref"
         )
         return payload.get("message") if payload else None

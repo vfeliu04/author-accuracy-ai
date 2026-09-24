@@ -2,7 +2,15 @@
 // so a finished run isn't refetched forever; mutations invalidate the run list.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { ChatMode, ChatTurn, PageSnapshot, Report, RunDetail, RunListItem } from "./types";
+import type {
+  ChatMode,
+  ChatTurn,
+  PageSnapshot,
+  ReferenceScan,
+  Report,
+  RunDetail,
+  RunListItem
+} from "./types";
 import { isTerminal } from "./types";
 import {
   UnreadablePageError,
@@ -15,7 +23,8 @@ import {
   listRuns,
   parsePageSnapshot,
   postChat,
-  retryRun
+  retryRun,
+  scanReferences
 } from "./v2";
 
 const POLL_MS = 1500;
@@ -25,7 +34,16 @@ export const queryKeys = {
   run: (runId: string) => ["run", runId] as const,
   report: (runId: string) => ["report", runId] as const,
   pdf: (runId?: string, docId?: string | null) => ["pdf", runId, docId] as const,
-  snapshot: (runId?: string, docId?: string | null) => ["snapshot", runId, docId] as const
+  snapshot: (runId?: string, docId?: string | null) => ["snapshot", runId, docId] as const,
+  // A file's identity as the browser reports it; File objects themselves are
+  // not comparable across renders.
+  references: (report: File | null) =>
+    [
+      "references",
+      report?.name ?? null,
+      report?.size ?? null,
+      report?.lastModified ?? null
+    ] as const
 };
 
 // The gallery polls only while some run is still moving — otherwise a card
@@ -118,6 +136,23 @@ export function useRetryRun(runId: string | undefined) {
       client.invalidateQueries({ queryKey: queryKeys.report(runId ?? "") });
       client.invalidateQueries({ queryKey: queryKeys.runs });
     }
+  });
+}
+
+// The report's reference list, read once per picked file. Picking the same
+// file again within a minute reuses the answer; picking another one aborts the
+// scan in flight: the queryFn hands TanStack's signal to the request, and a
+// fetch whose signal was consumed is cancelled when its key changes or its
+// last observer goes away (the dialog closing). Never retried — a refusal
+// names the file, and the file won't change.
+export function useReferenceScan(report: File | null) {
+  return useQuery<ReferenceScan, Error>({
+    queryKey: queryKeys.references(report),
+    queryFn: ({ signal }) => scanReferences(report as File, signal),
+    enabled: report !== null,
+    retry: false,
+    staleTime: Infinity,
+    gcTime: 60_000
   });
 }
 

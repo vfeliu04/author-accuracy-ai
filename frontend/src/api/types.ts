@@ -230,6 +230,47 @@ export type ChatResponse = {
   mode: ChatMode;
 };
 
+// POST /api/references/scan — the report's own reference list, read before
+// the run exists. Nothing is stored; the dialog matches it against the sources
+// on hand and offers the free copies as links.
+
+// Where a free copy of a cited work was found: a PDF, a landing page, none
+// because the work is paywalled, or unknown (no DOI, no record, or no lookup).
+export type Retrievability = "pdf" | "landing" | "paywalled" | "unknown";
+
+// "unconfigured" = no contact address set, so nothing was looked up;
+// "unavailable" = the lookup service failed part-way (detail says how).
+export type LookupStatus = "ok" | "unconfigured" | "unavailable";
+
+export type ScannedReference = {
+  title: string | null;
+  authors: string[];
+  year: number | null;
+  doi: string | null; // only when printed in the entry
+  url: string | null; // only when printed in the entry
+  // A short key as printed — the first author's surname or the organisation,
+  // and the year ("Adler 2011"); the server cuts it at 40 characters. Names
+  // the row when the title is null; null when the entry prints neither.
+  label: string | null;
+  retrievability: Retrievability;
+  // The link the user may add: set for "pdf" and "landing", and for an entry
+  // that printed a URL but no DOI (then retrievability stays "unknown": the
+  // address was validated, never visited). Never set for "paywalled".
+  suggested_url: string | null;
+};
+
+export type ReferenceScan = {
+  text_source: "heading" | "tail" | "none";
+  lookup: { status: LookupStatus; detail: string | null };
+  // What the scan's caps cut: the closing text the model read (65,000
+  // characters from the heading) and the list itself (300 entries, blank
+  // ones dropped). A cut list must not read as the whole list. And whether
+  // a part's answer still looked incomplete after the server's one retry —
+  // the dialog then says so and offers the scan again.
+  limits: { text_truncated: boolean; references_dropped: number; possibly_incomplete: boolean };
+  references: ScannedReference[];
+};
+
 export const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(["DONE", "FAILED"]);
 
 export const isTerminal = (status: RunStatus | undefined): boolean =>

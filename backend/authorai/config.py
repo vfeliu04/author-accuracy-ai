@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     verdict_model: str = "claude-opus-5"
     # Bibliographic metadata extraction is a cheap bounded task, like captions.
     metadata_model: str = "claude-haiku-4-5"
+    # Reading a report's printed reference list into fields (the pre-upload
+    # bibliography scan) is the same kind of bounded task.
+    references_model: str = "claude-haiku-4-5"
     # The validity rubric is a quality judgment over the whole report.
     validity_model: str = "claude-opus-5"
     validity_weights: str = "coverage:0.25,consistency:0.25,methodology:0.2,context:0.2,recency:0.1"

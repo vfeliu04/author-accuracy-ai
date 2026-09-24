@@ -16,6 +16,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -25,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from authorai import chat as chatmod
 from authorai import db as dbmod
+from authorai import references as refsmod
 from authorai.config import Settings
 from authorai.fetch import is_youtube_url, validate_source_url
 from authorai.llm import AnthropicClient
@@ -413,6 +415,154 @@ def chat(run_id: str, body: ChatRequest, request: Request, conn: Conn) -> dict:
 def _fraction(score: float | None) -> float | None:
     """0–100 component scores leave the API as 0–1 fractions like accuracy."""
     return None if score is None else round(score / 100, 4)
+
+
+class ScannedReference(refsmod.Reference):
+    """A cited work as the dialog shows it: the printed fields, plus whether a
+    free copy is known and the address the user may add as a link."""
+
+    retrievability: refsmod.Retrievability
+    # Set for "pdf" and "landing" (Unpaywall's copy), and for a DOI-less
+    # entry that prints its own address (offered unchecked, retrievability
+    # stays "unknown"); never for "paywalled".
+    suggested_url: str | None
+
+
+class LookupStatus(BaseModel):
+    # ok: every DOI was asked about. unconfigured: no contact email, so
+    # nothing was asked. unavailable: the registry failed part-way; `detail`
+    # says how, and the list keeps what was resolved before the failure.
+    status: refsmod.LookupState
+    detail: str | None = None
+
+
+class ScanLimits(BaseModel):
+    # What the scan's caps took, so the dialog can say the list was read in
+    # part instead of presenting the unread works as absent from the user's
+    # sources: the closing text cut at REFERENCE_MAX_CHARS, the rows
+    # dropped — past MAX_REFERENCES, or blank with nothing to act on — and
+    # whether a part's answer still looked incomplete after its one retry
+    # (references.ENTRY_STARTS_FLOOR), so the dialog can offer the scan again.
+    text_truncated: bool
+    references_dropped: int
+    possibly_incomplete: bool
+
+
+class ReferenceScan(BaseModel):
+    text_source: refsmod.TextSource
+    lookup: LookupStatus
+    limits: ScanLimits
+    references: list[ScannedReference]
+
+
+# How many reference scans may run at once. The handler is sync (its
+# blocking reads run on the threadpool, forty threads by default) and a
+# scan the dialog abandons — the report swapped, the dialog closed — runs
+# on: a threadpool thread cannot be cancelled and uvicorn does not stop the
+# app on a disconnect, so each abandoned scan keeps its thread, a reader
+# child of up to READER_MEMORY_BYTES (768 MiB) and its model calls until it
+# finishes or the deadline stops it. Without a bound, re-picking files
+# stacks N of those in the one process that also runs the jobs worker and
+# holds the database, on an 8 GB machine. Two covers the one live dialog
+# and a re-pick while its scan drains; a third is answered 429 at once —
+# no reader, no model call — with a plain message the dialog shows beside
+# its Try again control, so overlapping picks queue on the client. The
+# slot is taken after the cheap file checks (a bad file's 400 needs none)
+# and released on every exit.
+SCAN_CONCURRENCY = 2
+_scan_slots = threading.BoundedSemaphore(SCAN_CONCURRENCY)
+
+
+@router.post("/references/scan")
+def scan_references(request: Request, report: Annotated[UploadFile, File()]) -> ReferenceScan:
+    """List the works the report's own reference list cites, with whether a
+    free copy is known — a pre-upload aid for the upload dialog, which shows
+    the cited works the user has not supplied and offers the free ones as
+    links.
+
+    What this endpoint does NOT do: it creates no run, upload or job row
+    (there is deliberately no database dependency here, so it cannot); it
+    writes no file under uploads_dir (the spooled part is read in place); it
+    never fetches a cited work (a suggested address passes the gate a pasted
+    link passes plus the fetcher's literal-address refusal, and is not
+    resolved or visited); and it caches nothing — every call
+    reads the PDF and asks the model again.
+
+    The file gets the same checks an upload gets (extension, size, magic),
+    then pypdf reads its closing pages; a file pypdf cannot open, or that
+    passes the read's time or memory budget, is a 400 naming it (a reader
+    that fails on its own — an import error, a bug — is a 500, not the
+    file's fault). No text at all (a scanned PDF) answers "none" with an empty
+    list and no model call. A missing contact email means no lookup
+    ("unconfigured"); a registry failure part-way keeps the list and flags
+    it ("unavailable") rather than failing the scan, because the citations
+    are useful without retrievability (references.resolve_retrievability
+    holds that rule, and suggested_url which address a row offers). A
+    model answer that cannot be read twice — invalid JSON where the schema
+    was asked for — is a 502 with a message the dialog can show
+    (references.ModelAnswerError); any other model failure is not caught:
+    500, like chat. Sync, so its blocking reads run
+    on the threadpool — and bounded to SCAN_CONCURRENCY at once (see the
+    constant): past that, 429 before any reader or model work.
+    """
+    settings: Settings = request.app.state.settings
+    _validate_pdf(report, settings.max_upload_bytes)
+    if not _scan_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429, detail="a reference scan is already running — try again in a moment"
+        )
+    try:
+        return _scan(report, settings)
+    finally:
+        _scan_slots.release()
+
+
+def _scan(report: UploadFile, settings: Settings) -> ReferenceScan:
+    """The scan itself, once its slot is held: the read, the model, the lookup."""
+    try:
+        pages = refsmod.read_pages(report.file, timeout=settings.extract_timeout_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{report.filename!r}: {exc}") from exc
+    text, text_source, text_truncated = refsmod.reference_text(pages)
+    references: list[refsmod.Reference] = []
+    dropped = 0
+    possibly_incomplete = False
+    if text_source != "none":
+        llm = AnthropicClient(settings.anthropic_api_key)
+        try:
+            references, dropped, possibly_incomplete = refsmod.extract_references(
+                llm, settings.references_model, text
+            )
+        except refsmod.ModelAnswerError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="the model's answer could not be read — try the scan again",
+            ) from exc
+
+    lookup = refsmod.resolve_retrievability(references, settings.crossref_mailto)
+    if lookup.status == "unavailable":
+        logger.warning(
+            "Unpaywall gave no answer — listing the references without retrievability: %s",
+            lookup.detail,
+        )
+
+    return ReferenceScan(
+        text_source=text_source,
+        lookup=LookupStatus(status=lookup.status, detail=lookup.detail),
+        limits=ScanLimits(
+            text_truncated=text_truncated,
+            references_dropped=dropped,
+            possibly_incomplete=possibly_incomplete,
+        ),
+        references=[
+            ScannedReference(
+                **reference.model_dump(),
+                retrievability=kind,
+                suggested_url=refsmod.suggested_url(reference, found),
+            )
+            for reference, (kind, found) in zip(references, lookup.resolved, strict=True)
+        ],
+    )
 
 
 @router.get("/runs/{run_id}/report")

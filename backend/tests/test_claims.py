@@ -90,3 +90,31 @@ def test_replace_swaps_claims_atomically(conn):
 def test_anthropic_client_refuses_missing_key():
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         AnthropicClient(api_key=None)
+
+
+def test_the_client_sends_temperature_only_when_a_caller_sets_one():
+    """Every existing caller is unchanged: with no temperature the SDK call
+    carries no `temperature` key at all (Opus 4.7+ and Sonnet 5 refuse the
+    parameter with a 400, its default value included), and a caller that
+    sets one — the reference scan, on Haiku 4.5 — has it passed through as
+    given, with nothing else about the call changed."""
+    from types import SimpleNamespace
+
+    sent: list[dict] = []
+
+    def parse(**kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(
+            parsed_output=CANNED,
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    client = AnthropicClient(api_key="test-key")
+    client._client = SimpleNamespace(messages=SimpleNamespace(parse=parse))
+    common = dict(model="m", system="s", prompt="p", output_type=ClaimExtraction)
+    assert client.parse(**common) is CANNED
+    assert "temperature" not in sent[0]
+    assert client.parse(**common, temperature=0.0) is CANNED
+    assert sent[1]["temperature"] == 0.0
+    assert {key: value for key, value in sent[1].items() if key != "temperature"} == sent[0]

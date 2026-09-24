@@ -34,18 +34,22 @@ import multiprocessing
 import os
 import re
 import resource
+import shutil
 import signal
 import tempfile
 import threading
 import time
 import traceback
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from html import unescape
 from html.parser import HTMLParser
 from multiprocessing import connection, resource_tracker
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
+from typing import Any, BinaryIO
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
@@ -90,6 +94,44 @@ class ThinPageError(ValueError):
 
 class ExtractionTimeoutError(RuntimeError):
     """Reading the page exceeded its wall-clock budget and was stopped."""
+
+
+class ResultTooLargeError(RuntimeError):
+    """The reader process reported a result longer than RESULT_MAX_BYTES; it
+    was refused on its length header, unread. A bound of the reader's, like
+    the deadline: the message names the reader's input, as every reader
+    failure does."""
+
+
+class ReaderExitedError(RuntimeError):
+    """The reader process exited without sending a result. `exitcode` is
+    its status: negative for a signal (the CPU limit's SIGXCPU, an
+    out-of-memory kill), a code the child chose (os._exit), 1 for an
+    unhandled exception at start-up or in its target, 0 for a return with
+    nothing reported. What the status means is the caller's to decide —
+    the same status is a bound for one reader and a bug for another — so
+    the message only names the reader's input, as every reader failure
+    does."""
+
+    def __init__(self, message: str, exitcode: int | None) -> None:
+        super().__init__(message)
+        self.exitcode = exitcode
+
+
+# The most a reader may REPORT, as opposed to cost. The child's deadline,
+# CPU limit and memory watchdog bound its work, and each reader caps the
+# text it builds (references.PAGE_TEXT_MAX_CHARS and READER_MAX_TEXT_CHARS
+# for a PDF; a fetched page is at most its body cap), but a parent that
+# received an unbounded frame held the frame, the unpickled value and its
+# own copies at once, in the request thread, for as long as they took to
+# process. recv_bytes refuses a frame on its length header, before a byte
+# of the body is read (the connection is then no longer readable, as
+# documented), and in_bounded_child reports the refusal as a bound of the
+# reader's. 64 MiB is twice the largest result either reader can send: the
+# PDF reader's 8,000,000 characters pickle as at most 32 MiB of UTF-8 (~8
+# MiB for the Latin text of a real report), and a page's sections are at
+# most the 10 MB body they came from.
+RESULT_MAX_BYTES = 64 * 1024 * 1024
 
 
 @dataclass
@@ -201,8 +243,8 @@ def extract_web_bounded(
     and nothing else can interrupt the single worker thread. A fresh
     interpreter (spawned, never forked: the caller is a thread) costs about
     half a second per page, inside the budget: the page reaches the child
-    through a private file (_page_file), so start() returns as soon as the
-    child is exec'd and the deadline covers its start-up too.
+    through a private file (handover_file), so start() returns as soon as
+    the child is exec'd and the deadline covers its start-up too.
 
     Raises ExtractionTimeoutError at the deadline. The child's ThinPageError
     or ValueError is re-raised here as the same type with the same message;
@@ -210,15 +252,53 @@ def extract_web_bounded(
     RuntimeError naming the URL, with the child's traceback or exit status in
     the log.
     """
+    page_path = handover_file(html, url)
+    kind, payload = in_bounded_child(
+        _extract_in_child,
+        (isinstance(html, str), url),
+        payload_path=page_path,
+        url=url,
+        timeout=timeout,
+    )
+    if kind == "result":
+        return payload
+    name, message, child_traceback = payload
+    if kind == "thin":
+        raise ThinPageError(message)
+    logger.warning("reading %s failed in the reader process:\n%s", url, child_traceback)
+    if kind == "value":
+        raise ValueError(message)
+    raise RuntimeError(f"{url} could not be read: {name}: {message}")
+
+
+def in_bounded_child(
+    target, args: tuple, *, payload_path: str, url: str, timeout: float
+) -> tuple[str, Any]:
+    """Run `target(sender, payload_path, *args, cpu_seconds)` in a spawned
+    child under a wall-clock budget and return the (kind, payload) pair it
+    sent back (report_outcome is the child's side of that exchange). The one
+    bounded-reader primitive: extract_web_bounded reads a
+    page through it, and the bibliography scan (references.read_pages) reads
+    a PDF through it, so a hostile input of either kind meets one deadline,
+    one CPU limit and one parent-death watcher (end_with_parent, which the
+    target calls first) rather than a second copy of them.
+
+    The payload reaches the child through the file at `payload_path`
+    (handover_file), which is removed on every path — by the child once read,
+    here for a child that never read it. Raises ExtractionTimeoutError at the
+    deadline, with the child stopped, and ReaderExitedError (a RuntimeError)
+    naming `url` when the child exits without a result (killed, out of
+    memory, a frame cut short, a failed start-up), carrying its exit status,
+    which is also in the log.
+    """
     context = multiprocessing.get_context("spawn")
     outcome = None
     exitcode = None
-    page_path = _page_file(html, url)
     try:
         receiver, sender = context.Pipe(duplex=False)
         child = context.Process(
-            target=_extract_in_child,
-            args=(sender, page_path, isinstance(html, str), url, _orphan_cpu_seconds(timeout)),
+            target=target,
+            args=(sender, payload_path, *args, _orphan_cpu_seconds(timeout)),
             daemon=True,
         )
         try:
@@ -231,52 +311,84 @@ def extract_web_bounded(
                     "(the page is too large or complex)"
                 )
             try:
-                outcome = receiver.recv()
-            except (EOFError, OSError):  # the child died before reporting (EOF) or
-                pass  # while reporting (a frame cut short): killed, out of memory
+                frame = receiver.recv_bytes(RESULT_MAX_BYTES)
+            except EOFError:  # the child died before reporting
+                pass
+            except OSError:
+                # A frame cut short (the child died while reporting: killed,
+                # out of memory) — or one refused on its length header, which
+                # leaves the connection closed: the reader's result was past
+                # the bound, and that is a bound's verdict, not an exit's.
+                if receiver.closed:
+                    logger.warning(
+                        "the reader process for %s reported a result larger than %d bytes "
+                        "— refused unread",
+                        url,
+                        RESULT_MAX_BYTES,
+                    )
+                    raise ResultTooLargeError(
+                        f"{url} could not be read: the reader reported a result larger than "
+                        f"{RESULT_MAX_BYTES} bytes"
+                    ) from None
+            else:
+                outcome = ForkingPickler.loads(frame)  # what recv() does, after its own read
+            if outcome is None:
+                # A child that reported nothing is judged by its exit status
+                # (a bound or a bug — the caller's call), so let it end by
+                # itself before _stop reaps it: one still tearing down when
+                # its pipe closed would otherwise be terminated, and the
+                # status would always read SIGTERM. One that closed its pipe
+                # and reads on is stopped after the grace. A child that
+                # reported is reaped at once: its status is never read.
+                child.join(_EXIT_GRACE_SECONDS)
         finally:
             sender.close()
             receiver.close()
             if child.pid is not None:
                 exitcode = _stop(child)
     finally:
-        Path(page_path).unlink(missing_ok=True)  # the child removes it once read
+        Path(payload_path).unlink(missing_ok=True)  # the child removes it once read
     if outcome is None:
         logger.warning(
             "the reader process for %s exited without a result (%s)", url, _exit_status(exitcode)
         )
-        raise RuntimeError(f"{url} could not be read: the reader process exited without a result")
-    kind, payload = outcome
-    if kind == "result":
-        return payload
-    name, message, child_traceback = payload
-    if kind == "thin":
-        raise ThinPageError(message)
-    logger.warning("reading %s failed in the reader process:\n%s", url, child_traceback)
-    if kind == "value":
-        raise ValueError(message)
-    raise RuntimeError(f"{url} could not be read: {name}: {message}")
+        raise ReaderExitedError(
+            f"{url} could not be read: the reader process exited without a result", exitcode
+        )
+    return outcome
 
 
-def _page_file(html: bytes | str, url: str) -> str:
-    """Write the page to a private temporary file for the child to read back,
-    and return its path. The page never travels as a Process argument: the
-    spawn launcher writes the arguments to the child over a pipe while still
-    holding the child's end of it, so arguments past the pipe buffer (64 KiB)
-    block start() until the child reads them — forever when the child dies
-    first (an import that fails because a module was edited on disk under a
-    running server, a kill during start-up), before any deadline is in force.
-    A str is stored as UTF-8 with surrogates passed through, so it reads back
-    byte-exact whatever jobs._page_text decoded. The child deletes the file as
-    soon as it has read it, since a server killed outright never reaches its
-    own removal; the caller removes it too, for a child that never read it."""
+# How long a child that reported nothing may take to end by itself before
+# _stop terminates it: an interpreter's teardown is tens of milliseconds,
+# so a real exit is never cut short, and a child that closed its pipe and
+# reads on costs at most this before it is stopped.
+_EXIT_GRACE_SECONDS = 1.0
+
+
+def handover_file(payload: bytes | str | BinaryIO, url: str) -> str:
+    """Write the payload to a private temporary file for the child to read
+    back, and return its path. The payload never travels as a Process
+    argument: the spawn launcher writes the arguments to the child over a
+    pipe while still holding the child's end of it, so arguments past the
+    pipe buffer (64 KiB) block start() until the child reads them — forever
+    when the child dies first (an import that fails because a module was
+    edited on disk under a running server, a kill during start-up), before
+    any deadline is in force. A str is stored as UTF-8 with surrogates passed
+    through, so it reads back byte-exact whatever jobs._page_text decoded; a
+    readable binary handle (a spooled upload) is copied without being held
+    in memory whole. The child deletes the file as soon as it has read it,
+    since a server killed outright never reaches its own removal; the caller
+    removes it too, for a child that never read it."""
     try:
         handle, path = tempfile.mkstemp(prefix="authorai-page-")
         try:
             with os.fdopen(handle, "wb") as page_file:
-                page_file.write(
-                    html.encode("utf-8", "surrogatepass") if isinstance(html, str) else html
-                )
+                if isinstance(payload, str):
+                    page_file.write(payload.encode("utf-8", "surrogatepass"))
+                elif isinstance(payload, bytes):
+                    page_file.write(payload)
+                else:
+                    shutil.copyfileobj(payload, page_file)
         except BaseException:
             os.unlink(path)
             raise
@@ -300,29 +412,47 @@ def _start(child) -> None:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
-def _extract_in_child(sender, page_path: str, is_text: bool, url: str, cpu_seconds: int) -> None:
-    """The child's side of extract_web_bounded: the page read back from its
-    file, then the result, or the failure as a (kind, (type name, message,
-    traceback)) triple — exceptions themselves need not pickle."""
-    _end_with_parent(cpu_seconds)
+def report_outcome(
+    sender, work: Callable[[], Any], failure_kind: Callable[[Exception], str]
+) -> None:
+    """The child's side of in_bounded_child's exchange, in one place: the
+    value `work` returns is sent back as ("result", value), the exception
+    it raises as (failure_kind(exc), (type name, message, traceback)) —
+    exceptions themselves need not pickle, and which failures a reader
+    tells apart is its own rule. The pipe is closed once the outcome is
+    sent."""
     try:
-        with open(page_path, "rb") as page_file:
-            raw = page_file.read()
-        Path(page_path).unlink(missing_ok=True)
-        html = raw.decode("utf-8", "surrogatepass") if is_text else raw
-        outcome = ("result", extract_web(html, url=url))
-    except Exception as exc:
-        kind = "other"
-        if isinstance(exc, ThinPageError):
-            kind = "thin"
-        elif isinstance(exc, ValueError):
-            kind = "value"
-        outcome = (kind, (type(exc).__name__, str(exc), traceback.format_exc()))
+        outcome = ("result", work())
+    except Exception as exc:  # noqa: BLE001 - every failure is reported; the parent judges it
+        outcome = (failure_kind(exc), (type(exc).__name__, str(exc), traceback.format_exc()))
     sender.send(outcome)
     sender.close()
 
 
-def _end_with_parent(cpu_seconds: int) -> None:
+def _extract_in_child(sender, page_path: str, is_text: bool, url: str, cpu_seconds: int) -> None:
+    """The child's side of extract_web_bounded: the page read back from its
+    file, then the result or the failure, reported through report_outcome —
+    a thin page and a ValueError each by their own kind, anything else as
+    "other"."""
+    end_with_parent(cpu_seconds)
+
+    def read_and_extract():
+        with open(page_path, "rb") as page_file:
+            raw = page_file.read()
+        Path(page_path).unlink(missing_ok=True)
+        html = raw.decode("utf-8", "surrogatepass") if is_text else raw
+        return extract_web(html, url=url)
+
+    report_outcome(sender, read_and_extract, _failure_kind)
+
+
+def _failure_kind(exc: Exception) -> str:
+    if isinstance(exc, ThinPageError):
+        return "thin"
+    return "value" if isinstance(exc, ValueError) else "other"
+
+
+def end_with_parent(cpu_seconds: int) -> None:
     """Tie the reader's life to its parent's. Only the parent stops a reader
     (_stop at the deadline, multiprocessing's exit hook for daemons), and a
     server killed outright — SIGTERM's default action after uvicorn's graceful

@@ -1,5 +1,7 @@
 """Credibility tests: Crossref tiers (respx-recorded), publisher matching, aggregation."""
 
+import time
+
 import httpx
 import pytest
 import respx
@@ -16,6 +18,7 @@ from authorai.credibility import (
     _title_match,
     aggregate_credibility,
     authority_needles,
+    clean_doi,
     evidence_usage,
     merge_record,
     resolve_tier,
@@ -159,12 +162,154 @@ def test_malformed_200_body_raises_instead_of_reading_as_not_found():
 
 
 @respx.mock
+def test_a_200_whose_body_is_not_json_raises_the_same_registry_failure():
+    """A 200 with an HTML body (captive portal, CDN error page) is the same
+    malfunction as a non-object body, and every caller sees one failure
+    type: RuntimeError, never the json.JSONDecodeError httpx raises."""
+    respx.get(f"{CROSSREF_BASE}/works/10.1000/html").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><body>Service degraded</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    with pytest.raises(RuntimeError, match="not JSON") as caught:
+        _client().by_doi("10.1000/html")
+    assert not isinstance(caught.value, ValueError)
+    assert "Crossref" in str(caught.value)
+
+
+@respx.mock
 def test_malformed_doi_is_skipped_without_a_request():
     # No route mocked: any HTTP call would make respx raise. The URL-prefixed
     # and shapeless forms both fall through to METADATA_ONLY with a warning.
     for bad in ("https://doi.org/nope", "not-a-doi", "10.1/x"):
         tier, record = resolve_tier(SourceMetadata(doi=bad, title=None), _client(), origin=UPLOADED)
         assert (tier, record) == ("METADATA_ONLY", None)
+
+
+@respx.mock
+def test_by_doi_requests_exactly_the_works_path():
+    doi = "10.1016/j.heliyon.2024.e34730"
+    route = respx.get(f"{CROSSREF_BASE}/works/{doi}").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
+    )
+    assert _client().by_doi(doi) == {"title": ["Anything"]}
+    assert str(route.calls.last.request.url) == f"{CROSSREF_BASE}/works/{doi}"
+
+
+@respx.mock
+def test_a_doi_that_would_steer_the_request_path_makes_no_request():
+    """httpx resolves "." and ".." segments even after quoting, so
+    "10.1000/../../admin" would GET /admin on the registry; the DOI comes
+    from the model, so the shape gate refuses it before it enters the path."""
+    route = respx.route(host="api.crossref.org").mock(return_value=httpx.Response(404))
+    for bad in (
+        "10.1000/../../admin",
+        "10.1000/x/../../../etc",
+        "10.1000/./x",
+        "10.1000/a\\b",
+        "10.1000/..;/x",
+        "10.1000/x/.;y/z",
+        "10.1000/..%3B/x",  # the ";" percent-encoded: decoded, then stripped, then ".."
+        "10.1000/%2e%2e/x",  # a server decodes before it normalizes
+        "10.1000/%252e%252e/x",  # ... and a decoding proxy in front of it decodes once more
+        "10.1000/x%2F..%2F..%2Fadmin",  # encoded slashes become segments on such a server
+        "10.1000/a%5Cb",  # an encoded backslash
+    ):
+        assert _client().by_doi(bad) is None, bad
+    assert route.call_count == 0, [str(c.request.url) for c in route.calls]
+
+
+@respx.mock
+def test_a_semicolon_that_hides_no_dot_segment_is_requested_exactly():
+    """A ";" is legitimate DOI punctuation when the segment before it is not
+    a dot segment: the lookup goes out, quoted, as the DOI under /works/.
+    Percent-encoded in the DOI itself it is still ordinary text — that DOI
+    goes out exactly as given, its "%" quoted once more, never decoded."""
+    route = respx.get(f"{CROSSREF_BASE}/works/10.1000/a%3Bb/c").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Anything"]}})
+    )
+    assert _client().by_doi("10.1000/a;b/c") == {"title": ["Anything"]}
+    assert str(route.calls.last.request.url) == f"{CROSSREF_BASE}/works/10.1000/a%3Bb/c"
+    encoded = respx.get(f"{CROSSREF_BASE}/works/10.1000/a%253Bb/c").mock(
+        return_value=httpx.Response(200, json={"message": {"title": ["Encoded"]}})
+    )
+    assert _client().by_doi("10.1000/a%3Bb/c") == {"title": ["Encoded"]}
+    assert str(encoded.calls.last.request.url) == f"{CROSSREF_BASE}/works/10.1000/a%253Bb/c"
+
+
+@pytest.mark.parametrize(
+    "doi",
+    [
+        "10.1000/../../admin",
+        "10.1000/x/../../../etc",
+        "10.1000/./x",
+        "10.1000/x/.",
+        "10.1000/.",
+        "10.1000/..",
+        "10.1000/a\\b",
+        "10.1000/..;/x",
+        "10.1000/x/.;y/z",
+        "10.1000/x/..;",
+        "10.1000/..%3B/x",
+        "10.1000/%2e%2e/x",
+        "10.1000/%2E/x",
+        "10.1000/%252e%252e/x",
+        "10.1000/%25252e%25252e/x",
+        "10.1000/x%2F..%2F..%2Fadmin",
+        "10.1000/a%5Cb",
+    ],
+)
+def test_clean_doi_rejects_a_dot_segment_or_a_backslash(doi, credibility_log):
+    """A segment that IS "." or ".." steers the request path; a backslash is
+    a path separator to some servers; a servlet container drops a ";param"
+    suffix from a segment BEFORE normalizing, so "..;x" is ".." to it; and
+    a server percent-decodes before any of that, once per hop, so "%2e%2e",
+    "%252e%252e" and "..%3B" all reach some server as "..". All are refused
+    as malformed, with the same warning as any other shapeless DOI."""
+    assert clean_doi(doi) is None
+    assert "Malformed DOI" in credibility_log.text
+
+
+def test_clean_doi_bounds_the_length_before_decoding_and_decodes_a_fixed_number_of_times(
+    credibility_log,
+):
+    """The decode-until-stable loop was quadratic — a nested chain shrinks by
+    two characters a pass — and ran before any length bound: 240k characters
+    of "%2525…2e" cost 30 s, on the web path inside the page reader's whole
+    budget. A DOI past DOI_MAX_CHARS is refused before the loop (no real DOI
+    approaches it), and the loop makes at most DOI_DECODE_PASSES decodings —
+    the most a request may be decoded across a proxy and a server — so the
+    worst case is milliseconds."""
+    from authorai.credibility import DOI_DECODE_PASSES, DOI_MAX_CHARS
+
+    # "%25…252e" decodes to "%25…2e", one "25" shorter, every pass: 120,000
+    # passes for the old loop (minutes), three for this one.
+    nested = "10.1000/%" + "25" * 120_000 + "2e/x"
+    started = time.perf_counter()
+    assert clean_doi(nested) is None
+    assert time.perf_counter() - started < 0.05
+    assert "Malformed DOI" in credibility_log.text
+    longest = "10.1000/" + "a" * (DOI_MAX_CHARS - len("10.1000/"))
+    assert clean_doi(longest) == longest
+    assert clean_doi(longest + "a") is None
+    # Exactly DOI_DECODE_PASSES encodings of a dot segment still decode to
+    # it and are refused; one more is beyond what any hop chain decodes.
+    assert DOI_DECODE_PASSES == 3
+    assert clean_doi("10.1000/%25252e%25252e/x") is None
+    assert clean_doi("10.1000/%2525252e%2525252e/x") == "10.1000/%2525252e%2525252e/x"
+
+
+def test_clean_doi_keeps_dots_inside_a_segment():
+    """Dots INSIDE a segment are ordinary DOI punctuation."""
+    doi = "10.1016/j.heliyon.2024.e34730"
+    assert clean_doi(doi) == doi
+    assert clean_doi(f"https://doi.org/{doi}") == doi
+    assert clean_doi("10.1000/a.b.c/d.e") == "10.1000/a.b.c/d.e"
+    assert clean_doi("10.1000/a;b/c") == "10.1000/a;b/c"  # a ";" hiding no dot segment
+    assert clean_doi("10.1000/a%3Bb/c") == "10.1000/a%3Bb/c"  # the same, encoded
+    assert clean_doi("10.1000/j%2Ex.2020") == "10.1000/j%2Ex.2020"  # encoded dot INSIDE a segment
 
 
 @respx.mock

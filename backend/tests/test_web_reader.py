@@ -200,7 +200,7 @@ def test_a_reader_that_dies_before_reading_its_page_fails_at_once_whatever_the_p
     thread.start()
     thread.join(5 + 15)
     assert not thread.is_alive(), "extract_web_bounded blocked inside child.start()"
-    assert len(failures) == 1 and type(failures[0]) is RuntimeError
+    assert len(failures) == 1 and type(failures[0]) is web_mod.ReaderExitedError
     assert str(failures[0]) == (
         "https://example.org/big could not be read: the reader process exited without a result"
     )
@@ -242,7 +242,8 @@ def test_a_reader_killed_mid_read_fails_naming_the_link_and_logs_the_signal(web_
         extract_web_bounded(_slow_page("abbr", 60_000), url="https://example.org/oom", timeout=20)
     killer.join(5)
     assert killed
-    assert type(excinfo.value) is RuntimeError  # not ExtractionTimeoutError at the deadline
+    assert type(excinfo.value) is web_mod.ReaderExitedError  # not the deadline's error
+    assert excinfo.value.exitcode == -signal.SIGKILL  # the child's own status, for the caller
     assert str(excinfo.value) == (
         "https://example.org/oom could not be read: the reader process exited without a result"
     )
@@ -284,6 +285,31 @@ def test_a_reader_killed_while_reporting_fails_naming_the_link(monkeypatch):
     assert str(excinfo.value) == (
         f"{REPORT_URL} could not be read: the reader process exited without a result"
     )
+    assert set(multiprocessing.active_children()) == children
+
+
+def _reader_reports_too_much(sender, *_args):
+    """A reader whose result is larger than the parent will receive."""
+    web_mod.report_outcome(sender, lambda: "x" * (2 * 2**20), lambda exc: "other")
+
+
+def test_a_result_larger_than_the_parents_bound_is_refused_unread(monkeypatch, web_log):
+    """The parent receives a result only up to RESULT_MAX_BYTES: a longer
+    frame is refused on its length header before a byte of its body is
+    read, as a bound of the reader's (ResultTooLargeError) — not the
+    'exited without a result' a reader that dies mid-report is — naming
+    the link, with the child reaped and nothing left behind."""
+    monkeypatch.setattr(web_mod, "RESULT_MAX_BYTES", 2**20)
+    monkeypatch.setattr(web_mod, "_extract_in_child", _reader_reports_too_much)
+    children = set(multiprocessing.active_children())
+    with pytest.raises(web_mod.ResultTooLargeError) as excinfo:
+        extract_web_bounded(_page("report_jsonld_graph.html"), url=REPORT_URL, timeout=30)
+    assert not isinstance(excinfo.value, web_mod.ReaderExitedError)
+    assert str(excinfo.value) == (
+        f"{REPORT_URL} could not be read: the reader reported a result larger than {2**20} bytes"
+    )
+    assert f"reported a result larger than {2**20} bytes" in web_log.text
+    assert "exited without a result" not in web_log.text
     assert set(multiprocessing.active_children()) == children
 
 
