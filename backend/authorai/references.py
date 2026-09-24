@@ -707,22 +707,29 @@ def split_reference_text(text: str, *, chunk_chars: int = REFERENCE_CHUNK_CHARS)
 class Reference(BaseModel):
     """One entry of the report's own reference list, as printed."""
 
-    title: str | None = Field(default=None, description="The cited work's title, as printed")
-    authors: list[str] = Field(
-        default_factory=list, description="Author names as printed; empty when none are printed"
-    )
-    year: int | None = Field(default=None, description="Publication year, as printed")
-    doi: str | None = Field(
-        default=None, description="The DOI printed in the entry (10.xxxx/...), without a URL prefix"
-    )
-    url: str | None = Field(default=None, description="A web address printed in the entry")
+    # Field ORDER is part of the contract with the model: structured outputs
+    # emit fields in schema order, and measured live (three calls per variant,
+    # temperature 0, the 37-entry article) the model returned all 37 entries
+    # every time with `label` FIRST and one entry two times in three with
+    # `label` last — a short key opening each object anchors it; a nullable
+    # title opening it does not. Keep this order and these descriptions.
     label: str | None = Field(
         default=None,
         description=(
-            "A short key for the entry as printed: the first author's surname or the "
-            'organisation, plus the year (e.g. "Adler 2011")'
+            "A short key for the entry as printed: first author's surname or "
+            "organisation and the year, e.g. 'Adler 2011' or 'WHO 2020'"
         ),
     )
+    title: str | None = Field(
+        default=None,
+        description="The cited work's title as printed; null when the entry prints none",
+    )
+    authors: list[str] = Field(default_factory=list, description="Names as printed")
+    year: int | None = Field(default=None, description="The year printed in the entry")
+    doi: str | None = Field(
+        default=None, description="ONLY a DOI printed in the entry, without a URL prefix"
+    )
+    url: str | None = Field(default=None, description="ONLY a web address printed in the entry")
 
     @field_validator("title", "doi", "url", "label", mode="after")
     @classmethod
