@@ -3,7 +3,7 @@
 [![CI](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its sources — PDF files, links to web pages, or both; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
+Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its sources — PDF files, images (PNG, JPEG or WebP), links to web pages, or any mix; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
 
 When you pick the report in the upload dialog, the app reads its own reference list and shows the works it cites that are not among your sources, offering the ones with a free copy online (looked up through Unpaywall) as links you can add with a click — nothing is stored until you start the verification.
 
@@ -14,8 +14,10 @@ When you pick the report in the upload dialog, the app reads its own reference l
 ```
  report PDF ──┐
  source PDFs ─┤
+ images ──────┤
  web links ───┴─► INGEST   links fetched first (a page's readable text, or the PDF it serves)
                            Docling parse of PDFs (text · tables · figure images) ─► chunks
+                           images transcribed by the vision model (one chunk each)
                            ─► OpenAI embeddings ─► SQLite (sqlite-vec + FTS5, run-scoped)
                      │
                      ▼
@@ -51,6 +53,15 @@ A source can be a link to a web page instead of a file. Add it in the upload dia
 - In the claims view, evidence from a web page opens as the stored text with the quoted passage highlighted, cited by its section heading, with a link to the original page.
 - Credibility uses what the page declares about itself: its authors, publisher, date, DOI, and title. When a page declares nothing beyond a title, its text is read for those details instead, the same way a PDF's is. The web address is never used.
 - YouTube links are not supported yet; the upload refuses them.
+
+### Images as sources
+
+A source can also be an image: a chart, an infographic, a screenshot or a photo, as PNG, JPEG or WebP. The report itself stays a PDF.
+
+- The image is read once, when the run starts: the vision model transcribes every word and number it can read, and adds a short description. That reading is what the image's evidence quotes, so a verdict on a chart cites the value as the model read it, and the claims view says so beside the image.
+- The judge is shown the image too, at the size the vision model reads (at most 1568 pixels on the long edge; a small image is enlarged up to twice, which measurably helps with small print); your original is kept as uploaded and is what the claims view shows.
+- Animated images, HEIC photos (export them as JPEG) and images over 50 megapixels are refused when you upload them.
+- An image has no author, publisher or date to check, so it is listed with the sources but never counted in the credibility score.
 
 ## Stack
 

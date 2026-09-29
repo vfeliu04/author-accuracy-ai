@@ -17,7 +17,7 @@ The evidence locator is phrased by the source's **type** (`_evidence_locator`), 
 | `pdf` | `(source 'World Hunger 2025' p.3)`; no locator when the chunk has no page |
 | `web` | `(source 'Drinking-water' § Access to services)` — the heading the quoted text sits under; no locator when it has none |
 
-The code also phrases `youtube` evidence by start time (`at 12:34`, or `at 1:02:03` past an hour) and `image` evidence as `, image`; no upload creates either type.
+The code also phrases `youtube` evidence by start time (`at 12:34`, or `at 1:02:03` past an hour) and `image` evidence as `, image`; no upload creates `youtube` evidence yet.
 
 The system prompt (`CHAT_SYSTEM`) tells the model to answer **only** from this block, to say plainly when the analysis does not cover something, and never to invent claims, verdicts, or sources.
 

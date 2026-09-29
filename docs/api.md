@@ -29,6 +29,7 @@ curl -H "X-API-Key: $AUTHORAI_API_KEY" http://localhost:8000/api/runs
 | Whole request (`Content-Length`) | 220,000,000 bytes (`max_request_bytes`) | In the middleware, before the body is read → 413 |
 | Per uploaded file | 50,000,000 bytes (`max_upload_bytes`) | In `POST /api/runs` and `POST /api/references/scan`, from the spooled part's size → 413 |
 | Sources per run, files and links together | 20 (`max_source_files`) | In `POST /api/runs` → 400 |
+| Pixels per image source | 50,000,000 (`ingest.IMAGE_MAX_PIXELS`) | In `POST /api/runs`, read from the image's header without decoding it → 400 |
 | Link length | 2048 characters, as given and once encoded | In `POST /api/runs` → 400 |
 | Run title | 200 characters | In `POST /api/runs` → 400 |
 | Pages read by the reference scan | The last 600 (`REFERENCE_MAX_PAGES` in `references.py`) | In `POST /api/references/scan`; earlier pages are not read |
@@ -54,7 +55,7 @@ All errors are JSON with a `detail` key.
 | 401 | Middleware (missing/wrong/unconfigured key) | `{"detail": "Invalid or missing API key"}` |
 | 413 | Middleware (`Content-Length` over cap) | `{"detail": "Request body exceeds the size limit"}` |
 | 413 | Upload validation (one file over cap) | `{"detail": "'<name>' exceeds the <n> byte per-file limit"}` — `POST /api/runs` and `POST /api/references/scan` alike |
-| 400 | Upload validation | `detail` is one of `'<name>' is not a .pdf file` / `'<name>' is not PDF content` / `at least one source (a PDF file or a web link) is required` / `too many sources (N > 20)` / `not a usable link: <reason>` / `'<link>': YouTube links are not supported yet` / `'<link>' was added twice` / `title is limited to 200 characters` |
+| 400 | Upload validation | `detail` is one of `'<name>' is not a .pdf file` / `'<name>' is not PDF content` / `'<name>' is not a PDF or a PNG, JPEG or WebP image` / `'<name>' is a HEIC photo; export it as JPEG` / `'<name>' is not a PNG, JPEG or WebP image` / `'<name>' is animated; only still images can be checked` / `'<name>' is <width>×<height> pixels; images up to 50,000,000 pixels are accepted` / `'<name>' is too large to open safely; images up to 50,000,000 pixels are accepted` / `at least one source (a PDF, an image or a web link) is required` / `too many sources (N > 20)` / `not a usable link: <reason>` / `'<link>': YouTube links are not supported yet` / `'<link>' was added twice` / `title is limited to 200 characters` |
 | 400 | Reference scan | `'<name>' is not a .pdf file` / `'<name>' is not PDF content` as above, or `'<name>': could not read the PDF (<reason>)` when the file passes the magic check but cannot be opened, `'<name>': could not read the PDF: it was too costly to read (<why>)` when the read passed its time, CPU or memory budget, or `'<name>': could not read the PDF: <refusal>` when its page tree is refused before it is flattened (a declared page count over 10,000, more than 10,000 nodes, or a node reached twice) |
 | 404 | Route handlers | `{"detail": "Unknown run '<id>'"}` etc. (exact strings per endpoint below) |
 | 409 | Chat on an unfinished run | `{"detail": "The run is not scored yet — chat is available once it is DONE"}` |
@@ -150,7 +151,7 @@ Multipart form:
 | Field | Type | Rules |
 |---|---|---|
 | `report` | one file | Required. `.pdf` extension, `%PDF-` magic bytes, ≤ `max_upload_bytes` |
-| `sources` | list of files | Optional. Same per-file rules |
+| `sources` | list of files | Optional. Each a PDF under the report's rules, or an image: a `.png`, `.jpg`, `.jpeg` or `.webp` name holding still PNG, JPEG or WebP bytes of at most 50,000,000 pixels, ≤ `max_upload_bytes`. The report itself must be a PDF |
 | `source_urls` | text, one part per link | Optional. Each an `http` or `https` link (rules below) |
 | `title` | text | Optional display title for the run, at most 200 characters; whitespace-only or absent falls back to the report filename stem |
 
@@ -158,7 +159,7 @@ At least one source is required — a file or a link — and files and links tog
 
 Each link is checked for syntax only; the request makes no DNS lookup and no connection. Surrounding whitespace is trimmed; the scheme must be `http` or `https`; the host must be a hostname or an IPv6 literal without a zone ID; the port must be valid; the link must not carry a username or password, and must be at most 2048 characters as given and once encoded. A failure is `400 not a usable link: <reason>`, where the reason quotes the link with any credentials removed (for example `Source URL 'ftp://example.org/file' must start with http:// or https://`). The link is then normalized — the `#fragment` dropped, scheme and host lowercased, the host IDNA-encoded, the path percent-encoded — and two links that normalize to the same string are refused (`'<link>' was added twice`), never merged. Links to `youtube.com`, `youtu.be`, or `youtube-nocookie.com`, bare or on `www.`, `m.`, or `music.`, are refused with `'<link>': YouTube links are not supported yet`. Only the link itself is checked against these hosts: a link that redirects to one is fetched like any other page.
 
-Every file (extension, size, magic bytes — without reading it into memory) and every link is validated before any file is written. Files are stored under `uploads_dir` with server-generated names; the client filename is kept only as display metadata and never touches a path. A link is recorded as a `SOURCE` upload with `source_type` `web`, the normalized link as its `url` and `file_name`, and the path its page will be stored at. The run, its upload rows (the report, then the files, then the links, each in request order), and a `full_pipeline` job commit in **one transaction** — a failure anywhere deletes the written files and leaves no rows.
+Every file (extension, size, magic bytes — without reading it into memory) and every link is validated before any file is written. An image is checked from its header alone: Pillow may open it only as PNG, JPEG or WebP, it must not be animated (a phone photo that carries a depth map or preview, a multi-picture JPEG, is one photo and passes), and its pixel count is read before any pixel is decoded — a byte cap cannot bound it, since a 72-megapixel PNG of one colour is about 70 KB. A truncated image passes this check and fails the run's ingest step, naming the file (`ValueError: '<name>' could not be read as an image: …`). Files are stored under `uploads_dir` with server-generated names; the client filename is kept only as display metadata and never touches a path. An image is stored under the suffix its **bytes** proved (`.png`, `.jpg`, `.webp`), whatever its name says, with `source_type` `image`; the original is kept byte for byte. A link is recorded as a `SOURCE` upload with `source_type` `web`, the normalized link as its `url` and `file_name`, and the path its page will be stored at. The run, its upload rows (the report, then the files, then the links, each in request order), and a `full_pipeline` job commit in **one transaction** — a failure anywhere deletes the written files and leaves no rows.
 
 Response: `{"run_id": "<hex>", "job_id": "<hex>"}`. The job starts `QUEUED`; a single worker thread picks it up (poll interval `job_poll_seconds`). Poll `GET /api/runs/{run_id}` for progress.
 
@@ -298,8 +299,9 @@ Streams the stored file for a document (the report or a source) as `Content-Disp
 |---|---|---|
 | `pdf` | The PDF — uploaded, or fetched from a link | `application/pdf` |
 | `web` | The page's stored snapshot | `application/json` |
+| `image` | The uploaded image, as uploaded | `image/png`, `image/jpeg` or `image/webp`, by the stored suffix |
 
-(The endpoint also maps `image` to `image/png` or `image/jpeg` by file extension and `youtube` to `application/json`; no upload creates either type.)
+(The endpoint also maps `youtube` to `application/json`; no upload creates that type yet.) Every file is served with `X-Content-Type-Options: nosniff`: its type is the one its stored suffix names, which for an image its bytes decided, and a browser must not guess another.
 
 A snapshot is `{"schema": 1, "document": {"title", "sections": [{"title", "page", "text"}]}, "provenance": {...}}`: the page's readable text as sections — Markdown from trafilatura's writer with emphasis removed (list items as `- ` lines, tables as pipe rows), and `page` always `null` — plus where it came from. `provenance` carries `url` (the link as normalized at upload), `final_url` (after redirects), `fetched_at`, `content_type`, and the page's declared `title`, `authors`, `publisher`, `publication_date`, `doi`, and `scholarly` (whether the page carries `citation_*` tags). See [architecture.md](architecture.md#links-in-the-ingest-step-jobspy) for how it is produced.
 

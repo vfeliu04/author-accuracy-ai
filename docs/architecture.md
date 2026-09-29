@@ -69,14 +69,14 @@ One SQLite file (`AUTHORAI_DB_PATH`, default `data/authorai.db`) holds everythin
 | `chunks` | Retrieval units: `run_id`, `doc_id`, page (the PDF locator), section (its heading — the web-page locator), kind (`text`/`table`/`figure`), text, `figure_id`, `start_seconds`/`end_seconds` (a time locator; NULL on PDF and web-page chunks) |
 | `chunks_fts` | FTS5 index over chunk text (external-content table, trigger-synced) |
 | `chunks_vec` | sqlite-vec `vec0` index: `run_id` **and** `doc_kind` are PARTITION KEYs |
-| `figures` | Extracted figure PNGs: image path, caption, LLM description |
+| `figures` | Figure images — a PDF's figures as PNG, an uploaded image's bounded copy as PNG or JPEG: image path, caption, LLM description |
 | `claims` | Extracted claims: text, value, unit, year, subject, **`stance`** (`asserted`/`disavowed`), `extraction_prompt_hash` |
 | `verdicts` | One per claim (`claim_id UNIQUE`, `ON DELETE CASCADE`): verdict, `raw_verdict`, quote, `quote_verified`, `quoted_chunk_id`, evidence chunk ids, `year_flag`, rationale, model, `prompt_hash` |
 | `run_scores` | The run's three scores as JSON (accuracy, credibility, validity) |
 | `source_credibility` | Per-source metadata, component scores, total, tier |
 | `jobs` | Pipeline jobs: status, payload (upload ids), progress JSON, error |
 
-Migration 12 added `uploads.source_type` (`NOT NULL DEFAULT 'pdf'`, which describes every earlier row truthfully), `uploads.url`, and `chunks.start_seconds`/`end_seconds`. The source-type vocabulary is `pdf`, `web`, `image`, `youtube`, checked in code by every writer (`check_source_type`) rather than by an SQL CHECK, which SQLite could never widen later. Uploads and link fetches create only `pdf` and `web` rows.
+Migration 12 added `uploads.source_type` (`NOT NULL DEFAULT 'pdf'`, which describes every earlier row truthfully), `uploads.url`, and `chunks.start_seconds`/`end_seconds`. The source-type vocabulary is `pdf`, `web`, `image`, `youtube`, checked in code by every writer (`check_source_type`) rather than by an SQL CHECK, which SQLite could never widen later. An uploaded file is `pdf` or `image` (by its name, then its bytes), a link `web` (or `pdf`, when the link serves a PDF).
 
 Index-invariants enforced in SQL:
 
@@ -99,12 +99,13 @@ Every document becomes a `ParsedDocument` (sections, tables, figures) and is wri
 
 - **PDFs** — `parse_pdf` is the only function that touches Docling (digital PDFs only — `do_ocr=False` is a deliberate flag, not a gap; `images_scale=2.0`, picture images generated). It yields sections, tables (exported to Markdown + caption), and figures (PIL images + caption).
 - **Web pages** — `load_snapshot` reads back the sections `extract_web` produced when the page was fetched ([below](#web-pages-webpy)). A page yields sections only: its tables stay inline in the section text as Markdown, and it has no figures.
+- **Images** — `parse_image` makes an uploaded image a document of one figure with no page, captioned with the file's stem. It opens the file through `open_image_source`, the same gate the upload passed (Pillow may open it only as PNG, JPEG or WebP; not animated; at most 50,000,000 pixels, from the header), then `model_copy` makes the copy the models are shown, sized to Claude's standard vision tier (at most 1568 px on the long edge and 1.15 MP — where the caption model reads, and what the API would downscale to anyway): a larger image is reduced, and a smaller one enlarged, at most twice, since at its own 1024x390 the caption model misread two small rotated values of a real chart in every run and enlarged read all 28 (`PR_C_MEASURE` in the project folder); it is turned upright by its EXIF orientation, alpha laid on white, 16-bit grey scaled rather than clipped, 8-bit RGB with no metadata (nothing from the camera, GPS included, leaves with it), kept as PNG unless JPEG (quality 90, 4:4:4) is at least a third smaller — a chart stays lossless (enlarged, the real one's JPEG saves only a tenth), a photo is compressed (its PNG is about three times its JPEG), and even pure noise stays near 1 MB, which matters because every claim that retrieves the image carries this copy into the verify batch (256 MB per batch). The caption model then **transcribes** it (`IMAGE_SOURCE_PROMPT`: every legible title, label, legend entry, data label and table row exactly as printed, each value on one line with its category and its series or year — the quotable shape — then a 2-3-sentence description that names no subject, unit, place or source the image does not print; 4,096 output tokens, and a reading cut off at that budget is refused rather than indexed): a verdict may only quote the evidence text, so for an image the reading has to carry its words and numbers, not just its gist. Measured on three real charts, five calls each: every printed value read and paired with its label in every run; the earlier wording listed a rotated chart's values apart from their labels, and named an untitled chart "water stress" in every run. The uploaded original is never rewritten; it is what the file endpoint serves. A truncated or corrupt image is found only when it is decoded, and fails the ingest naming the file.
 
 Downstream:
 
 - **Text** chunks: paragraphs packed greedily to 1200 chars with 200-char overlap; a chunk never splices non-adjacent passages (**document-order invariant** — chunk text is quoted as evidence downstream). A chunk keeps its section's page and heading; a web-page chunk has no page, so its heading (`chunks.section`) is its locator.
 - **Table** chunks: caption + Markdown, capped at 4000 chars.
-- **Figure** chunks: caption plus an LLM-written description (`claude-haiku-4-5`), baked into the chunk text *before* embedding — chunk text is immutable, so this is the only moment it can happen. The PNG is saved under `figures_dir/<run_id>/<doc_id>/`.
+- **Figure** chunks: caption plus an LLM-written description (`claude-haiku-4-5`; for an uploaded image, its transcription), baked into the chunk text *before* embedding — chunk text is immutable, so this is the only moment it can happen. The image is saved under `figures_dir/<run_id>/<doc_id>/` through `encode_image`, the one encoder (a PDF figure's PNG is byte for byte what it always was). The verdict prompt attaches it with the media type its bytes prove (`llm._image_block`: PNG or JPEG, anything else raises).
 
 All failure-prone external work (parsing, figure descriptions, the embedding call) happens **before** any database or filesystem write, so a failed ingest leaves no half-ingested document. An empty parse raises instead of indexing an empty document.
 
@@ -202,7 +203,7 @@ All Anthropic traffic goes through one client. It refuses to construct without `
 | --- | --- |
 | `parse()` | `messages.parse()` structured outputs; `max_tokens=16000` (Opus thinking shares the budget; 16k is the ceiling under the SDK's non-streaming timeout); optional image blocks |
 | `parse_batch()` | Batch API at `max_tokens=32000`; **all-or-nothing** — a failed item gets one logged sync retry, and anything still failing raises with nothing stored (partial results would silently change score denominators). The batch id is logged at creation so an interrupt never orphans a paid batch |
-| `describe_image()` | Figure captions (vision) |
+| `describe_image()` | Figure captions (vision), and an uploaded image's transcription; a reply cut off at `max_tokens` raises |
 | `chat()` | System sent as a list of blocks so the static per-run context carries `cache_control` (prompt caching); thinking disabled |
 
 `prompt_fingerprint()` produces the canonical hash of a **prompt contract**: the system prompt, a prompt *rendered* from frozen synthetic inputs (so builder formatting changes move the hash), and the output model's field descriptions (which are prompt text under structured outputs). Claims are stamped with `EXTRACTION_PROMPT_HASH` and verdicts with `VERDICT_PROMPT_HASH:k=N`; the eval commands and `score_run` refuse rows whose stamp differs from the current prompt (stale-guard; `--allow-stale` overrides).
