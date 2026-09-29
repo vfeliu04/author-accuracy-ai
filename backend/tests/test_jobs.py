@@ -1892,3 +1892,106 @@ def test_a_page_whose_header_charset_is_no_text_encoding_fails_naming_the_link(
     with pytest.raises(ValueError, match="^https://www.salud.example.gob/agua is not valid UTF-8"):
         step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
     assert list(planned.parent.iterdir()) == []
+
+
+# ---- Images as sources -------------------------------------------------------
+
+REAL_CHART = Path(__file__).parent / "fixtures" / "images" / "stunting_chart.png"
+
+
+def _image_source(conn, tmp_path, *, data=None, name="stunting chart.png", content_hash="1a9e"):
+    """An image upload as the API records it: the original under a generated
+    name with the suffix its bytes proved, source_type image."""
+    run_id = dbmod.create_run(conn)
+    path = tmp_path / f"{dbmod.new_id()}.png"
+    path.write_bytes(REAL_CHART.read_bytes() if data is None else data)
+    upload_id = dbmod.add_upload(conn, "SOURCE", name, str(path), content_hash, source_type="image")
+    return run_id, upload_id, path
+
+
+def _image_context(conn, tmp_path, llm):
+    """A real pipeline context with fake providers. The embedder carries the
+    configured model's name, as the real one does: the dedup donor filter
+    matches documents on it."""
+    context = PipelineContext(conn, _dedup_settings(tmp_path))
+    context._llm = llm
+    context._embedder = FakeEmbedder(dim=DIM)
+    context._embedder.model = context.settings.embedding_model
+    return context
+
+
+def test_an_image_upload_is_read_as_an_image_and_never_reaches_docling(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+    from authorai.ingest import IMAGE_DESCRIPTION_MAX_TOKENS, IMAGE_SOURCE_PROMPT
+    from tests.conftest import FakeLLM
+
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("sent to Docling"))
+    run_id, upload_id, _path = _image_source(conn, tmp_path)
+    llm = FakeLLM(image_description="Text in the image:\nBurundi: 55.3")
+    context = _image_context(conn, tmp_path, llm)
+
+    assert _reconcile_upload(context, run_id, upload_id) is False
+
+    [request] = llm.image_requests
+    assert request["prompt"] == IMAGE_SOURCE_PROMPT
+    assert request["max_tokens"] == IMAGE_DESCRIPTION_MAX_TOKENS
+    assert request["model"] == context.settings.caption_model
+    document = conn.execute(
+        "SELECT * FROM documents WHERE run_id = ? AND upload_id = ?", (run_id, upload_id)
+    ).fetchone()
+    assert document["title"] == "stunting chart"
+    [chunk] = conn.execute("SELECT * FROM chunks WHERE doc_id = ?", (document["id"],)).fetchall()
+    assert chunk["kind"] == "figure"
+    assert chunk["text"] == "stunting chart\n\nText in the image:\nBurundi: 55.3"
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (document["id"],)).fetchone()
+    assert Path(figure["image_path"]).parent == tmp_path / "figures" / run_id / document["id"]
+
+
+def test_an_unreadable_image_fails_the_ingest_naming_the_file(conn, tmp_path):
+    from tests.conftest import FakeLLM
+
+    data = REAL_CHART.read_bytes()
+    run_id, upload_id, _path = _image_source(
+        conn, tmp_path, data=data[: len(data) // 2], name="cut.png"
+    )
+    llm = FakeLLM()
+    with pytest.raises(ValueError, match="^'cut.png' could not be read as an image"):
+        _reconcile_upload(_image_context(conn, tmp_path, llm), run_id, upload_id)
+    assert llm.image_calls == 0
+    assert conn.execute("SELECT count(*) FROM documents").fetchone()[0] == 0
+
+
+def test_the_same_image_again_is_reused_without_reading_it_twice(conn, tmp_path, monkeypatch):
+    from tests.conftest import FakeLLM
+
+    first_run, first_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
+    assert (
+        _reconcile_upload(_image_context(conn, tmp_path, FakeLLM()), first_run, first_upload)
+        is False
+    )
+    first_figure = conn.execute("SELECT * FROM figures WHERE run_id = ?", (first_run,)).fetchone()
+
+    poison_providers(monkeypatch)
+    second_run, second_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
+    context = PipelineContext(conn, _dedup_settings(tmp_path))
+    assert _reconcile_upload(context, second_run, second_upload) is True
+
+    copy = conn.execute("SELECT * FROM figures WHERE run_id = ?", (second_run,)).fetchone()
+    assert copy["description"] == first_figure["description"]
+    assert Path(copy["image_path"]).name == Path(first_figure["image_path"]).name
+    assert Path(copy["image_path"]).read_bytes() == Path(first_figure["image_path"]).read_bytes()
+
+
+def test_deleting_a_run_removes_the_original_image_and_its_copy(conn, tmp_path):
+    from tests.conftest import FakeLLM
+
+    run_id, upload_id, original = _image_source(conn, tmp_path)
+    settings = _dedup_settings(tmp_path)
+    assert _reconcile_upload(_image_context(conn, tmp_path, FakeLLM()), run_id, upload_id) is False
+    copy = Path(conn.execute("SELECT image_path FROM figures").fetchone()["image_path"])
+    assert original.exists() and copy.exists()
+
+    _api_style_delete(conn, settings, run_id)
+
+    assert not original.exists()
+    assert not copy.exists()

@@ -36,6 +36,9 @@ from authorai.embeddings import OpenAIEmbedder
 from authorai.fetch import FetchedResponse, _where, fetch_url
 from authorai.ingest import (
     FIGURE_DESCRIPTION_PROMPT,
+    IMAGE_DESCRIPTION_MAX_TOKENS,
+    IMAGE_SOURCE_PROMPT,
+    ingest_image,
     ingest_pdf,
     ingest_snapshot,
     load_snapshot,
@@ -245,6 +248,27 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
 
     llm = context.llm
     caption_model = settings.caption_model
+
+    if upload["source_type"] == "image":
+        # The image IS the source: its reading is its only quotable text, so it
+        # is transcribed, not just described (never sent to Docling).
+        ingest_image(
+            conn,
+            context.embedder,
+            run_id,
+            Path(upload["path"]),
+            name=upload["file_name"],
+            kind=upload["kind"],
+            figures_dir=settings.figures_dir,
+            upload_id=upload_id,
+            describe=lambda image: llm.describe_image(
+                model=caption_model,
+                image=image,
+                prompt=IMAGE_SOURCE_PROMPT,
+                max_tokens=IMAGE_DESCRIPTION_MAX_TOKENS,
+            ),
+        )
+        return False
 
     def describe(image):
         return llm.describe_image(

@@ -139,6 +139,7 @@ def poison_providers(monkeypatch):
     from authorai import jobs as jobsmod
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("re-ingested"))
+    monkeypatch.setattr(jobsmod, "ingest_image", lambda *a, **k: pytest.fail("re-read an image"))
     monkeypatch.setattr(
         jobsmod, "ingest_snapshot", lambda *a, **k: pytest.fail("re-ingested a stored page")
     )
@@ -177,6 +178,7 @@ class FakeLLM:
         self._chat_answer = chat_answer
         self.parse_calls: list[dict] = []
         self.image_calls: int = 0
+        self.image_requests: list[dict] = []
         self.chat_calls: list[dict] = []
 
     def parse(
@@ -234,6 +236,9 @@ class FakeLLM:
 
     def describe_image(self, *, model, image, prompt, max_tokens=512):
         self.image_calls += 1
+        self.image_requests.append(
+            {"model": model, "size": image.size, "prompt": prompt, "max_tokens": max_tokens}
+        )
         return self._image_description
 
     def chat(self, *, model, system_blocks, messages, max_tokens=2048):
