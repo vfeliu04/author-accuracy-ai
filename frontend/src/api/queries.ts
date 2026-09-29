@@ -16,8 +16,8 @@ import {
   UnreadablePageError,
   createRun,
   deleteRun,
+  fetchDocumentBlob,
   fetchDocumentJson,
-  fetchPdfBlob,
   getReport,
   getRun,
   listRuns,
@@ -33,7 +33,7 @@ export const queryKeys = {
   runs: ["runs"] as const,
   run: (runId: string) => ["run", runId] as const,
   report: (runId: string) => ["report", runId] as const,
-  pdf: (runId?: string, docId?: string | null) => ["pdf", runId, docId] as const,
+  documentFile: (runId?: string, docId?: string | null) => ["file", runId, docId] as const,
   snapshot: (runId?: string, docId?: string | null) => ["snapshot", runId, docId] as const,
   // A file's identity as the browser reports it; File objects themselves are
   // not comparable across renders.
@@ -118,7 +118,7 @@ export function useDeleteRun() {
     onSuccess: (_data, runId) => {
       client.removeQueries({ queryKey: queryKeys.run(runId) });
       client.removeQueries({ queryKey: queryKeys.report(runId) });
-      client.removeQueries({ queryKey: ["pdf", runId] });
+      client.removeQueries({ queryKey: ["file", runId] });
       client.removeQueries({ queryKey: ["snapshot", runId] });
       client.invalidateQueries({ queryKey: queryKeys.runs });
     }
@@ -156,14 +156,15 @@ export function useReferenceScan(report: File | null) {
   });
 }
 
-// Fetches a run's PDF as an authenticated blob (an iframe can't send the API
-// key) and hands back an object URL, revoking the previous one on change.
-export function usePdfBlob(runId?: string, docId?: string | null) {
+// Fetches a run's stored PDF or image as an authenticated blob (an iframe or
+// img can't send the API key) and hands back an object URL, revoking the
+// previous one on change.
+export function useDocumentBlob(runId?: string, docId?: string | null) {
   const query = useQuery({
-    queryKey: queryKeys.pdf(runId, docId),
-    queryFn: () => fetchPdfBlob(runId as string, docId as string),
+    queryKey: queryKeys.documentFile(runId, docId),
+    queryFn: () => fetchDocumentBlob(runId as string, docId as string),
     enabled: Boolean(runId && docId),
-    staleTime: Infinity, // a run's stored PDF never changes
+    staleTime: Infinity, // a run's stored file never changes
     gcTime: Infinity
   });
 

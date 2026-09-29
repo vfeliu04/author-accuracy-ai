@@ -36,10 +36,16 @@ export function isScored(source: ReportSource): source is ReportSource & { total
   return source.scorable && source.total !== null;
 }
 
-function SourceGlyph({ type }: { type: SourceType }) {
+export function SourceGlyph({
+  type,
+  className = "src-row__icon"
+}: {
+  type: SourceType;
+  className?: string;
+}) {
   const kind = sourceKind(type);
   return (
-    <span className="src-row__icon" role="img" aria-label={kind.label}>
+    <span className={className} role="img" aria-label={kind.label}>
       {kind.glyph}
     </span>
   );

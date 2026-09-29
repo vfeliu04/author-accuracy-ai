@@ -69,17 +69,19 @@ describe("useDeleteRun", () => {
     vi.spyOn(v2, "deleteRun").mockResolvedValue(undefined);
     vi.spyOn(v2, "listRuns").mockResolvedValue([]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.pdf("r1", "d1"), new Blob(["%PDF"]));
+    client.setQueryData(queryKeys.documentFile("r1", "d1"), new Blob(["%PDF"]));
     client.setQueryData(queryKeys.snapshot("r1", "d2"), { schema: 1 });
     client.setQueryData(queryKeys.snapshot("r2", "d3"), { schema: 1 });
+    client.setQueryData(queryKeys.documentFile("r2", "d4"), new Blob(["png"]));
 
     const { result } = renderHook(() => useDeleteRun(), { wrapper: makeWrapper(client) });
     await act(() => result.current.mutateAsync("r1"));
 
-    expect(client.getQueryData(queryKeys.pdf("r1", "d1"))).toBeUndefined();
+    expect(client.getQueryData(queryKeys.documentFile("r1", "d1"))).toBeUndefined();
     expect(client.getQueryData(queryKeys.snapshot("r1", "d2"))).toBeUndefined();
-    // Another run's pages stay cached.
+    // Another run's pages and files stay cached.
     expect(client.getQueryData(queryKeys.snapshot("r2", "d3"))).toEqual({ schema: 1 });
+    expect(client.getQueryData(queryKeys.documentFile("r2", "d4"))).toBeInstanceOf(Blob);
   });
 });
 

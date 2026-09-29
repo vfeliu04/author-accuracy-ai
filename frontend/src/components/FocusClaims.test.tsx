@@ -165,7 +165,7 @@ function mockRun() {
   vi.spyOn(v2, "getRun").mockResolvedValue(doneDetail);
   vi.spyOn(v2, "getReport").mockResolvedValue(report);
   return vi
-    .spyOn(v2, "fetchPdfBlob")
+    .spyOn(v2, "fetchDocumentBlob")
     .mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
 }
 

@@ -1,11 +1,13 @@
 import type { EvidenceSource } from "../api/types";
 import { safeHttpUrl } from "../lib/links";
+import ImagePane from "./ImagePane";
 import PdfPane from "./PdfPane";
 import ReadablePane from "./ReadablePane";
 
 // The evidence side of a claim, chosen by what the source IS: a PDF opens at
-// its cited page, a web page opens as readable text with the quote marked,
-// and a source without a preview offers its original instead.
+// its cited page, a web page opens as readable text with the quote marked, an
+// uploaded image is shown whole, and a source without a preview offers its
+// original instead.
 export default function SourcePane({
   runId,
   source,
@@ -35,9 +37,15 @@ export default function SourcePane({
       </div>
     );
   }
+  if (source.source_type === "image") {
+    return (
+      <div className="pdf-pane__frame">
+        <ImagePane runId={runId} docId={source.doc_id} title={source.title} />
+      </div>
+    );
+  }
   const href = safeHttpUrl(source.url);
-  const noun =
-    source.source_type === "youtube" ? "video" : source.source_type === "image" ? "image" : "source";
+  const noun = source.source_type === "youtube" ? "video" : "source";
   return (
     <div className="pdf-pane__empty">
       <div className="no-preview">

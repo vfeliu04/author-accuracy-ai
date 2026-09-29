@@ -6,6 +6,7 @@ import type { LookupStatus, ReferenceScan, ScannedReference } from "../api/types
 import { formatBytes, plural } from "../lib/format";
 import { checkLink, linkHost, linkHostPath } from "../lib/links";
 import { alreadyAdded, stem } from "../lib/references";
+import { SourceGlyph } from "./SourcesPanel";
 
 // Client-side mirrors of the server caps — fail fast in the dialog instead
 // of after a full upload (the server remains the authority). Files and links
@@ -19,8 +20,22 @@ const MAX_TOTAL_BYTES = 200_000_000;
 // dialog's own bound, whatever the server sends.
 const NAME_MAX_CHARS = 300;
 
-function isPdf(file: File): boolean {
-  return file.name.toLowerCase().endsWith(".pdf");
+// What a picked file is, by its name, as the server decides it (the server
+// then reads the bytes). The report must be a PDF; an image is only a source.
+const IMAGE_NAMES = [".png", ".jpg", ".jpeg", ".webp"];
+const HEIC_NAMES = [".heic", ".heif"];
+const FILE_TYPES = ".pdf,application/pdf,.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp";
+
+function fileKind(file: File): "pdf" | "image" | null {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".pdf")) return "pdf";
+  return IMAGE_NAMES.some((suffix) => name.endsWith(suffix)) ? "image" : null;
+}
+
+function refusedFile(file: File): string {
+  return HEIC_NAMES.some((suffix) => file.name.toLowerCase().endsWith(suffix))
+    ? `“${file.name}” is a HEIC photo — export it as JPEG, then add it.`
+    : `Only PDFs and PNG, JPEG or WebP images can be added — “${file.name}” was not added.`;
 }
 
 // The server remains the authority: a link the dialog's checks let through can
@@ -171,23 +186,22 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const addFiles = (list: FileList | File[]) => {
     setError(null);
     const incoming = Array.from(list);
-    const nonPdf = incoming.find((file) => !isPdf(file));
-    const oversize = incoming.find((file) => isPdf(file) && file.size > MAX_FILE_BYTES);
-    if (nonPdf) {
-      setError(`Only PDF files can be verified — “${nonPdf.name}” was not added.`);
+    const unsupported = incoming.find((file) => fileKind(file) === null);
+    const oversize = incoming.find((file) => fileKind(file) && file.size > MAX_FILE_BYTES);
+    if (unsupported) {
+      setError(refusedFile(unsupported));
     } else if (oversize) {
       setError(`“${oversize.name}” is over the ${formatBytes(MAX_FILE_BYTES)} per-file limit.`);
     }
-    const accepted = incoming.filter((file) => isPdf(file) && file.size <= MAX_FILE_BYTES);
+    const accepted = incoming.filter((file) => fileKind(file) && file.size <= MAX_FILE_BYTES);
     if (accepted.length === 0) return;
-    if (report === null) {
-      const [first, ...rest] = accepted;
+    // The first PDF becomes the report while there is none; an image never does.
+    const first = report === null ? accepted.find((file) => fileKind(file) === "pdf") : undefined;
+    if (first) {
       setReport(first);
-      setSources([...sources, ...rest]);
       if (!nameTouched) setName(stem(first.name));
-    } else {
-      setSources([...sources, ...accepted]);
     }
+    setSources([...sources, ...accepted.filter((file) => file !== first)]);
   };
 
   // Adds the link in the box to `base` (the links held, or those plus what
@@ -417,7 +431,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               <span className="file-row__icon" aria-hidden>
                 📄
               </span>
-              The report PDF — the first file you add lands here
+              The report PDF — the first PDF you add lands here
             </button>
           )}
 
@@ -431,14 +445,12 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
               <span className="file-row__icon" aria-hidden>
                 📘
               </span>
-              The source PDFs the report will be checked against — or add links below
+              The source PDFs or images the report will be checked against — or add links below
             </button>
           ) : null}
           {sources.map((file, index) => (
             <div className="file-row" key={`${file.name}-${index}`}>
-              <span className="file-row__icon" aria-hidden>
-                📘
-              </span>
+              <SourceGlyph type={fileKind(file) ?? "pdf"} className="file-row__icon" />
               <span className="file-row__name">{file.name}</span>
               <span className="file-row__size">{formatBytes(file.size)}</span>
               <button
@@ -483,18 +495,18 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           >
             {report === null ? (
               <>
-                Drop the report PDF here, then its sources — or <b>browse</b>
+                Drop the report PDF here, then its sources (PDFs or images) — or <b>browse</b>
               </>
             ) : (
               <>
-                Drag source PDFs here or <b>browse</b>
+                Drag source PDFs or images here or <b>browse</b>
               </>
             )}
           </button>
           <input
             ref={inputRef}
             type="file"
-            accept=".pdf,application/pdf"
+            accept={FILE_TYPES}
             multiple
             hidden
             onChange={(event) => {

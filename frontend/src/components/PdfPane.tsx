@@ -1,4 +1,4 @@
-import { usePdfBlob } from "../api/queries";
+import { useDocumentBlob } from "../api/queries";
 
 // Renders a run's stored PDF in an iframe, deep-linked to a page. The bytes are
 // fetched with the API key as a blob (an iframe can't send headers) and shown
@@ -14,7 +14,7 @@ const PdfPane = ({
   page?: number | null;
   title: string;
 }) => {
-  const { url, isLoading, error } = usePdfBlob(runId, docId ?? undefined);
+  const { url, isLoading, error } = useDocumentBlob(runId, docId ?? undefined);
 
   if (!docId) {
     return <div className="pdf-pane__empty">No document for this pane.</div>;

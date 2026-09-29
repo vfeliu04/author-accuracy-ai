@@ -56,7 +56,7 @@ afterEach(() => vi.restoreAllMocks());
 describe("SourcePane", () => {
   it("shows a PDF source in the PDF viewer at the cited page", async () => {
     const blob = vi
-      .spyOn(v2, "fetchPdfBlob")
+      .spyOn(v2, "fetchDocumentBlob")
       .mockResolvedValue(new Blob(["%PDF"], { type: "application/pdf" }));
     const json = vi.spyOn(v2, "fetchDocumentJson");
     renderPane({ ...pdfSource, page: 4 });
@@ -68,7 +68,7 @@ describe("SourcePane", () => {
 
   it("shows a web source as readable text with the quote marked", async () => {
     const json = vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(page);
-    const blob = vi.spyOn(v2, "fetchPdfBlob");
+    const blob = vi.spyOn(v2, "fetchDocumentBlob");
     const { container } = renderPane(
       { ...pdfSource, source_type: "web", url: "https://example.org/water", section: "Findings" },
       "lack safe water"
@@ -80,21 +80,39 @@ describe("SourcePane", () => {
     expect(screen.queryByTitle("source")).not.toBeInTheDocument();
   });
 
-  it("offers the original of an image instead of a preview", () => {
-    const blob = vi.spyOn(v2, "fetchPdfBlob");
+  it("shows an image source whole, saying what its quotes were checked against", async () => {
+    const blob = vi
+      .spyOn(v2, "fetchDocumentBlob")
+      .mockResolvedValue(new Blob(["png"], { type: "image/png" }));
     const json = vi.spyOn(v2, "fetchDocumentJson");
-    renderPane({ ...pdfSource, source_type: "image", url: "https://example.org/chart.png" });
-    expect(screen.getByText(/preview isn't available for this image yet/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open original ↗" })).toHaveAttribute(
+    renderPane({ ...pdfSource, source_type: "image", title: "stunting chart" });
+    const shown = await screen.findByRole("img", { name: "Source image: stunting chart" });
+    expect(shown).toHaveAttribute("src", "blob:fake");
+    expect(
+      screen.getByText(
+        "Quotes from this image are checked against the model's reading of it, not against the image itself."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open full size ↗" })).toHaveAttribute(
       "href",
-      "https://example.org/chart.png"
+      "blob:fake"
     );
-    expect(blob).not.toHaveBeenCalled();
+    expect(blob).toHaveBeenCalledWith("r", "d");
     expect(json).not.toHaveBeenCalled();
+    expect(screen.queryByTitle("source")).not.toBeInTheDocument(); // no PDF viewer
+  });
+
+  it("says so when an image source cannot be loaded", async () => {
+    vi.spyOn(v2, "fetchDocumentBlob").mockRejectedValue(new Error("Document file is unavailable"));
+    renderPane({ ...pdfSource, source_type: "image" });
+    expect(
+      await screen.findByText("Could not load the image: Document file is unavailable")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 
   it("offers the original of a video instead of a preview", () => {
-    const blob = vi.spyOn(v2, "fetchPdfBlob");
+    const blob = vi.spyOn(v2, "fetchDocumentBlob");
     const json = vi.spyOn(v2, "fetchDocumentJson");
     renderPane({
       ...pdfSource,
@@ -112,13 +130,13 @@ describe("SourcePane", () => {
   });
 
   it("never links an original that isn't an http(s) address", () => {
-    renderPane({ ...pdfSource, source_type: "image", url: "javascript:alert(1)" });
+    renderPane({ ...pdfSource, source_type: "youtube", url: "javascript:alert(1)" });
     expect(screen.getByText(/preview isn't available/)).toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
-  it("shows no link when an image has no original address", () => {
-    renderPane({ ...pdfSource, source_type: "image", url: null });
+  it("shows no link when a video has no original address", () => {
+    renderPane({ ...pdfSource, source_type: "youtube", url: null });
     expect(screen.getByText(/preview isn't available/)).toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });

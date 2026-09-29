@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReferenceScan, ScannedReference } from "../api/types";
@@ -10,6 +10,13 @@ import UploadDialog from "./UploadDialog";
 function pdf(name: string, bytes = 100): File {
   return new File([new Uint8Array(bytes)], name, { type: "application/pdf" });
 }
+
+function image(name: string, type = "image/png"): File {
+  return new File([new Uint8Array(40)], name, { type });
+}
+
+// The row a file is listed in, found by its name.
+const rowOf = (name: string) => screen.getByText(name).closest(".file-row") as HTMLElement;
 
 const noLimits: ReferenceScan["limits"] = {
   text_truncated: false,
@@ -88,15 +95,111 @@ describe("UploadDialog", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("My Study");
   });
 
-  it("rejects non-PDF files with an inline error", async () => {
+  it("rejects a file that is neither a PDF nor an image, naming it", async () => {
     renderDialog();
     fireEvent.change(fileInput(), {
       target: { files: [new File([new Uint8Array(4)], "notes.txt", { type: "text/plain" })] }
     });
     await waitFor(() =>
-      expect(screen.getByText(/Only PDF files can be verified/)).toBeInTheDocument()
+      expect(
+        screen.getByText(
+          "Only PDFs and PNG, JPEG or WebP images can be added — “notes.txt” was not added."
+        )
+      ).toBeInTheDocument()
     );
     expect(screen.queryByText("notes.txt")).not.toBeInTheDocument();
+  });
+
+  it("refuses an SVG but keeps the images and PDFs that came with it", async () => {
+    renderDialog();
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [pdf("report.pdf"), image("chart.png"), image("logo.svg", "image/svg+xml")]
+      }
+    });
+    await waitFor(() => expect(screen.getByText("chart.png")).toBeInTheDocument());
+    expect(screen.getByText(/“logo.svg” was not added/)).toBeInTheDocument();
+    expect(screen.queryByText("logo.svg")).not.toBeInTheDocument();
+  });
+
+  it("explains that a HEIC photo has to be exported as JPEG first", async () => {
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [image("IMG_0042.HEIC", "image/heic")] } });
+    await waitFor(() =>
+      expect(
+        screen.getByText("“IMG_0042.HEIC” is a HEIC photo — export it as JPEG, then add it.")
+      ).toBeInTheDocument()
+    );
+  });
+
+  it("never makes an image the report, even when it comes first", async () => {
+    renderDialog();
+    fireEvent.change(fileInput(), { target: { files: [image("chart.png")] } });
+    await waitFor(() => expect(screen.getByText("chart.png")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /The report PDF — the first PDF you add/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("");
+
+    fireEvent.change(fileInput(), { target: { files: [pdf("Brief.pdf")] } });
+    await waitFor(() => expect(screen.getByText("Brief.pdf")).toBeInTheDocument());
+    expect(rowOf("Brief.pdf")).toHaveClass("file-row--report");
+    expect(rowOf("chart.png")).not.toHaveClass("file-row--report");
+    expect(screen.getByLabelText("Name")).toHaveValue("Brief");
+  });
+
+  it("makes the first PDF the report when images and PDFs arrive together", async () => {
+    renderDialog();
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [image("chart.png"), pdf("report.pdf"), image("photo.jpg", "image/jpeg"), pdf("src.pdf")]
+      }
+    });
+    await waitFor(() => expect(screen.getByText("report.pdf")).toBeInTheDocument());
+    expect(rowOf("report.pdf")).toHaveClass("file-row--report");
+    for (const source of ["chart.png", "photo.jpg", "src.pdf"]) {
+      expect(rowOf(source)).not.toHaveClass("file-row--report");
+    }
+  });
+
+  it("marks each source file as an image or a PDF", async () => {
+    renderDialog();
+    fireEvent.change(fileInput(), {
+      target: { files: [pdf("report.pdf"), image("diagram.WEBP", "image/webp"), pdf("src.pdf")] }
+    });
+    await waitFor(() => expect(screen.getByText("diagram.WEBP")).toBeInTheDocument());
+    expect(within(rowOf("diagram.WEBP")).getByRole("img", { name: "Image" })).toBeInTheDocument();
+    expect(within(rowOf("src.pdf")).getByRole("img", { name: "PDF" })).toBeInTheDocument();
+  });
+
+  it("holds an image to the same per-file limit as a PDF", async () => {
+    renderDialog();
+    const huge = image("scan.png");
+    Object.defineProperty(huge, "size", { value: 60_000_000 });
+    fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), huge] } });
+    await waitFor(() =>
+      expect(screen.getByText(/“scan.png” is over the .* per-file limit/)).toBeInTheDocument()
+    );
+    expect(screen.queryByText("scan.png")).not.toBeInTheDocument();
+  });
+
+  it("lets the file picker offer images as well as PDFs", () => {
+    renderDialog();
+    expect(fileInput().accept.split(",")).toEqual(
+      expect.arrayContaining([".pdf", ".png", ".jpg", ".jpeg", ".webp", "image/png", "image/jpeg", "image/webp"])
+    );
+  });
+
+  it("sends image sources with the PDFs", async () => {
+    const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
+    renderDialog();
+    fireEvent.change(fileInput(), {
+      target: { files: [pdf("report.pdf"), image("chart.png"), pdf("src.pdf")] }
+    });
+    await waitFor(() => expect(verify()).toBeEnabled());
+    fireEvent.click(verify());
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    const [reportArg, sourcesArg] = create.mock.calls[0];
+    expect((reportArg as File).name).toBe("report.pdf");
+    expect((sourcesArg as File[]).map((f) => f.name)).toEqual(["chart.png", "src.pdf"]);
   });
 
   it("disables Verify until a report and at least one source exist, then submits with the title", async () => {

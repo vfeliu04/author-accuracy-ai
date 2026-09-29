@@ -128,9 +128,9 @@ export function documentFileUrl(runId: string, docId: string): string {
   return `${API_BASE_URL}/api/runs/${runId}/documents/${docId}/file`;
 }
 
-// An <iframe> can't send the X-API-Key header, so fetch the PDF as an
-// authenticated blob and hand the caller an object URL to render.
-export async function fetchPdfBlob(runId: string, docId: string): Promise<Blob> {
+// An <iframe> or <img> can't send the X-API-Key header, so a stored PDF or
+// image is fetched as an authenticated blob the caller shows via an object URL.
+export async function fetchDocumentBlob(runId: string, docId: string): Promise<Blob> {
   const response = await fetch(documentFileUrl(runId, docId), { headers: authHeaders() });
   if (!response.ok) {
     await raise(response);
