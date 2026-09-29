@@ -1,17 +1,26 @@
+import io
+import json
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFile
 
 import authorai.ingest as ingest_mod
 from authorai import db as dbmod
 from authorai.embeddings import FakeEmbedder
 from authorai.ingest import (
+    MODEL_IMAGE_MAX_EDGE,
+    MODEL_IMAGE_MAX_PIXELS,
     ParsedDocument,
     ParsedFigure,
     ParsedSection,
     ParsedTable,
+    encode_image,
+    image_suffix,
+    ingest_image,
     ingest_pdf,
+    model_copy,
+    parse_image,
 )
 from authorai.search import keyword_search
 from tests.conftest import DIM
@@ -454,3 +463,340 @@ def test_pdf_document_metadata_keeps_its_exact_shape(conn, tmp_path, monkeypatch
             {"title": "Methods", "page": 2, "text": "Data was collected from national surveys."},
         ]
     }
+
+
+# ---- Images as sources -------------------------------------------------------
+
+# A real bar chart Docling exported from the GHI 2025 report in example_sources
+# (page 19, values printed on the bars): parser output, not a drawn rectangle.
+REAL_CHART = Path(__file__).parent / "fixtures" / "images" / "stunting_chart.png"
+
+
+def _encoded(image, fmt, **options) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, fmt, **options)
+    return buffer.getvalue()
+
+
+def _two_frames(fmt) -> bytes:
+    first, second = Image.new("RGB", (20, 20), "red"), Image.new("RGB", (20, 20), "blue")
+    return _encoded(first, fmt, save_all=True, append_images=[second])
+
+
+def _photo_like(size=(1600, 1200)):
+    noise = Image.effect_noise(size, 40).convert("RGB")
+    return Image.blend(noise, Image.linear_gradient("L").resize(size).convert("RGB"), 0.6)
+
+
+@pytest.fixture(scope="module")
+def bomb_png() -> bytes:
+    """72 megapixels in ~70 KB: the per-file byte cap alone cannot stop it."""
+    return _encoded(Image.new("L", (12000, 6000)), "PNG")
+
+
+@pytest.fixture()
+def no_decoding(monkeypatch):
+    """Any pixel decode is a test failure: the gate must refuse from the header."""
+    monkeypatch.setattr(
+        ImageFile.ImageFile, "load", lambda self: pytest.fail("the gate decoded pixels")
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "suffix"),
+    [
+        (_encoded(Image.new("RGB", (8, 8)), "PNG"), ".png"),
+        (_encoded(Image.new("RGB", (8, 8)), "JPEG"), ".jpg"),
+        (_encoded(Image.new("RGB", (8, 8)), "WEBP"), ".webp"),
+        # A phone photo carrying a depth map or a preview is a multi-picture
+        # JPEG: Pillow reports MPO with several frames — still one photo.
+        (_two_frames("MPO"), ".jpg"),
+    ],
+    ids=["png", "jpeg", "webp", "phone-mpo"],
+)
+def test_an_image_source_is_stored_under_the_suffix_its_bytes_prove(data, suffix, no_decoding):
+    assert image_suffix(io.BytesIO(data)) == suffix
+
+
+@pytest.mark.parametrize(
+    ("data", "reason"),
+    [
+        (b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', "not a PNG"),
+        (_encoded(Image.new("RGB", (8, 8)), "GIF"), "not a PNG"),
+        (b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", "not a PNG"),
+        (b"", "not a PNG"),
+        (b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "not a PNG"),
+        (_two_frames("PNG"), "animated"),
+        (_two_frames("WEBP"), "animated"),
+    ],
+    ids=["svg", "gif", "pdf-bytes", "empty", "png-magic-no-header", "apng", "animated-webp"],
+)
+def test_anything_but_a_still_png_jpeg_or_webp_is_refused(data, reason):
+    handle = io.BytesIO(data)
+    with pytest.raises(ValueError, match=reason):
+        image_suffix(handle)
+    handle.seek(0)  # the upload's own handle is still open for its caller
+
+
+def test_a_bomb_refusal_leaves_the_callers_handle_open(bomb_png):
+    handle = io.BytesIO(bomb_png)
+    with pytest.raises(ValueError, match="pixels"):
+        image_suffix(handle)
+    handle.seek(0)
+
+
+def test_a_decompression_bomb_is_refused_from_its_header_alone(bomb_png, no_decoding):
+    with pytest.raises(ValueError, match=r"12000×6000 pixels; images up to 50,000,000"):
+        image_suffix(io.BytesIO(bomb_png))
+
+
+def test_the_pixel_limit_holds_on_both_sides_of_its_boundary(monkeypatch, no_decoding):
+    monkeypatch.setattr(ingest_mod, "IMAGE_MAX_PIXELS", 100)
+    assert image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 10)), "PNG"))) == ".png"
+    with pytest.raises(ValueError, match="images up to 100 pixels"):
+        image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 11)), "PNG")))
+
+
+def test_pillows_own_bomb_error_reads_as_the_same_refusal(monkeypatch):
+    """Past twice its MAX_IMAGE_PIXELS Pillow raises inside open(); that must
+    read as our refusal, not escape as a stray exception type."""
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
+    with pytest.raises(ValueError, match="too large to open safely"):
+        image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 10)), "PNG")))
+
+
+@pytest.mark.parametrize(
+    "size", [(4000, 1000), (1000, 4000), (3000, 3000), (1600, 1600), (1000, 390), (900, 900)]
+)
+def test_the_model_copy_fits_the_standard_vision_tier_whatever_its_shape(size):
+    copy, _fmt = model_copy(Image.new("RGB", size, "white"))
+    width, height = copy.size
+    assert max(width, height) <= MODEL_IMAGE_MAX_EDGE
+    assert width * height <= MODEL_IMAGE_MAX_PIXELS
+    assert abs(width / height - size[0] / size[1]) < 0.01  # the shape is kept
+    # ...and the budget is used, not shrunk further than a bound requires.
+    assert max(width, height) >= MODEL_IMAGE_MAX_EDGE - 2 or (
+        width * height >= 0.99 * MODEL_IMAGE_MAX_PIXELS
+    )
+
+
+@pytest.mark.parametrize(
+    ("size", "enlarged"),
+    [
+        ((300, 200), (600, 400)),  # twice, the most it is ever enlarged
+        ((20, 20), (40, 40)),
+        # The rotated-text chart the prompt was measured on: its long edge
+        # reaches the tier's before twice its size does.
+        ((1024, 390), (1568, 597)),
+    ],
+)
+def test_a_small_image_is_enlarged_at_most_twice_and_never_past_the_tier(size, enlarged):
+    """Measured (PR_C_MEASURE, 5 runs each): at its own 1024x390 the caption
+    model misread two rotated values of a real chart in every run (12.5 read
+    as 12.3, 8.9 as 8.3); enlarged within the tier it read all 28 in every
+    run. Enlarging adds no information, so it stops at twice the size."""
+    copy, _fmt = model_copy(Image.new("RGB", size, "white"))
+    assert copy.size == enlarged
+
+
+def test_a_rotated_phone_photo_reaches_the_model_upright():
+    stored = Image.new("RGB", (400, 300), "white")
+    ImageDraw.Draw(stored).rectangle([0, 0, 99, 74], fill="red")  # top-left as stored
+    exif = Image.Exif()
+    exif[0x0112] = 6  # "rotate 90° clockwise to display"
+    photo = Image.open(io.BytesIO(_encoded(stored, "JPEG", exif=exif.tobytes(), quality=95)))
+    copy, _fmt = model_copy(photo)
+    assert copy.size == (600, 800)  # upright (and enlarged twice)
+    red, green, _blue = copy.getpixel((copy.width - 10, 10))
+    assert red > 200 and green < 60  # the stored top-left corner is now top-right
+    assert min(copy.getpixel((10, 10))) > 200
+
+
+def test_transparency_is_flattened_onto_white():
+    logo = Image.new("RGBA", (50, 50), (0, 0, 0, 0))
+    ImageDraw.Draw(logo).rectangle([0, 0, 24, 49], fill=(0, 0, 255, 255))
+    copy, _fmt = model_copy(logo)
+    assert (copy.mode, copy.size) == ("RGB", (100, 100))
+    assert copy.getpixel((80, 50)) == (255, 255, 255)
+    assert copy.getpixel((20, 50)) == (0, 0, 255)
+
+
+def test_a_sixteen_bit_greyscale_image_keeps_its_tones():
+    """A plain conversion clips every 16-bit value above 255 to white."""
+    deep = Image.new("I;16", (400, 100))
+    for x in range(400):  # paste() cannot fill a 16-bit image with a number; putpixel can
+        for y in range(100):
+            deep.putpixel((x, y), (0, 16384, 32768, 65535)[x // 100])
+    copy, _fmt = model_copy(Image.open(io.BytesIO(_encoded(deep, "PNG"))))
+    assert copy.size == (800, 200)
+    tones = [copy.getpixel((200 * stripe + 100, 100))[0] for stripe in range(4)]
+    assert tones == pytest.approx([0, 64, 128, 255], abs=1)
+
+
+def test_a_chart_is_kept_lossless_and_a_photo_is_compressed():
+    _chart, chart_fmt = model_copy(Image.open(REAL_CHART))
+    _photo, photo_fmt = model_copy(_photo_like())
+    assert (chart_fmt, photo_fmt) == ("PNG", "JPEG")
+
+
+def test_the_model_copy_stays_near_a_megabyte_even_for_pure_noise():
+    """The verify batch carries a copy per claim that retrieves the image
+    (256 MB per batch): the worst case has to be bounded, not typical."""
+    copy, fmt = model_copy(Image.effect_noise((3000, 2000), 128).convert("RGB"))
+    assert len(encode_image(copy, fmt)) < 1_200_000
+
+
+def test_the_model_copy_carries_no_camera_metadata():
+    exif = Image.Exif()
+    exif[0x010F] = "PhoneMaker"
+    exif[0x8825] = {1: "N", 2: (40.0, 26.0, 0.0)}  # GPS
+    photo = Image.open(
+        io.BytesIO(_encoded(Image.new("RGB", (60, 40)), "JPEG", exif=exif.tobytes()))
+    )
+    assert photo.getexif()  # planted
+    copy, _fmt = model_copy(photo)
+    for fmt in ("PNG", "JPEG"):
+        reread = Image.open(io.BytesIO(encode_image(copy, fmt)))
+        assert not reread.getexif()
+        assert "exif" not in reread.info
+
+
+@pytest.mark.parametrize(
+    ("mode", "fill"), [("RGB", (200, 30, 30)), ("RGBA", (200, 30, 30, 128)), ("L", 128)]
+)
+def test_a_pdf_figure_is_written_byte_for_byte_as_before(tmp_path, mode, fill):
+    figure = Image.new(mode, (64, 48))
+    ImageDraw.Draw(figure).ellipse([4, 4, 40, 40], fill=fill)
+    figure.save(tmp_path / "before.png", format="PNG")  # what ingest_parsed always wrote
+    assert encode_image(figure, "PNG") == (tmp_path / "before.png").read_bytes()
+
+
+def test_parse_image_makes_one_whole_page_figure_named_after_the_file():
+    parsed = parse_image(REAL_CHART, name="Child stunting 2024.png")
+    assert (parsed.title, parsed.sections, parsed.tables) == (None, [], [])
+    [figure] = parsed.figures
+    assert (figure.page, figure.caption, figure.fmt) == (None, "Child stunting 2024", "PNG")
+    assert figure.image.size == (992, 1010)  # enlarged twice to read its small print
+
+
+def test_parse_image_runs_the_upload_gate_again(tmp_path, bomb_png, no_decoding):
+    path = tmp_path / "f00d.png"
+    path.write_bytes(bomb_png)
+    with pytest.raises(ValueError, match=r"^'huge.png' is 12000×6000 pixels"):
+        parse_image(path, name="huge.png")
+
+
+def test_a_truncated_image_fails_loudly_when_it_is_decoded_naming_the_file(tmp_path):
+    data = REAL_CHART.read_bytes()
+    path = tmp_path / "beef.png"
+    path.write_bytes(data[: len(data) // 2])
+    with pytest.raises(ValueError, match=r"^'cut.png' could not be read as an image"):
+        parse_image(path, name="cut.png")
+
+
+def _image_upload(conn, tmp_path, data: bytes, name: str, suffix: str):
+    path = tmp_path / f"{dbmod.new_id()}{suffix}"
+    path.write_bytes(data)
+    run_id = dbmod.create_run(conn)
+    upload_id = dbmod.add_upload(conn, "SOURCE", name, str(path), "h", source_type="image")
+    return run_id, upload_id, path
+
+
+def test_ingest_image_indexes_one_figure_read_by_the_caption_model(conn, tmp_path):
+    original = REAL_CHART.read_bytes()
+    run_id, upload_id, path = _image_upload(conn, tmp_path, original, "stunting chart.png", ".png")
+    reading = "Text in the image:\nBurundi: 55.3\nDescription:\nA bar chart of child stunting."
+    seen = []
+
+    def describe(image):
+        seen.append(image.size)
+        return reading
+
+    doc_id = ingest_image(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        path,
+        name="stunting chart.png",
+        kind="SOURCE",
+        figures_dir=tmp_path / "figures",
+        upload_id=upload_id,
+        describe=describe,
+    )
+
+    assert seen == [(992, 1010)]
+    document = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    assert document["title"] == "stunting chart"
+    assert json.loads(document["metadata"]) == {"sections": []}
+    [chunk] = conn.execute("SELECT * FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
+    assert (chunk["kind"], chunk["page"]) == ("figure", None)
+    assert chunk["text"] == f"stunting chart\n\n{reading}"
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (doc_id,)).fetchone()
+    assert figure["description"] == reading
+    stored = Path(figure["image_path"])
+    assert stored.suffix == ".png" and stored.read_bytes().startswith(b"\x89PNG")
+    assert Image.open(stored).size == (992, 1010)
+    assert path.read_bytes() == original  # the original upload is never rewritten
+
+
+def test_an_uploaded_photo_is_kept_for_the_judge_as_a_bounded_jpeg(conn, tmp_path):
+    photo = _encoded(_photo_like((3000, 2000)), "JPEG", quality=92)
+    run_id, upload_id, path = _image_upload(conn, tmp_path, photo, "field.jpg", ".jpg")
+    doc_id = ingest_image(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        path,
+        name="field.jpg",
+        kind="SOURCE",
+        figures_dir=tmp_path / "figures",
+        upload_id=upload_id,
+        describe=lambda image: "Description: a field.",
+    )
+    figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (doc_id,)).fetchone()
+    stored = Path(figure["image_path"])
+    assert stored.suffix == ".jpg" and stored.read_bytes().startswith(b"\xff\xd8\xff")
+    width, height = Image.open(stored).size
+    assert width * height <= MODEL_IMAGE_MAX_PIXELS and max(width, height) <= MODEL_IMAGE_MAX_EDGE
+
+
+def _fake_messages_client(text: str, stop_reason: str, sent: list):
+    from types import SimpleNamespace
+
+    def create(**kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=text)],
+            stop_reason=stop_reason,
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    return SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+def test_a_reading_cut_off_at_max_tokens_is_refused_not_kept():
+    """Half a transcription is not evidence: it would index as if complete."""
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    client._client = _fake_messages_client(
+        "Text in the image:\nBurundi: 55.3\nNig", "max_tokens", []
+    )
+    with pytest.raises(RuntimeError, match="cut off at max_tokens=4096"):
+        client.describe_image(
+            model="m", image=Image.new("RGB", (8, 8)), prompt="p", max_tokens=4096
+        )
+
+
+def test_a_complete_reading_comes_back_stripped_with_the_budget_asked_for():
+    from authorai.llm import AnthropicClient
+
+    sent: list[dict] = []
+    client = AnthropicClient(api_key="test-key")
+    client._client = _fake_messages_client("  Description: a chart.\n", "end_turn", sent)
+    reading = client.describe_image(
+        model="m", image=Image.new("RGB", (8, 8)), prompt="p", max_tokens=4096
+    )
+    assert reading == "Description: a chart."
+    assert sent[0]["max_tokens"] == 4096
+    assert sent[0]["messages"][0]["content"][0]["source"]["media_type"] == "image/png"

@@ -165,6 +165,50 @@ def test_batch_request_uses_output_config_with_transformed_schema(tmp_path):
     assert content[-1] == {"type": "text", "text": "judge this"}
 
 
+def test_a_png_block_is_exactly_the_one_sent_before_images_were_sources():
+    """Every PDF figure the judge has ever been shown went out in this shape;
+    labelling by content must not change a byte of it."""
+    import base64
+
+    from authorai.llm import _image_block
+
+    data = b"\x89PNG\r\n\x1a\n pixels"
+    assert _image_block(data) == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.standard_b64encode(data).decode("ascii"),
+        },
+    }
+
+
+def test_a_jpeg_figure_reaches_the_judge_labelled_as_jpeg(tmp_path):
+    """An uploaded photo's bounded copy is stored as JPEG; sent as image/png
+    the API would refuse it (or read it wrong)."""
+    from authorai.llm import ParseItem, build_batch_request
+
+    image = tmp_path / "fig-1.jpg"
+    image.write_bytes(b"\xff\xd8\xff\xe0 jpeg")
+    item = ParseItem(
+        custom_id="claim-1", system="sys", prompt="judge", output_type=Verdict, images=[image]
+    )
+    content = build_batch_request(item, model="m", max_tokens=1)["params"]["messages"][0]["content"]
+    assert content[0]["source"]["media_type"] == "image/jpeg"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"RIFF\x10\x00\x00\x00WEBPVP8 ", b"GIF89a", b"<svg xmlns=", b""],
+    ids=["webp", "gif", "svg", "empty"],
+)
+def test_bytes_that_are_neither_png_nor_jpeg_are_never_labelled(data):
+    from authorai.llm import _image_block
+
+    with pytest.raises(ValueError, match="neither PNG nor JPEG"):
+        _image_block(data)
+
+
 def _stub_batch_client(results):
     """A fake anthropic client whose batch lifecycle returns canned results."""
     from types import SimpleNamespace

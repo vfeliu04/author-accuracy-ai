@@ -4,18 +4,25 @@ A document arrives either from Docling (`parse_pdf`, the only function that
 touches Docling) or from a stored snapshot (`load_snapshot`: the sections a
 web page or transcript yielded when it was fetched). Everything downstream
 works on plain dataclasses through one path, `ingest_parsed`, so tests
-exercise the full ingestion path without Docling's models. Figures are stored
-as PNG files, their chunk text carrying the caption plus an LLM description.
+exercise the full ingestion path without Docling's models. An uploaded image
+(`parse_image`) is a document of one figure. Figures are stored as PNG files
+(an uploaded photo's bounded copy as JPEG), their chunk text carrying the
+caption plus an LLM description.
 """
 
+import io
 import json
+import math
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO, Literal
+
+from PIL import Image as PILImage
+from PIL import ImageOps
 
 from authorai import db as dbmod
 from authorai.chunking import chunk_text
@@ -31,6 +38,65 @@ FIGURE_DESCRIPTION_PROMPT = (
     "axes or categories, and the main trend or takeaway. Be specific about any "
     "values you can read; do not speculate beyond what is visible."
 )
+
+# An uploaded image is a source in its own right: the judge may only quote the
+# evidence TEXT, so the reading has to carry the image's words and numbers, not
+# just its gist (a PDF figure keeps the prompt above; its page has the text).
+#
+# Measured (PR_C_MEASURE in the project folder: 3 real charts x 5 calls). An
+# earlier wording listed a chart's rotated values apart from their labels in
+# every run, so no line held a quotable pair, and named an untitled chart
+# "water stress" in every run; this one paired every value it read, in every
+# run, and invented no subject.
+IMAGE_SOURCE_PROMPT = (
+    "This image was uploaded as a source document for a fact-check; its words and "
+    "numbers will be quoted as evidence, so they must be exactly what it prints.\n"
+    "First write the line 'Text in the image:' and transcribe every legible piece of "
+    "text exactly as printed: title, subtitle, axis titles, legend entries, data "
+    "labels, table cells, annotations, notes and source lines. Write each value on "
+    "one line together with everything that identifies it: its category, and its "
+    "series, year or column when there is one (for example 'Region A, 2008: 12.5'). "
+    "Never list the labels and the values separately. Write a table one row per "
+    "line, its cells in order. Axis tick values need not be listed. Copy numbers, "
+    "units, names and spellings exactly; do not round, convert, correct or update "
+    "them. Leave out anything you cannot read with confidence rather than guessing.\n"
+    "Then write the line 'Description:' and describe in 2-3 sentences what the image "
+    "shows. Use only what the image itself prints or shows: do not name a subject, "
+    "unit, place or source it does not print, and if it does not say what it "
+    "measures, say so."
+)
+# A screenshot of a dense table transcribes to ~2k tokens; a reading cut off at
+# this budget is refused, never kept (llm.describe_image).
+IMAGE_DESCRIPTION_MAX_TOKENS = 4096
+
+# What an image upload may be, keyed by the format Pillow finds in its BYTES,
+# with the suffix it is stored under: the file endpoint serves that suffix's
+# media type, so the content, never the client's file name, decides it. A phone
+# photo carrying a depth map or preview opens as a multi-picture JPEG (MPO)
+# with several frames; it is one photo, not an animation.
+IMAGE_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "MPO": ".jpg", "WEBP": ".webp"}
+_DECODERS = ("PNG", "JPEG", "WEBP")  # Pillow plugins allowed to open an upload at all
+_STILL_MULTI_FRAME = ("MPO",)
+# Decoding costs ~4 bytes a pixel on the worker, and a byte cap cannot bound
+# pixels: a 72-megapixel PNG of one colour is ~70 KB.
+IMAGE_MAX_PIXELS = 50_000_000
+# Claude's standard vision tier, where the caption model reads (the API would
+# downscale anything larger). Every claim that retrieves the image carries this
+# copy into the verify batch, which is capped at 256 MB in total.
+MODEL_IMAGE_MAX_EDGE = 1568
+MODEL_IMAGE_MAX_PIXELS = 1_150_000
+# A smaller image is enlarged toward the tier, at most this much: at its own
+# 1024x390 the caption model misread two small rotated values of a real chart in
+# every run (12.5 as 12.3, 8.9 as 8.3), and enlarged it read all 28 in every
+# run (PR_C_MEASURE). Enlarging adds no information, so it stops here.
+MODEL_IMAGE_MAX_ENLARGEMENT = 2.0
+# Lossless for charts and text; JPEG (4:4:4, so small text stays sharp) only
+# where it saves at least a third: a photo's PNG is ~3x its JPEG, an enlarged
+# chart's only ~1.1x, and a few KB are not worth lossy text.
+_ENCODE_OPTIONS = {"PNG": {}, "JPEG": {"quality": 90, "subsampling": 0}}
+_JPEG_SAVING = 1.5
+FIGURE_SUFFIXES = {"PNG": ".png", "JPEG": ".jpg"}
+_SIXTEEN_BIT_GREY = ("I", "I;16", "I;16B", "I;16L", "I;16N")
 
 
 @dataclass
@@ -55,6 +121,9 @@ class ParsedFigure:
     page: int | None
     image: "Image"
     caption: str = ""
+    # How the stored copy is encoded (FIGURE_SUFFIXES): PNG for every PDF
+    # figure; an uploaded photo's copy may be JPEG (model_copy).
+    fmt: Literal["PNG", "JPEG"] = "PNG"
 
 
 @dataclass
@@ -150,6 +219,108 @@ def parse_pdf(path: Path | str) -> ParsedDocument:
 
     title = sections[0].title if sections and sections[0].title else None
     return ParsedDocument(title=title, sections=sections, tables=tables, figures=figures)
+
+
+def open_image_source(handle: BinaryIO) -> "Image":
+    """Open an uploaded image WITHOUT decoding its pixels: the one gate both the
+    upload and the later ingest pass (format, frames, pixel count — all from
+    the header). Raises ValueError with a reason that reads after the file's
+    name. The caller's handle stays open whatever happens."""
+    try:
+        image = PILImage.open(handle, formats=_DECODERS)
+    except PILImage.DecompressionBombError as exc:
+        # Pillow's own ceiling, far above ours: raised inside open() itself.
+        raise ValueError(
+            f"is too large to open safely; images up to {IMAGE_MAX_PIXELS:,} pixels are accepted"
+        ) from exc
+    except (OSError, SyntaxError, ValueError) as exc:  # UnidentifiedImageError is an OSError
+        raise ValueError("is not a PNG, JPEG or WebP image") from exc
+    width, height = image.size
+    if image.format not in IMAGE_FORMATS:
+        reason = "is not a PNG, JPEG or WebP image"
+    elif getattr(image, "is_animated", False) and image.format not in _STILL_MULTI_FRAME:
+        reason = "is animated; only still images can be checked"
+    elif width * height > IMAGE_MAX_PIXELS:
+        reason = (
+            f"is {width}×{height} pixels; images up to {IMAGE_MAX_PIXELS:,} pixels are accepted"
+        )
+    else:
+        return image
+    # Not image.close(): an explicit close also closes a handle Pillow was only
+    # lent (its `with` exit does not). The image object is simply dropped.
+    raise ValueError(reason)
+
+
+def image_suffix(handle: BinaryIO) -> str:
+    """The suffix an image upload is stored under, once the gate passes it."""
+    with open_image_source(handle) as image:
+        return IMAGE_FORMATS[image.format]
+
+
+def encode_image(image: "Image", fmt: str = "PNG") -> bytes:
+    """The one encoder for stored figures. A PDF figure's PNG is byte for byte
+    what `image.save(path, "PNG")` always wrote."""
+    buffer = io.BytesIO()
+    image.save(buffer, format=fmt, **_ENCODE_OPTIONS[fmt])
+    return buffer.getvalue()
+
+
+def model_copy(image: "Image") -> tuple["Image", Literal["PNG", "JPEG"]]:
+    """The copy of an uploaded image the models are shown, and its encoding.
+
+    Sized to the standard vision tier (reduced, or enlarged at most
+    MODEL_IMAGE_MAX_ENLARGEMENT times, keeping its shape), turned upright by
+    its EXIF orientation (a phone photo is stored sideways), alpha laid on
+    white, 8-bit RGB with no metadata (nothing from the camera, GPS included,
+    leaves with it), kept as PNG unless JPEG is at least a third smaller.
+    """
+    width, height = image.size
+    scale = min(
+        MODEL_IMAGE_MAX_ENLARGEMENT,
+        MODEL_IMAGE_MAX_EDGE / max(width, height),
+        math.sqrt(MODEL_IMAGE_MAX_PIXELS / (width * height)),
+    )
+    size = (max(1, math.floor(width * scale)), max(1, math.floor(height * scale)))
+    if scale < 1:
+        # thumbnail() decodes a JPEG at a reduced scale (draft), so a big photo
+        # is never held at full size.
+        image.thumbnail(size, PILImage.Resampling.LANCZOS)
+    image = ImageOps.exif_transpose(image)
+    if image.mode in _SIXTEEN_BIT_GREY:
+        # A plain conversion clips every value above 255 to white.
+        image = image.convert("I").point(lambda value: value * (1 / 256)).convert("L")
+    if image.has_transparency_data:
+        rgba = image.convert("RGBA")
+        image = PILImage.new("RGB", rgba.size, "white")
+        image.paste(rgba, mask=rgba.getchannel("A"))
+    else:
+        image = image.convert("RGB")
+    if scale > 1:
+        # Enlarged last, once the image is 8-bit RGB (upright, so width and
+        # height swap with the orientation).
+        image = image.resize(
+            size if image.size == (width, height) else size[::-1], PILImage.Resampling.LANCZOS
+        )
+    image.info.clear()
+    png, jpeg = (len(encode_image(image, fmt)) for fmt in ("PNG", "JPEG"))
+    return image, "JPEG" if jpeg * _JPEG_SAVING < png else "PNG"
+
+
+def parse_image(path: Path | str, *, name: str) -> ParsedDocument:
+    """One uploaded image as a document of one figure: no page (the image is
+    the whole source), captioned with the stem of `name`, the upload's real
+    file name, which every error quotes. The upload's gate runs again first:
+    one rule, two doors."""
+    try:
+        with Path(path).open("rb") as handle, open_image_source(handle) as image:
+            copy, fmt = model_copy(image)
+    except ValueError as exc:
+        raise ValueError(f"{name!r} {exc}") from exc
+    except (OSError, SyntaxError, EOFError) as exc:
+        # Truncated or corrupt pixel data surfaces only when it is decoded.
+        raise ValueError(f"{name!r} could not be read as an image: {exc}") from exc
+    figure = ParsedFigure(page=None, image=copy, caption=Path(name).stem, fmt=fmt)
+    return ParsedDocument(title=None, sections=[], tables=[], figures=[figure])
 
 
 _TIME_LOCATOR = ("start_seconds", "end_seconds")
@@ -259,6 +430,37 @@ def ingest_pdf(
     )
 
 
+def ingest_image(
+    conn,
+    embedder: Embedder,
+    run_id: str,
+    path: Path | str,
+    *,
+    name: str,
+    kind: str,
+    figures_dir: Path | str,
+    upload_id: str,
+    describe: "Callable[[Image], str] | None" = None,
+) -> str:
+    """Ingest one uploaded image: a single figure chunk whose text is the file's
+    stem plus the caption model's reading of the image (IMAGE_SOURCE_PROMPT),
+    titled with that stem. The original file is never rewritten; the judge is
+    shown the bounded copy stored beside the run's other figures."""
+    path = Path(path)
+    return ingest_parsed(
+        conn,
+        embedder,
+        run_id,
+        parse_image(path, name=name),
+        path=path,
+        kind=kind,
+        figures_dir=figures_dir,
+        upload_id=upload_id,
+        describe=describe,
+        fallback_title=Path(name).stem,
+    )
+
+
 def ingest_snapshot(
     conn,
     embedder: Embedder,
@@ -343,7 +545,8 @@ def ingest_parsed(
     for index, figure in enumerate(parsed.figures, start=1):
         figure_id = dbmod.new_id()
         description = describe(figure.image) if describe else None
-        planned_figures.append((figure_id, figure, figure_dir / f"fig-{index}.png", description))
+        image_path = figure_dir / f"fig-{index}{FIGURE_SUFFIXES[figure.fmt]}"
+        planned_figures.append((figure_id, figure, image_path, description))
         caption = figure.caption.strip()
         if caption:
             text = caption
@@ -364,7 +567,7 @@ def ingest_parsed(
     if planned_figures:
         figure_dir.mkdir(parents=True, exist_ok=True)
     for _figure_id, figure, image_path, _description in planned_figures:
-        figure.image.save(image_path, format="PNG")
+        image_path.write_bytes(encode_image(figure.image, figure.fmt))
 
     if upload_id is None:
         if path is None:

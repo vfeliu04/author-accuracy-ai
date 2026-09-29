@@ -122,15 +122,24 @@ class LLM(Protocol):
     ) -> str: ...
 
 
-def _image_block(png_bytes: bytes) -> dict:
+# The two encodings a stored figure can have (ingest.FIGURE_SUFFIXES), told
+# apart by their signatures.
+_IMAGE_SIGNATURES = ((b"\x89PNG", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
+
+
+def _image_block(data: bytes) -> dict:
     """THE Anthropic image content block — every image this module sends goes
-    through here, so the wire shape exists once."""
+    through here, so the wire shape exists once. Labelled by what the bytes
+    ARE: bytes of any other kind raise rather than go out mislabelled."""
+    media_type = next((kind for sig, kind in _IMAGE_SIGNATURES if data.startswith(sig)), None)
+    if media_type is None:
+        raise ValueError(f"image bytes are neither PNG nor JPEG (they begin {data[:8]!r})")
     return {
         "type": "image",
         "source": {
             "type": "base64",
-            "media_type": "image/png",
-            "data": base64.standard_b64encode(png_bytes).decode("ascii"),
+            "media_type": media_type,
+            "data": base64.standard_b64encode(data).decode("ascii"),
         },
     }
 
@@ -400,6 +409,9 @@ class AnthropicClient:
             ],
         )
         self._log_usage(model, response)
+        if response.stop_reason == "max_tokens":
+            # Half a reading would be indexed as if it were the whole image.
+            raise RuntimeError(f"LLM image reading was cut off at max_tokens={max_tokens}")
         text = _first_text(response) or ""
         if not text.strip():
             raise RuntimeError(
