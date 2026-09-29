@@ -15,6 +15,7 @@ import pytest
 import respx
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from PIL import Image
 from starlette.routing import Route
 
 from authorai import db as dbmod
@@ -22,7 +23,14 @@ from authorai.config import Settings
 from authorai.jobs import Worker
 from authorai.main import create_app
 from authorai.references import UNPAYWALL_BASE, Reference, ReferenceList
-from tests.conftest import DIM, FakeLLM, pdf_with_pages, poison_providers, reader_that_never_answers
+from tests.conftest import (
+    DIM,
+    FakeLLM,
+    encoded_image,
+    pdf_with_pages,
+    poison_providers,
+    reader_that_never_answers,
+)
 
 # Routes that are intentionally open (no API key). Everything else must 401.
 OPEN_PATHS = {"/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}
@@ -1445,8 +1453,9 @@ def _no_llm(monkeypatch) -> None:
 
 
 def _nothing_written(settings) -> None:
-    """The scan is structurally unable to write rows (no DB dependency) and
-    must leave nothing on disk either — it reads the spooled part in place."""
+    """No run, upload or job row, and no file under uploads_dir: what a refused
+    upload leaves, and all a reference scan ever leaves (it has no DB
+    dependency and reads the spooled part in place)."""
     conn = dbmod.connect(settings.db_path, settings.embedding_dim)
     for table in ("runs", "uploads", "jobs"):
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table
@@ -1976,14 +1985,8 @@ def test_a_scan_that_fails_frees_its_slot(tmp_path, monkeypatch):
 # ---- Images as sources -------------------------------------------------------
 
 
-def _image_bytes(fmt: str, size=(40, 30), **options) -> bytes:
-    import io
-
-    from PIL import Image
-
-    buffer = io.BytesIO()
-    Image.new("RGB", size, "teal").save(buffer, fmt, **options)
-    return buffer.getvalue()
+def _image_bytes(fmt: str, size=(40, 30)) -> bytes:
+    return encoded_image(Image.new("RGB", size, "teal"), fmt)
 
 
 def _upload_rows(settings) -> list:
@@ -2035,48 +2038,13 @@ def _refused(tmp_path, name, data, **setting_overrides):
     ]
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
         response = client.post("/api/runs", headers=AUTH, files=files)
-    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
-    assert conn.execute("SELECT count(*) FROM uploads").fetchone()[0] == 0
-    assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
-    conn.close()
-    # Validation happens before any write: no file of any kind was left.
-    assert not settings.uploads_dir.exists() or not any(settings.uploads_dir.iterdir())
+    _nothing_written(settings)  # validation happens before any write
     return response
 
 
-def _animated_png() -> bytes:
-    import io
-
-    from PIL import Image
-
-    buffer = io.BytesIO()
-    first, second = Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")
-    first.save(buffer, "PNG", save_all=True, append_images=[second])
-    return buffer.getvalue()
-
-
-def _bomb_png() -> bytes:
-    import io
-
-    from PIL import Image
-
-    buffer = io.BytesIO()
-    Image.new("L", (12000, 6000)).save(buffer, "PNG")
-    return buffer.getvalue()
-
-
-def _long_png() -> bytes:
-    import io
-
-    from PIL import Image
-
-    buffer = io.BytesIO()
-    Image.new("L", (1080, 15000)).save(buffer, "PNG")
-    return buffer.getvalue()
-
-
-# Built when the test runs, not when the module is collected: the bomb is a
-# 72-megapixel allocation every `-k` run would otherwise pay for.
+# The gate's own reasons are tested in test_ingest; here, that a refusal
+# reaches the client named, whether the name or the bytes refuse it. Built when
+# the test runs, not when the module is collected (the long image is 16 MP).
 @pytest.mark.parametrize(
     ("name", "build", "detail"),
     [
@@ -2085,16 +2053,9 @@ def _long_png() -> bytes:
             lambda: b'<svg xmlns="http://www.w3.org/2000/svg"/>',
             "'chart.png' is not a PNG, JPEG or WebP image",
         ),
-        ("chart.png", lambda: PDF_BYTES, "'chart.png' is not a PNG, JPEG or WebP image"),
-        ("anim.png", _animated_png, "'anim.png' is animated; only still images can be checked"),
-        (
-            "huge.png",
-            _bomb_png,
-            "'huge.png' is 12000×6000 pixels; images up to 50,000,000 pixels",
-        ),
         (
             "scroll.png",
-            _long_png,
+            lambda: encoded_image(Image.new("L", (1080, 15000)), "PNG"),
             "'scroll.png' is 1080×15000 pixels, more than 4 times as tall as it is wide;"
             " crop it into parts",
         ),
@@ -2106,7 +2067,7 @@ def _long_png() -> bytes:
             "'IMG_0042.HEIC' is a HEIC photo; export it as JPEG",
         ),
     ],
-    ids=["svg-named-png", "pdf-named-png", "animated", "bomb", "too-long", "svg", "gif", "heic"],
+    ids=["svg-named-png", "too-long", "svg", "gif", "heic"],
 )
 def test_a_bad_image_source_rejects_the_whole_request_naming_it(tmp_path, name, build, detail):
     response = _refused(tmp_path, name, build())

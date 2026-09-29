@@ -1,13 +1,46 @@
+import io
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+from PIL import Image
 from pydantic import BaseModel
 
 from authorai import db as dbmod
 from authorai.llm import BATCH_MAX_TOKENS, PARSE_MAX_TOKENS
 
 DIM = 8
+
+# A real bar chart Docling exported from the GHI 2025 report in example_sources
+# (page 19, values printed on the bars): parser output, not a drawn rectangle.
+REAL_CHART = Path(__file__).parent / "fixtures" / "images" / "stunting_chart.png"
+
+
+def encoded_image(image, fmt, **options) -> bytes:
+    """An image's bytes as `fmt` (Pillow's save options passed through)."""
+    buffer = io.BytesIO()
+    image.save(buffer, fmt, **options)
+    return buffer.getvalue()
+
+
+def two_frames(fmt) -> bytes:
+    """A two-frame image: animated as PNG or WebP, a phone's multi-picture JPEG as MPO."""
+    first, second = Image.new("RGB", (20, 20), "red"), Image.new("RGB", (20, 20), "blue")
+    return encoded_image(first, fmt, save_all=True, append_images=[second])
+
+
+def image_upload(
+    conn, tmp_path, *, data=None, name="stunting chart.png", suffix=".png", content_hash="1a9e"
+):
+    """An image upload as the API records it: the original under a generated
+    name with the suffix its bytes proved, source_type image. Returns
+    (run_id, upload_id, path)."""
+    run_id = dbmod.create_run(conn)
+    path = tmp_path / f"{dbmod.new_id()}{suffix}"
+    path.write_bytes(REAL_CHART.read_bytes() if data is None else data)
+    upload_id = dbmod.add_upload(conn, "SOURCE", name, str(path), content_hash, source_type="image")
+    return run_id, upload_id, path
 
 
 @pytest.fixture()
@@ -185,7 +218,6 @@ class FakeLLM:
         self._image_description = image_description
         self._chat_answer = chat_answer
         self.parse_calls: list[dict] = []
-        self.image_calls: int = 0
         self.image_requests: list[dict] = []
         self.chat_calls: list[dict] = []
 
@@ -243,11 +275,14 @@ class FakeLLM:
         }
 
     def describe_image(self, *, model, image, prompt, max_tokens=512):
-        self.image_calls += 1
         self.image_requests.append(
             {"model": model, "size": image.size, "prompt": prompt, "max_tokens": max_tokens}
         )
         return self._image_description
+
+    @property
+    def image_calls(self) -> int:
+        return len(self.image_requests)
 
     def chat(self, *, model, system_blocks, messages, max_tokens=2048):
         self.chat_calls.append(

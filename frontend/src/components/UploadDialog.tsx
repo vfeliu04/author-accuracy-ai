@@ -24,7 +24,14 @@ const NAME_MAX_CHARS = 300;
 // then reads the bytes). The report must be a PDF; an image is only a source.
 const IMAGE_NAMES = [".png", ".jpg", ".jpeg", ".webp"];
 const HEIC_NAMES = [".heic", ".heif"];
-const FILE_TYPES = ".pdf,application/pdf,.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp";
+const FILE_TYPES = [
+  ".pdf",
+  "application/pdf",
+  ...IMAGE_NAMES,
+  "image/png",
+  "image/jpeg",
+  "image/webp"
+].join(",");
 
 function fileKind(file: File): "pdf" | "image" | null {
   const name = file.name.toLowerCase();

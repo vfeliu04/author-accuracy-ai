@@ -23,7 +23,7 @@ from authorai.jobs import (
     step_ingest,
 )
 from authorai.web import ExtractionTimeoutError, ThinPageError, extract_web
-from tests.conftest import DIM, poison_providers
+from tests.conftest import DIM, REAL_CHART, image_upload, poison_providers
 
 SETTINGS = Settings(anthropic_api_key="x", openai_api_key="x")
 
@@ -1896,18 +1896,6 @@ def test_a_page_whose_header_charset_is_no_text_encoding_fails_naming_the_link(
 
 # ---- Images as sources -------------------------------------------------------
 
-REAL_CHART = Path(__file__).parent / "fixtures" / "images" / "stunting_chart.png"
-
-
-def _image_source(conn, tmp_path, *, data=None, name="stunting chart.png", content_hash="1a9e"):
-    """An image upload as the API records it: the original under a generated
-    name with the suffix its bytes proved, source_type image."""
-    run_id = dbmod.create_run(conn)
-    path = tmp_path / f"{dbmod.new_id()}.png"
-    path.write_bytes(REAL_CHART.read_bytes() if data is None else data)
-    upload_id = dbmod.add_upload(conn, "SOURCE", name, str(path), content_hash, source_type="image")
-    return run_id, upload_id, path
-
 
 def _image_context(conn, tmp_path, llm):
     """A real pipeline context with fake providers. The embedder carries the
@@ -1926,7 +1914,7 @@ def test_an_image_upload_is_read_as_an_image_and_never_reaches_docling(conn, tmp
     from tests.conftest import FakeLLM
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("sent to Docling"))
-    run_id, upload_id, _path = _image_source(conn, tmp_path)
+    run_id, upload_id, _path = image_upload(conn, tmp_path)
     llm = FakeLLM(image_description="Text in the image:\nBurundi: 55.3")
     context = _image_context(conn, tmp_path, llm)
 
@@ -1951,7 +1939,7 @@ def test_an_unreadable_image_fails_the_ingest_naming_the_file(conn, tmp_path):
     from tests.conftest import FakeLLM
 
     data = REAL_CHART.read_bytes()
-    run_id, upload_id, _path = _image_source(
+    run_id, upload_id, _path = image_upload(
         conn, tmp_path, data=data[: len(data) // 2], name="cut.png"
     )
     llm = FakeLLM()
@@ -1968,13 +1956,13 @@ def test_the_same_image_is_read_again_never_copied(conn, tmp_path):
     a saving of one caption call."""
     from tests.conftest import FakeLLM
 
-    first_run, first_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
+    first_run, first_upload, _ = image_upload(conn, tmp_path, content_hash="5a5e")
     first = FakeLLM(image_description="first reading")
     assert (
         _reconcile_upload(_image_context(conn, tmp_path, first), first_run, first_upload) is False
     )
 
-    second_run, second_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
+    second_run, second_upload, _ = image_upload(conn, tmp_path, content_hash="5a5e")
     second = FakeLLM(image_description="second reading")
     assert (
         _reconcile_upload(_image_context(conn, tmp_path, second), second_run, second_upload)
@@ -2009,7 +1997,7 @@ def test_images_are_read_before_the_report(conn, tmp_path, monkeypatch):
 def test_deleting_a_run_removes_the_original_image_and_its_copy(conn, tmp_path):
     from tests.conftest import FakeLLM
 
-    run_id, upload_id, original = _image_source(conn, tmp_path)
+    run_id, upload_id, original = image_upload(conn, tmp_path)
     settings = _dedup_settings(tmp_path)
     assert _reconcile_upload(_image_context(conn, tmp_path, FakeLLM()), run_id, upload_id) is False
     copy = Path(conn.execute("SELECT image_path FROM figures").fetchone()["image_path"])

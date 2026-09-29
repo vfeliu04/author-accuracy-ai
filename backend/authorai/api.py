@@ -130,7 +130,15 @@ def _validate_pdf(upload: UploadFile, max_bytes: int) -> None:
         raise HTTPException(status_code=400, detail=f"{name!r} is not PDF content")
 
 
-_IMAGE_NAMES = (".png", ".jpg", ".jpeg", ".webp")
+# An image source's name, and the media type the file endpoint serves by the
+# stored suffix (which the bytes decided: ingest.IMAGE_FORMATS).
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+_IMAGE_NAMES = tuple(_IMAGE_MEDIA_TYPES)
 # The iPhone camera's default; Pillow cannot read it without a new dependency,
 # and browsers other than Safari cannot display it.
 _HEIC_NAMES = (".heic", ".heif")
@@ -153,13 +161,10 @@ def _validate_source(upload: UploadFile, max_bytes: int) -> tuple[str, str]:
             status_code=400, detail=f"{name!r} is not a PDF or a PNG, JPEG or WebP image"
         )
     _check_size(upload, max_bytes)
-    upload.file.seek(0)
     try:
         return "image", image_suffix(upload.file)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{name!r} {exc}") from exc
-    finally:
-        upload.file.seek(0)
 
 
 def _validate_links(raw_links: list[str]) -> list[str]:
@@ -374,14 +379,6 @@ def get_job(job_id: str, conn: Conn) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Unknown job {job_id!r}")
     return job
-
-
-_IMAGE_MEDIA_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-}
 
 
 def _media_type(source_type: str, path: Path) -> str:

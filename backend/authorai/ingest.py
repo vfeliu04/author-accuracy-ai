@@ -80,7 +80,7 @@ IMAGE_DESCRIPTION_MAX_TOKENS = 4096
 # with several frames; it is one photo, not an animation.
 IMAGE_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "MPO": ".jpg", "WEBP": ".webp"}
 _DECODERS = ("PNG", "JPEG", "WEBP")  # Pillow plugins allowed to open an upload at all
-_STILL_MULTI_FRAME = ("MPO",)
+_NOT_AN_IMAGE = "is not a PNG, JPEG or WebP image"
 # Decoding costs ~4 bytes a pixel on the worker, and a byte cap cannot bound
 # pixels: a 72-megapixel PNG of one colour is ~70 KB.
 IMAGE_MAX_PIXELS = 50_000_000
@@ -106,7 +106,8 @@ MODEL_IMAGE_MAX_PIXELS = 1_150_000
 MODEL_IMAGE_MAX_ENLARGEMENT = 2.0
 # Bytes of one stored copy. Every claim that retrieves an image carries its copy
 # into the verify batch, which the Batch API caps at 256 MB: at two images a
-# claim and base64's third on top, ~160 claims still fit. A real photo fits at
+# claim and base64's third on top, ~160 claims still fit (the batch itself has
+# no size guard; splitting it is a carried design item). A real photo fits at
 # quality 90; only noise-like pixels walk down the quality ladder.
 MODEL_IMAGE_MAX_BYTES = 600_000
 # Lossless for charts and text; JPEG (4:4:4, so small text stays sharp) only
@@ -114,7 +115,6 @@ MODEL_IMAGE_MAX_BYTES = 600_000
 # chart's only ~1.1x, and a few KB are not worth lossy text.
 _JPEG_SAVING = 1.5
 _JPEG_QUALITIES = (90, 80, 70, 60, 50)
-FIGURE_SUFFIXES = {"PNG": ".png", "JPEG": ".jpg"}
 _SIXTEEN_BIT_GREY = ("I", "I;16", "I;16B", "I;16L", "I;16N")
 # The EXIF orientation, read from its tag alone: Pillow's exif_transpose also
 # rewrites the EXIF block, and on damaged EXIF (found by fuzzing) that raised
@@ -129,7 +129,9 @@ _UPRIGHT = {
     7: PILImage.Transpose.TRANSVERSE,
     8: PILImage.Transpose.ROTATE_90,
 }
-_PROFILED_MODES = ("RGB", "RGBA", "L", "CMYK")  # modes a colour profile is applied in
+# The modes a colour profile is applied in. Not "LA": littlecms takes it for
+# plain grey and returns garbage, the alpha byte read as grey (probed, Pillow 12).
+_PROFILED_MODES = ("RGB", "RGBA", "L", "CMYK")
 
 
 @dataclass
@@ -154,8 +156,8 @@ class ParsedFigure:
     page: int | None
     image: "Image"
     caption: str = ""
-    # How the stored copy is encoded (FIGURE_SUFFIXES): PNG for every PDF
-    # figure; an uploaded photo's copy may be JPEG (model_copy).
+    # How the stored copy is encoded (its suffix from IMAGE_FORMATS): PNG for
+    # every PDF figure; an uploaded photo's copy may be JPEG (model_copy).
     fmt: Literal["PNG", "JPEG"] = "PNG"
     # The stored bytes when they are already made (an uploaded image's copy,
     # whose `image` is exactly these pixels); else `image` is encoded as `fmt`.
@@ -266,11 +268,10 @@ def _jpeg_scans(handle: BinaryIO) -> int:
     """How many start-of-scan markers a JPEG holds, read block by block (a
     marker split across two blocks counts once)."""
     handle.seek(0)
-    count, tail = 0, b""
+    count, last = 0, b""
     while block := handle.read(_SCAN_BLOCK_BYTES):
-        data = tail + block
-        count += data.count(_SCAN_MARKER)
-        tail = data[-1:]
+        count += block.count(_SCAN_MARKER) + (last + block[:1] == _SCAN_MARKER)
+        last = block[-1:]
     return count
 
 
@@ -295,12 +296,12 @@ def open_image_source(handle: BinaryIO) -> "Image":
             f"is too large to open safely; images up to {IMAGE_MAX_PIXELS:,} pixels are accepted"
         ) from exc
     except (OSError, SyntaxError, ValueError) as exc:  # UnidentifiedImageError is an OSError
-        raise ImageRefused("is not a PNG, JPEG or WebP image") from exc
+        raise ImageRefused(_NOT_AN_IMAGE) from exc
     width, height = image.size
     tall = height > width
     if image.format not in IMAGE_FORMATS:
-        reason = "is not a PNG, JPEG or WebP image"
-    elif getattr(image, "is_animated", False) and image.format not in _STILL_MULTI_FRAME:
+        reason = _NOT_AN_IMAGE
+    elif getattr(image, "is_animated", False) and image.format != "MPO":
         reason = "is animated; only still images can be checked"
     elif width * height > IMAGE_MAX_PIXELS:
         reason = (
@@ -325,7 +326,7 @@ def image_suffix(handle: BinaryIO) -> str:
         return IMAGE_FORMATS[image.format]
 
 
-def encode_image(image: "Image", fmt: str = "PNG", quality: int = _JPEG_QUALITIES[0]) -> bytes:
+def encode_image(image: "Image", fmt: str, quality: int = _JPEG_QUALITIES[0]) -> bytes:
     """The one encoder for stored figures. A PDF figure's PNG is byte for byte
     what `image.save(path, "PNG")` always wrote."""
     buffer = io.BytesIO()
@@ -357,11 +358,13 @@ def _eight_bit(image: "Image") -> "Image":
     if image.mode not in _SIXTEEN_BIT_GREY:
         return image
     values = np.asarray(image.convert("I"))
-    grey = PILImage.fromarray((np.clip(values, 0, 65535) >> 8).astype(np.uint8))
+    shifted = np.clip(values, 0, 65535)  # one int32 copy, shifted in place
+    shifted >>= 8
+    grey = PILImage.fromarray(shifted.astype(np.uint8))
     key = image.info.get("transparency")
     if isinstance(key, int):
         # Matched on the 16-bit value: scaled to 8 bits it can no longer be.
-        grey.putalpha(PILImage.fromarray(np.where(values == key, 0, 255).astype(np.uint8)))
+        grey.putalpha(PILImage.fromarray(np.where(values == key, np.uint8(0), np.uint8(255))))
     grey.info.update({k: image.info[k] for k in ("icc_profile", "exif") if k in image.info})
     return grey
 
@@ -431,8 +434,9 @@ def model_copy(image: "Image") -> ModelCopy:
     )
     size = (max(1, math.floor(width * scale)), max(1, math.floor(height * scale)))
     if scale < 1:
-        # thumbnail() decodes a JPEG at a reduced scale (draft), so a big photo
-        # is never held at full size.
+        # thumbnail() lets a JPEG decode at a reduced scale (draft), but only
+        # when it is over about twice the target: a 12 MP phone photo is still
+        # decoded whole (measured; bounded by IMAGE_MAX_PIXELS all the same).
         image.thumbnail(size, PILImage.Resampling.LANCZOS)
     image = _in_srgb(_upright(image))
     if image.has_transparency_data:
@@ -591,7 +595,7 @@ def ingest_image(
     kind: str,
     figures_dir: Path | str,
     upload_id: str,
-    describe: "Callable[[Image], str] | None" = None,
+    describe: "Callable[[Image], str]",
 ) -> str:
     """Ingest one uploaded image: a single figure chunk whose text is the
     caption model's reading of it (IMAGE_SOURCE_PROMPT), titled with the file's
@@ -600,16 +604,14 @@ def ingest_image(
     file: with several images in a run, "cut off at max_tokens" alone does not
     say which one to crop or replace."""
     path = Path(path)
-    read = None
-    if describe is not None:
 
-        def read(image):
-            try:
-                return describe(image)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"{name!r} could not be read by the caption model: {type(exc).__name__}: {exc}"
-                ) from exc
+    def read(image):
+        try:
+            return describe(image)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{name!r} could not be read by the caption model: {type(exc).__name__}: {exc}"
+            ) from exc
 
     return ingest_parsed(
         conn,
@@ -709,7 +711,7 @@ def ingest_parsed(
     for index, figure in enumerate(parsed.figures, start=1):
         figure_id = dbmod.new_id()
         description = describe(figure.image) if describe else None
-        image_path = figure_dir / f"fig-{index}{FIGURE_SUFFIXES[figure.fmt]}"
+        image_path = figure_dir / f"fig-{index}{IMAGE_FORMATS[figure.fmt]}"
         planned_figures.append((figure_id, figure, image_path, description))
         caption = figure.caption.strip()
         if caption:

@@ -25,7 +25,7 @@ from authorai.ingest import (
     parse_image,
 )
 from authorai.search import keyword_search
-from tests.conftest import DIM
+from tests.conftest import DIM, REAL_CHART, encoded_image, image_upload, two_frames
 
 
 def _parsed_document() -> ParsedDocument:
@@ -469,21 +469,6 @@ def test_pdf_document_metadata_keeps_its_exact_shape(conn, tmp_path, monkeypatch
 
 # ---- Images as sources -------------------------------------------------------
 
-# A real bar chart Docling exported from the GHI 2025 report in example_sources
-# (page 19, values printed on the bars): parser output, not a drawn rectangle.
-REAL_CHART = Path(__file__).parent / "fixtures" / "images" / "stunting_chart.png"
-
-
-def _encoded(image, fmt, **options) -> bytes:
-    buffer = io.BytesIO()
-    image.save(buffer, fmt, **options)
-    return buffer.getvalue()
-
-
-def _two_frames(fmt) -> bytes:
-    first, second = Image.new("RGB", (20, 20), "red"), Image.new("RGB", (20, 20), "blue")
-    return _encoded(first, fmt, save_all=True, append_images=[second])
-
 
 def _photo_like(size=(1600, 1200)):
     noise = Image.effect_noise(size, 40).convert("RGB")
@@ -493,7 +478,7 @@ def _photo_like(size=(1600, 1200)):
 @pytest.fixture(scope="module")
 def bomb_png() -> bytes:
     """72 megapixels in ~70 KB: the per-file byte cap alone cannot stop it."""
-    return _encoded(Image.new("L", (12000, 6000)), "PNG")
+    return encoded_image(Image.new("L", (12000, 6000)), "PNG")
 
 
 @pytest.fixture()
@@ -507,12 +492,12 @@ def no_decoding(monkeypatch):
 @pytest.mark.parametrize(
     ("data", "suffix"),
     [
-        (_encoded(Image.new("RGB", (8, 8)), "PNG"), ".png"),
-        (_encoded(Image.new("RGB", (8, 8)), "JPEG"), ".jpg"),
-        (_encoded(Image.new("RGB", (8, 8)), "WEBP"), ".webp"),
+        (encoded_image(Image.new("RGB", (8, 8)), "PNG"), ".png"),
+        (encoded_image(Image.new("RGB", (8, 8)), "JPEG"), ".jpg"),
+        (encoded_image(Image.new("RGB", (8, 8)), "WEBP"), ".webp"),
         # A phone photo carrying a depth map or a preview is a multi-picture
         # JPEG: Pillow reports MPO with several frames — still one photo.
-        (_two_frames("MPO"), ".jpg"),
+        (two_frames("MPO"), ".jpg"),
     ],
     ids=["png", "jpeg", "webp", "phone-mpo"],
 )
@@ -524,12 +509,12 @@ def test_an_image_source_is_stored_under_the_suffix_its_bytes_prove(data, suffix
     ("data", "reason"),
     [
         (b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', "not a PNG"),
-        (_encoded(Image.new("RGB", (8, 8)), "GIF"), "not a PNG"),
+        (encoded_image(Image.new("RGB", (8, 8)), "GIF"), "not a PNG"),
         (b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", "not a PNG"),
         (b"", "not a PNG"),
         (b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "not a PNG"),
-        (_two_frames("PNG"), "animated"),
-        (_two_frames("WEBP"), "animated"),
+        (two_frames("PNG"), "animated"),
+        (two_frames("WEBP"), "animated"),
     ],
     ids=["svg", "gif", "pdf-bytes", "empty", "png-magic-no-header", "apng", "animated-webp"],
 )
@@ -540,23 +525,18 @@ def test_anything_but_a_still_png_jpeg_or_webp_is_refused(data, reason):
     handle.seek(0)  # the upload's own handle is still open for its caller
 
 
-def test_a_bomb_refusal_leaves_the_callers_handle_open(bomb_png):
-    handle = io.BytesIO(bomb_png)
-    with pytest.raises(ValueError, match="pixels"):
-        image_suffix(handle)
-    handle.seek(0)
-
-
 def test_a_decompression_bomb_is_refused_from_its_header_alone(bomb_png, no_decoding):
+    handle = io.BytesIO(bomb_png)
     with pytest.raises(ValueError, match=r"12000×6000 pixels; images up to 50,000,000"):
-        image_suffix(io.BytesIO(bomb_png))
+        image_suffix(handle)
+    handle.seek(0)  # the upload's own handle is still open for its caller
 
 
 def test_the_pixel_limit_holds_on_both_sides_of_its_boundary(monkeypatch, no_decoding):
     monkeypatch.setattr(ingest_mod, "IMAGE_MAX_PIXELS", 100)
-    assert image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 10)), "PNG"))) == ".png"
+    assert image_suffix(io.BytesIO(encoded_image(Image.new("L", (10, 10)), "PNG"))) == ".png"
     with pytest.raises(ValueError, match="images up to 100 pixels"):
-        image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 11)), "PNG")))
+        image_suffix(io.BytesIO(encoded_image(Image.new("L", (10, 11)), "PNG")))
 
 
 @pytest.mark.parametrize(
@@ -572,7 +552,7 @@ def test_an_image_too_long_to_read_at_once_is_refused_from_its_header(size, refu
     """Sized to the vision tier as one piece, a 1080x15000 screenshot becomes
     112x1556 and its text unreadable; the run would finish with every claim on
     it unverifiable. Refused at upload instead, with a way forward."""
-    data = _encoded(Image.new("L", size), "PNG")
+    data = encoded_image(Image.new("L", size), "PNG")
     if refused is None:
         assert image_suffix(io.BytesIO(data)) == ".png"
     else:
@@ -583,7 +563,7 @@ def test_an_image_too_long_to_read_at_once_is_refused_from_its_header(size, refu
 def _progressive_jpeg(extra_scans: int = 0) -> bytes:
     """A real progressive JPEG, with `extra_scans` more start-of-scan markers
     appended — the gate counts markers, which is all a scan bomb needs."""
-    data = _encoded(Image.new("RGB", (32, 32), "teal"), "JPEG", progressive=True)
+    data = encoded_image(Image.new("RGB", (32, 32), "teal"), "JPEG", progressive=True)
     return data[:-2] + b"\xff\xda\x00\x02" * extra_scans + data[-2:]
 
 
@@ -602,7 +582,6 @@ def test_the_scan_count_holds_across_the_read_blocks(monkeypatch):
     """The markers are counted block by block; one split across two blocks
     still counts. Planted with a block of 3 bytes."""
     monkeypatch.setattr(ingest_mod, "_SCAN_BLOCK_BYTES", 3)
-    monkeypatch.setattr(ingest_mod, "MAX_JPEG_SCANS", 4)
     data = _progressive_jpeg()
     scans = data.count(b"\xff\xda")
     monkeypatch.setattr(ingest_mod, "MAX_JPEG_SCANS", scans)
@@ -617,7 +596,7 @@ def test_pillows_own_bomb_error_reads_as_the_same_refusal(monkeypatch):
     read as our refusal, not escape as a stray exception type."""
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
     with pytest.raises(ValueError, match="too large to open safely"):
-        image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 10)), "PNG")))
+        image_suffix(io.BytesIO(encoded_image(Image.new("L", (10, 10)), "PNG")))
 
 
 @pytest.mark.parametrize(
@@ -659,7 +638,7 @@ def test_a_rotated_phone_photo_reaches_the_model_upright():
     ImageDraw.Draw(stored).rectangle([0, 0, 99, 74], fill="red")  # top-left as stored
     exif = Image.Exif()
     exif[0x0112] = 6  # "rotate 90° clockwise to display"
-    photo = Image.open(io.BytesIO(_encoded(stored, "JPEG", exif=exif.tobytes(), quality=95)))
+    photo = Image.open(io.BytesIO(encoded_image(stored, "JPEG", exif=exif.tobytes(), quality=95)))
     copy = model_copy(photo).image
     assert copy.size == (600, 800)  # upright (and enlarged twice)
     red, green, _blue = copy.getpixel((copy.width - 10, 10))
@@ -682,16 +661,10 @@ def test_a_sixteen_bit_greyscale_image_keeps_its_tones():
     for x in range(400):  # paste() cannot fill a 16-bit image with a number; putpixel can
         for y in range(100):
             deep.putpixel((x, y), (0, 16384, 32768, 65535)[x // 100])
-    copy = model_copy(Image.open(io.BytesIO(_encoded(deep, "PNG")))).image
+    copy = model_copy(Image.open(io.BytesIO(encoded_image(deep, "PNG")))).image
     assert copy.size == (800, 200)
     tones = [copy.getpixel((200 * stripe + 100, 100))[0] for stripe in range(4)]
     assert tones == pytest.approx([0, 64, 128, 255], abs=1)
-
-
-def test_a_chart_is_kept_lossless_and_a_photo_is_compressed():
-    chart_fmt = model_copy(Image.open(REAL_CHART)).fmt
-    photo_fmt = model_copy(_photo_like()).fmt
-    assert (chart_fmt, photo_fmt) == ("PNG", "JPEG")
 
 
 def _colour_noise(size=(3000, 2000)):
@@ -739,7 +712,7 @@ def test_the_model_copy_carries_no_camera_metadata():
     exif[0x010F] = "PhoneMaker"
     exif[0x8825] = {1: "N", 2: (40.0, 26.0, 0.0)}  # GPS
     photo = Image.open(
-        io.BytesIO(_encoded(Image.new("RGB", (60, 40)), "JPEG", exif=exif.tobytes()))
+        io.BytesIO(encoded_image(Image.new("RGB", (60, 40)), "JPEG", exif=exif.tobytes()))
     )
     assert photo.getexif()  # planted
     copy = model_copy(photo)
@@ -773,7 +746,7 @@ def test_a_sixteen_bit_image_larger_than_the_tier_is_reduced_not_refused():
     it is brought to 8 bits first."""
     deep = Image.new("I;16", (3000, 2000))
     deep.putpixel((0, 0), 65535)
-    copy = model_copy(Image.open(io.BytesIO(_encoded(deep, "PNG")))).image
+    copy = model_copy(Image.open(io.BytesIO(encoded_image(deep, "PNG")))).image
     assert copy.width * copy.height <= MODEL_IMAGE_MAX_PIXELS
 
 
@@ -784,7 +757,7 @@ def test_a_transparent_sixteen_bit_image_is_flattened_onto_white():
     for x in range(400):
         for y in range(100):
             deep.putpixel((x, y), 1000 if x < 200 else 16384)
-    stored = Image.open(io.BytesIO(_encoded(deep, "PNG", transparency=1000)))
+    stored = Image.open(io.BytesIO(encoded_image(deep, "PNG", transparency=1000)))
     copy = model_copy(stored).image
     assert copy.getpixel((100, 100))[0] == 255  # transparent: white, not near-black
     assert copy.getpixel((600, 100))[0] == pytest.approx(64, abs=1)
@@ -792,7 +765,7 @@ def test_a_transparent_sixteen_bit_image_is_flattened_onto_white():
 
 def _profiled(icc: bytes, colour=(255, 0, 0)) -> Image.Image:
     return Image.open(
-        io.BytesIO(_encoded(Image.new("RGB", (40, 40), colour), "PNG", icc_profile=icc))
+        io.BytesIO(encoded_image(Image.new("RGB", (40, 40), colour), "PNG", icc_profile=icc))
     )
 
 
@@ -903,17 +876,25 @@ def test_any_decoder_error_type_names_the_file(monkeypatch):
         parse_image(REAL_CHART, name="odd.jpg")
 
 
-def _image_upload(conn, tmp_path, data: bytes, name: str, suffix: str):
-    path = tmp_path / f"{dbmod.new_id()}{suffix}"
-    path.write_bytes(data)
-    run_id = dbmod.create_run(conn)
-    upload_id = dbmod.add_upload(conn, "SOURCE", name, str(path), "h", source_type="image")
-    return run_id, upload_id, path
+def _ingest(conn, tmp_path, describe, **upload):
+    """An image upload (conftest.image_upload), ingested under its own name."""
+    upload.setdefault("name", "stunting chart.png")
+    run_id, upload_id, path = image_upload(conn, tmp_path, **upload)
+    doc_id = ingest_image(
+        conn,
+        FakeEmbedder(dim=DIM),
+        run_id,
+        path,
+        name=upload["name"],
+        kind="SOURCE",
+        figures_dir=tmp_path / "figures",
+        upload_id=upload_id,
+        describe=describe,
+    )
+    return doc_id, path
 
 
 def test_ingest_image_indexes_one_figure_read_by_the_caption_model(conn, tmp_path):
-    original = REAL_CHART.read_bytes()
-    run_id, upload_id, path = _image_upload(conn, tmp_path, original, "stunting chart.png", ".png")
     reading = "Text in the image:\nBurundi: 55.3\nDescription:\nA bar chart of child stunting."
     seen = []
 
@@ -921,17 +902,7 @@ def test_ingest_image_indexes_one_figure_read_by_the_caption_model(conn, tmp_pat
         seen.append(image.size)
         return reading
 
-    doc_id = ingest_image(
-        conn,
-        FakeEmbedder(dim=DIM),
-        run_id,
-        path,
-        name="stunting chart.png",
-        kind="SOURCE",
-        figures_dir=tmp_path / "figures",
-        upload_id=upload_id,
-        describe=describe,
-    )
+    doc_id, path = _ingest(conn, tmp_path, describe)
 
     assert seen == [(992, 1010)]
     document = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
@@ -945,15 +916,12 @@ def test_ingest_image_indexes_one_figure_read_by_the_caption_model(conn, tmp_pat
     stored = Path(figure["image_path"])
     assert stored.suffix == ".png" and stored.read_bytes().startswith(b"\x89PNG")
     assert Image.open(stored).size == (992, 1010)
-    assert path.read_bytes() == original  # the original upload is never rewritten
+    assert path.read_bytes() == REAL_CHART.read_bytes()  # the original is never rewritten
 
 
 def test_a_caption_model_failure_names_the_image(conn, tmp_path):
     """With several images in a run, 'cut off at max_tokens' alone does not
     say which one to crop or replace."""
-    run_id, upload_id, path = _image_upload(
-        conn, tmp_path, REAL_CHART.read_bytes(), "dense.png", ".png"
-    )
 
     def cut_off(image):
         raise RuntimeError("LLM image reading was cut off at max_tokens=4096")
@@ -962,32 +930,18 @@ def test_a_caption_model_failure_names_the_image(conn, tmp_path):
         RuntimeError,
         match=r"^'dense.png' could not be read by the caption model: RuntimeError: LLM image",
     ):
-        ingest_image(
-            conn,
-            FakeEmbedder(dim=DIM),
-            run_id,
-            path,
-            name="dense.png",
-            kind="SOURCE",
-            figures_dir=tmp_path / "figures",
-            upload_id=upload_id,
-            describe=cut_off,
-        )
+        _ingest(conn, tmp_path, cut_off, name="dense.png")
 
 
 def test_an_uploaded_photo_is_kept_for_the_judge_as_a_bounded_jpeg(conn, tmp_path):
-    photo = _encoded(_photo_like((3000, 2000)), "JPEG", quality=92)
-    run_id, upload_id, path = _image_upload(conn, tmp_path, photo, "field.jpg", ".jpg")
-    doc_id = ingest_image(
+    photo = encoded_image(_photo_like((3000, 2000)), "JPEG", quality=92)
+    doc_id, _path = _ingest(
         conn,
-        FakeEmbedder(dim=DIM),
-        run_id,
-        path,
+        tmp_path,
+        lambda image: "Description: a field.",
+        data=photo,
         name="field.jpg",
-        kind="SOURCE",
-        figures_dir=tmp_path / "figures",
-        upload_id=upload_id,
-        describe=lambda image: "Description: a field.",
+        suffix=".jpg",
     )
     figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (doc_id,)).fetchone()
     stored = Path(figure["image_path"])

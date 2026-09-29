@@ -122,8 +122,8 @@ class LLM(Protocol):
     ) -> str: ...
 
 
-# The two encodings a stored figure can have (ingest.FIGURE_SUFFIXES), told
-# apart by their signatures.
+# The two encodings a stored figure can have (PNG, or JPEG for an uploaded
+# photo's copy: ingest.model_copy), told apart by their signatures.
 _IMAGE_SIGNATURES = ((b"\x89PNG", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
 
 
