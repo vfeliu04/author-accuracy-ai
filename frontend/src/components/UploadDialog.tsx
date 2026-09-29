@@ -148,6 +148,7 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
 
   // The report's own reference list, read as soon as the report is picked.
   // Which rows are ticked belongs to one scan: a set made for another answer
@@ -174,6 +175,12 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
     [missing]
   );
   const ticked = addable.filter(({ index }) => checked.has(index));
+
+  // The body scrolls: with a long source list a refusal's reason lands below
+  // the fold, and Verify would seem to do nothing. (jsdom has no scrollIntoView.)
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [error]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -631,7 +638,11 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           ) : null}
           {note !== null ? <p className="modal__count">{note}</p> : null}
 
-          {error ? <p className="modal__error">{error}</p> : null}
+          {error ? (
+            <p ref={errorRef} className="modal__error" role="alert">
+              {error}
+            </p>
+          ) : null}
           {tooManySources ? (
             <p className="modal__error">At most {MAX_SOURCES} sources per verification.</p>
           ) : null}

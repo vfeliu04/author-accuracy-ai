@@ -188,6 +188,30 @@ describe("UploadDialog", () => {
     );
   });
 
+  it("brings a refused upload's reason into view and announces it", async () => {
+    // The dialog body scrolls: with a long source list the reason sat below
+    // the fold, and Verify seemed to do nothing (seen in the PR C live check).
+    const original = Element.prototype.scrollIntoView; // jsdom has none
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      const reason =
+        "'scroll.png' is 1080×15000 pixels, more than 4 times as tall as it is wide; crop it into parts that can each be read at once";
+      vi.spyOn(v2, "createRun").mockRejectedValue(new Error(reason));
+      renderDialog();
+      fireEvent.change(fileInput(), {
+        target: { files: [pdf("report.pdf"), image("scroll.png")] }
+      });
+      await waitFor(() => expect(verify()).toBeEnabled());
+      fireEvent.click(verify());
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(reason);
+      expect(scrolled.mock.contexts).toContain(alert);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it("sends image sources with the PDFs", async () => {
     const create = vi.spyOn(v2, "createRun").mockResolvedValue({ run_id: "r", job_id: "j" });
     renderDialog();
