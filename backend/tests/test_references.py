@@ -737,17 +737,38 @@ def test_address_space_in_use_reads_vmsize_from_the_process_status(tmp_path):
 # --- the memory watchdog: the bound RLIMIT_AS cannot give on macOS ------------
 
 
+# The watchdog's line inside the test's reader, and what that reader inflates
+# to. The MECHANISM is under test — the production line (READER_MEMORY_BYTES)
+# is pinned by the constants test — so the child is given a line well above
+# its own start (a reader child peaks at ~91 MiB before pypdf runs, measured
+# 2026-09-29) and a buffer well past it. The first version crossed the
+# production 768 MiB line with a 900 MB buffer; on an 8 GB Mac already deep
+# in swap, macOS compressed the buffer as it was written, the resident peak
+# never reached the line, and the deadline stopped the child instead — a
+# red suite on a busy machine, not a broken watchdog.
+_TEST_WATCHDOG_LINE = 256 * 2**20
+_TEST_INFLATION = 400 * 2**20
+
+
 def _reader_that_inflates(sender, path, max_pages, cpu_seconds):
     """The real reader with pypdf's part replaced by what a FlateDecode bomb
-    does to it: 900 MB resident, and KEPT resident — rewritten page by page,
-    as a reader works over inflated data; an idle buffer is compressed away
-    under memory pressure on macOS, and no peak would be seen — until the
-    watchdog ends the process. The address-space cap is lifted so the
-    allocation succeeds on Linux too and the watchdog is what stops it."""
+    does to it: a buffer past the watchdog's line, KEPT resident — rewritten
+    page by page, as a reader works over inflated data; an idle buffer is
+    compressed away under memory pressure on macOS, and no peak would be
+    seen — until the watchdog ends the process. The address-space cap is
+    lifted so the allocation succeeds on Linux too and the watchdog is what
+    stops it."""
     references.READER_ADDRESS_SPACE_BYTES = 8 << 30
+    # _read_in_child starts the watchdog with its defaults, bound when the
+    # function was defined — so the line is set there, in this child only.
+    references._watch_memory.__defaults__ = (
+        _TEST_WATCHDOG_LINE,
+        references.READER_WATCH_INTERVAL_SECONDS,
+        None,
+    )
 
     def inflate(handle, max_pages):
-        view = memoryview(bytearray(b"\xa5") * (900 * 2**20))
+        view = memoryview(bytearray(b"\xa5") * _TEST_INFLATION)
         while True:
             for offset in range(0, len(view), 16384):
                 view[offset] ^= 1
@@ -769,14 +790,19 @@ def _reader_that_hits_the_address_space_cap(sender, path, max_pages, cpu_seconds
 def test_a_reader_that_inflates_past_the_memory_bound_is_stopped_by_the_watchdog(
     monkeypatch, web_log
 ):
+    """Which bound stopped the reader is read from its EXIT PATH — the memory
+    wording and READER_MEMORY_EXIT_CODE, which the deadline never produces —
+    not from the clock: spawning a child alone took seconds on a swapping
+    machine. The time bound is only a sanity check, far from the deadline."""
     monkeypatch.setattr(references, "_read_in_child", _reader_that_inflates)
     before = set(multiprocessing.active_children())
     started = time.perf_counter()
     with pytest.raises(ValueError, match="too costly to read") as caught:
-        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=30)
-    assert time.perf_counter() - started < 15  # the watchdog, not the deadline
+        read_pages(io.BytesIO(pdf_with_pages(["x"])), timeout=60)
+    # The watchdog, not the deadline: only the memory bound produces these.
     assert "the reader needed too much memory" in str(caught.value)
     assert f"exited without a result (exit code {READER_MEMORY_EXIT_CODE})" in web_log.text
+    assert time.perf_counter() - started < 40
     assert set(multiprocessing.active_children()) == before
 
 
@@ -937,7 +963,13 @@ def test_the_watchdog_does_not_hold_the_reader_open_after_a_clean_finish(web_log
     """The child's interpreter waits for its non-daemon threads at exit: a
     watchdog that were one would hold the process open — forever, it loops
     — until the deadline stopped it. The parent sees the child's own exit
-    at once, as EOF on the result pipe, well inside the budget."""
+    at once, as EOF on the result pipe, well inside the budget.
+
+    A child held open is told apart by its ending — the deadline's timeout
+    error, or the parent's SIGTERM — never by the clock: on a swapping 8 GB
+    Mac late in the full suite, a healthy child took 8.5 s just to spawn and
+    exit against the 5 s budget this test first had. The deadline is set far
+    past any spawn, so a held-open child still fails here on its exit path."""
     payload = handover_file(b"unused", "the report PDF")
     started = time.perf_counter()
     with pytest.raises(RuntimeError) as caught:
@@ -946,11 +978,11 @@ def test_the_watchdog_does_not_hold_the_reader_open_after_a_clean_finish(web_log
             (),
             payload_path=payload,
             url="the report PDF",
-            timeout=10,
+            timeout=45,
         )
     assert not isinstance(caught.value, ExtractionTimeoutError)
-    assert time.perf_counter() - started < 5
     assert caught.value.exitcode == 0  # its own exit, not the parent's SIGTERM
+    assert time.perf_counter() - started < 30
     assert "exited without a result (exit code 0)" in web_log.text
 
 
