@@ -60,7 +60,7 @@ A source can also be an image: a chart, an infographic, a screenshot or a photo,
 
 - The image is read once, when the run starts: the vision model transcribes every word and number it can read, and adds a short description. That reading is what the image's evidence quotes, so a verdict on a chart cites the value as the model read it, and the claims view says so beside the image.
 - The judge is shown the image too, at the size the vision model reads (at most 1568 pixels on the long edge; a small image is enlarged up to twice, which measurably helps with small print); your original is kept as uploaded and is what the claims view shows.
-- Animated images, HEIC photos (export them as JPEG) and images over 50 megapixels are refused when you upload them.
+- Animated images, HEIC photos (export them as JPEG), images over 50 megapixels and images more than four times as long as they are wide (a long scroll screenshot: crop it into parts) are refused when you upload them.
 - An image has no author, publisher or date to check, so it is listed with the sources but never counted in the credibility score.
 
 ## Stack

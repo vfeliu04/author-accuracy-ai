@@ -160,8 +160,13 @@ def _maybe_reuse_ingest(context: PipelineContext, run_id: str, upload: sqlite3.R
     attempt already cleaned its files and rolled back its rows). On reuse
     the donor's kind is irrelevant — the copy is written under THIS
     upload's kind.
+
+    An image is never copied: its whole evidence is the caption model's
+    reading of it, and a copy would carry forward whatever prompt, model and
+    pixel handling made the first reading, however they have changed since
+    (nothing stamps them), to save one caption call.
     """
-    if not upload["content_hash"]:
+    if not upload["content_hash"] or upload["source_type"] == "image":
         return False
     donor = dbmod.find_ingest_donor(
         context.conn,
@@ -467,7 +472,19 @@ def _page_text(fetched: FetchedResponse) -> bytes | str:
 def step_ingest(context: PipelineContext, run_id: str, payload: dict) -> str:
     upload_ids = [payload["report_upload_id"], *payload["source_upload_ids"]]
     fetched = _fetch_pending_links(context, run_id, upload_ids)
-    reused = sum(_reconcile_upload(context, run_id, upload_id) for upload_id in upload_ids)
+    # Images first: the upload gate reads only an image's header, so a
+    # truncated or corrupt one is found when it is decoded, and it should fail
+    # the run in seconds, not after the report's parse.
+    images = {
+        row["id"]
+        for row in context.conn.execute(
+            "SELECT id FROM uploads WHERE source_type = 'image' AND id IN"
+            f" ({','.join('?' * len(upload_ids))})",
+            upload_ids,
+        )
+    }
+    ordered = sorted(upload_ids, key=lambda upload_id: upload_id not in images)
+    reused = sum(_reconcile_upload(context, run_id, upload_id) for upload_id in ordered)
     # Shown verbatim under the finished step, so it counts in the reader's words.
     label = f"Read {len(upload_ids)} documents"
     notes = []

@@ -37,6 +37,14 @@ def web_log(caplog):
 
 
 @pytest.fixture()
+def ingest_log(caplog):
+    """caplog, capturing authorai.ingest's records."""
+    import authorai.ingest as ingest_mod
+
+    yield from _attached_to(ingest_mod.logger, caplog)
+
+
+@pytest.fixture()
 def jobs_log(caplog):
     """caplog, capturing authorai.jobs's records."""
     from authorai import jobs as jobsmod

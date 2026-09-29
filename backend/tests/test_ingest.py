@@ -2,6 +2,7 @@ import io
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFile
 
@@ -9,6 +10,7 @@ import authorai.ingest as ingest_mod
 from authorai import db as dbmod
 from authorai.embeddings import FakeEmbedder
 from authorai.ingest import (
+    MODEL_IMAGE_MAX_BYTES,
     MODEL_IMAGE_MAX_EDGE,
     MODEL_IMAGE_MAX_PIXELS,
     ParsedDocument,
@@ -557,6 +559,59 @@ def test_the_pixel_limit_holds_on_both_sides_of_its_boundary(monkeypatch, no_dec
         image_suffix(io.BytesIO(_encoded(Image.new("L", (10, 11)), "PNG")))
 
 
+@pytest.mark.parametrize(
+    ("size", "refused"),
+    [
+        ((1000, 4000), None),  # four times as tall: still read at once
+        ((1000, 4001), "more than 4 times as tall as it is wide"),
+        ((4001, 1000), "more than 4 times as wide as it is tall"),
+        ((1080, 15000), "more than 4 times as tall as it is wide"),  # a long scroll screenshot
+    ],
+)
+def test_an_image_too_long_to_read_at_once_is_refused_from_its_header(size, refused, no_decoding):
+    """Sized to the vision tier as one piece, a 1080x15000 screenshot becomes
+    112x1556 and its text unreadable; the run would finish with every claim on
+    it unverifiable. Refused at upload instead, with a way forward."""
+    data = _encoded(Image.new("L", size), "PNG")
+    if refused is None:
+        assert image_suffix(io.BytesIO(data)) == ".png"
+    else:
+        with pytest.raises(ValueError, match=f"{refused}; crop it into parts"):
+            image_suffix(io.BytesIO(data))
+
+
+def _progressive_jpeg(extra_scans: int = 0) -> bytes:
+    """A real progressive JPEG, with `extra_scans` more start-of-scan markers
+    appended — the gate counts markers, which is all a scan bomb needs."""
+    data = _encoded(Image.new("RGB", (32, 32), "teal"), "JPEG", progressive=True)
+    return data[:-2] + b"\xff\xda\x00\x02" * extra_scans + data[-2:]
+
+
+def test_a_jpeg_with_too_many_scans_is_refused_before_it_is_decoded(no_decoding):
+    """Each progressive scan is a pass over the whole image, and nothing in the
+    decoder bounds how many a file declares: a few thousand turn a small JPEG
+    into minutes of the one worker's time."""
+    real = _progressive_jpeg()
+    assert 1 < real.count(b"\xff\xda") <= 20  # an ordinary progressive JPEG
+    assert image_suffix(io.BytesIO(real)) == ".jpg"
+    with pytest.raises(ValueError, match="progressive scans; at most 100"):
+        image_suffix(io.BytesIO(_progressive_jpeg(extra_scans=200)))
+
+
+def test_the_scan_count_holds_across_the_read_blocks(monkeypatch):
+    """The markers are counted block by block; one split across two blocks
+    still counts. Planted with a block of 3 bytes."""
+    monkeypatch.setattr(ingest_mod, "_SCAN_BLOCK_BYTES", 3)
+    monkeypatch.setattr(ingest_mod, "MAX_JPEG_SCANS", 4)
+    data = _progressive_jpeg()
+    scans = data.count(b"\xff\xda")
+    monkeypatch.setattr(ingest_mod, "MAX_JPEG_SCANS", scans)
+    assert image_suffix(io.BytesIO(data)) == ".jpg"
+    monkeypatch.setattr(ingest_mod, "MAX_JPEG_SCANS", scans - 1)
+    with pytest.raises(ValueError, match=f"is a JPEG of {scans} progressive scans"):
+        image_suffix(io.BytesIO(data))
+
+
 def test_pillows_own_bomb_error_reads_as_the_same_refusal(monkeypatch):
     """Past twice its MAX_IMAGE_PIXELS Pillow raises inside open(); that must
     read as our refusal, not escape as a stray exception type."""
@@ -569,7 +624,7 @@ def test_pillows_own_bomb_error_reads_as_the_same_refusal(monkeypatch):
     "size", [(4000, 1000), (1000, 4000), (3000, 3000), (1600, 1600), (1000, 390), (900, 900)]
 )
 def test_the_model_copy_fits_the_standard_vision_tier_whatever_its_shape(size):
-    copy, _fmt = model_copy(Image.new("RGB", size, "white"))
+    copy = model_copy(Image.new("RGB", size, "white")).image
     width, height = copy.size
     assert max(width, height) <= MODEL_IMAGE_MAX_EDGE
     assert width * height <= MODEL_IMAGE_MAX_PIXELS
@@ -595,7 +650,7 @@ def test_a_small_image_is_enlarged_at_most_twice_and_never_past_the_tier(size, e
     model misread two rotated values of a real chart in every run (12.5 read
     as 12.3, 8.9 as 8.3); enlarged within the tier it read all 28 in every
     run. Enlarging adds no information, so it stops at twice the size."""
-    copy, _fmt = model_copy(Image.new("RGB", size, "white"))
+    copy = model_copy(Image.new("RGB", size, "white")).image
     assert copy.size == enlarged
 
 
@@ -605,7 +660,7 @@ def test_a_rotated_phone_photo_reaches_the_model_upright():
     exif = Image.Exif()
     exif[0x0112] = 6  # "rotate 90° clockwise to display"
     photo = Image.open(io.BytesIO(_encoded(stored, "JPEG", exif=exif.tobytes(), quality=95)))
-    copy, _fmt = model_copy(photo)
+    copy = model_copy(photo).image
     assert copy.size == (600, 800)  # upright (and enlarged twice)
     red, green, _blue = copy.getpixel((copy.width - 10, 10))
     assert red > 200 and green < 60  # the stored top-left corner is now top-right
@@ -615,7 +670,7 @@ def test_a_rotated_phone_photo_reaches_the_model_upright():
 def test_transparency_is_flattened_onto_white():
     logo = Image.new("RGBA", (50, 50), (0, 0, 0, 0))
     ImageDraw.Draw(logo).rectangle([0, 0, 24, 49], fill=(0, 0, 255, 255))
-    copy, _fmt = model_copy(logo)
+    copy = model_copy(logo).image
     assert (copy.mode, copy.size) == ("RGB", (100, 100))
     assert copy.getpixel((80, 50)) == (255, 255, 255)
     assert copy.getpixel((20, 50)) == (0, 0, 255)
@@ -627,23 +682,56 @@ def test_a_sixteen_bit_greyscale_image_keeps_its_tones():
     for x in range(400):  # paste() cannot fill a 16-bit image with a number; putpixel can
         for y in range(100):
             deep.putpixel((x, y), (0, 16384, 32768, 65535)[x // 100])
-    copy, _fmt = model_copy(Image.open(io.BytesIO(_encoded(deep, "PNG"))))
+    copy = model_copy(Image.open(io.BytesIO(_encoded(deep, "PNG")))).image
     assert copy.size == (800, 200)
     tones = [copy.getpixel((200 * stripe + 100, 100))[0] for stripe in range(4)]
     assert tones == pytest.approx([0, 64, 128, 255], abs=1)
 
 
 def test_a_chart_is_kept_lossless_and_a_photo_is_compressed():
-    _chart, chart_fmt = model_copy(Image.open(REAL_CHART))
-    _photo, photo_fmt = model_copy(_photo_like())
+    chart_fmt = model_copy(Image.open(REAL_CHART)).fmt
+    photo_fmt = model_copy(_photo_like()).fmt
     assert (chart_fmt, photo_fmt) == ("PNG", "JPEG")
 
 
-def test_the_model_copy_stays_near_a_megabyte_even_for_pure_noise():
-    """The verify batch carries a copy per claim that retrieves the image
-    (256 MB per batch): the worst case has to be bounded, not typical."""
-    copy, fmt = model_copy(Image.effect_noise((3000, 2000), 128).convert("RGB"))
-    assert len(encode_image(copy, fmt)) < 1_200_000
+def _colour_noise(size=(3000, 2000)):
+    rng = np.random.default_rng(1)
+    return Image.fromarray(rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8))
+
+
+@pytest.mark.parametrize(
+    "picture",
+    [
+        # Made at the tier's own size, so no reduction smooths it first: even
+        # at the lowest JPEG quality this is ~985 KB, and only fewer pixels fit.
+        lambda: _colour_noise((1300, 880)),
+        _colour_noise,
+        lambda: Image.effect_noise((3000, 2000), 128).convert("RGB"),
+        _photo_like,
+    ],
+    ids=["colour-noise-at-tier", "colour-noise", "grey-noise", "photo-like"],
+)
+def test_the_model_copy_never_exceeds_its_byte_budget(picture):
+    """The verify batch carries a copy per claim that retrieves the image, up to
+    two per claim, and a batch is capped at 256 MB: the WORST case is what has
+    to be bounded, not the typical one."""
+    copy = model_copy(picture())
+    assert len(copy.data) <= MODEL_IMAGE_MAX_BYTES
+
+
+def test_both_models_see_the_pixels_that_are_stored():
+    """The caption model reads the copy's pixels and the judge the stored
+    bytes: for a JPEG copy they must be the same pixels, lossy ones included."""
+    copy = model_copy(_photo_like())
+    assert copy.fmt == "JPEG"
+    stored = Image.open(io.BytesIO(copy.data)).convert("RGB")
+    assert stored.tobytes() == copy.image.convert("RGB").tobytes()
+
+
+def test_a_chart_within_the_budget_stays_lossless():
+    copy = model_copy(Image.open(REAL_CHART))
+    assert copy.fmt == "PNG" and copy.data.startswith(b"\x89PNG")
+    assert len(copy.data) <= MODEL_IMAGE_MAX_BYTES
 
 
 def test_the_model_copy_carries_no_camera_metadata():
@@ -654,11 +742,112 @@ def test_the_model_copy_carries_no_camera_metadata():
         io.BytesIO(_encoded(Image.new("RGB", (60, 40)), "JPEG", exif=exif.tobytes()))
     )
     assert photo.getexif()  # planted
-    copy, _fmt = model_copy(photo)
-    for fmt in ("PNG", "JPEG"):
-        reread = Image.open(io.BytesIO(encode_image(copy, fmt)))
+    copy = model_copy(photo)
+    for data in (copy.data, encode_image(copy.image, "PNG"), encode_image(copy.image, "JPEG")):
+        reread = Image.open(io.BytesIO(data))
         assert not reread.getexif()
-        assert "exif" not in reread.info
+        assert "exif" not in reread.info and "icc_profile" not in reread.info
+
+
+def _lines(size=(4000, 3000)):
+    """1-px black lines every third row: what small print looks like to a resampler."""
+    picture = Image.new("L", size, 255)
+    draw = ImageDraw.Draw(picture)
+    for y in range(0, size[1], 3):
+        draw.line([(0, y), (size[0], y)], fill=0)
+    return picture
+
+
+@pytest.mark.parametrize("mode", ["P", "1"])
+def test_palette_and_bilevel_images_are_reduced_as_smoothly_as_rgb(mode):
+    """Pillow resamples a palette or 1-bit image by nearest neighbour whatever
+    filter it is asked for, dropping or keeping each thin line at random: the
+    copy is made from a full-colour image instead."""
+    smooth = np.asarray(model_copy(_lines().convert("RGB")).image.convert("L"), dtype=float)
+    copy = np.asarray(model_copy(_lines().convert(mode)).image.convert("L"), dtype=float)
+    assert np.abs(copy - smooth).mean() < 3
+
+
+def test_a_sixteen_bit_image_larger_than_the_tier_is_reduced_not_refused():
+    """Pillow cannot resample a 16-bit image at all ('image has wrong mode');
+    it is brought to 8 bits first."""
+    deep = Image.new("I;16", (3000, 2000))
+    deep.putpixel((0, 0), 65535)
+    copy = model_copy(Image.open(io.BytesIO(_encoded(deep, "PNG")))).image
+    assert copy.width * copy.height <= MODEL_IMAGE_MAX_PIXELS
+
+
+def test_a_transparent_sixteen_bit_image_is_flattened_onto_white():
+    """Its transparent colour is a 16-bit value: once scaled to 8 bits it can
+    no longer be matched, so the mask is taken first."""
+    deep = Image.new("I;16", (400, 100))
+    for x in range(400):
+        for y in range(100):
+            deep.putpixel((x, y), 1000 if x < 200 else 16384)
+    stored = Image.open(io.BytesIO(_encoded(deep, "PNG", transparency=1000)))
+    copy = model_copy(stored).image
+    assert copy.getpixel((100, 100))[0] == 255  # transparent: white, not near-black
+    assert copy.getpixel((600, 100))[0] == pytest.approx(64, abs=1)
+
+
+def _profiled(icc: bytes, colour=(255, 0, 0)) -> Image.Image:
+    return Image.open(
+        io.BytesIO(_encoded(Image.new("RGB", (40, 40), colour), "PNG", icc_profile=icc))
+    )
+
+
+def test_an_embedded_colour_profile_is_converted_to_srgb(monkeypatch):
+    """The copy carries no metadata, so colours tagged in another space (an
+    iPhone's Display P3) would otherwise be read as if they were sRGB."""
+    from PIL import ImageCms
+
+    calls = []
+    real = ImageCms.profileToProfile
+
+    def recorded(image, source, target, **options):
+        calls.append(options.get("outputMode"))
+        return real(image, source, target, **options)
+
+    monkeypatch.setattr(ImageCms, "profileToProfile", recorded)
+    srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    assert model_copy(_profiled(srgb)).image.getpixel((5, 5)) == (255, 0, 0)
+    assert calls == ["RGB"]
+    model_copy(Image.new("RGB", (40, 40)))  # no profile, no conversion
+    assert calls == ["RGB"]
+
+
+P3_PROFILE = Path("/System/Library/ColorSync/Profiles/Display P3.icc")
+
+
+@pytest.mark.skipif(not P3_PROFILE.exists(), reason="macOS's Display P3 profile is not here")
+def test_a_display_p3_colour_becomes_the_srgb_colour_it_looks_like():
+    """A real wide-gamut profile. A mid-tone inside both gamuts (P3's pure red
+    would clip to sRGB's and prove nothing): P3 (200, 60, 40) is sRGB about
+    (217, 42, 23), so read as sRGB values unconverted it would be duller."""
+    copy = model_copy(_profiled(P3_PROFILE.read_bytes(), colour=(200, 60, 40))).image
+    assert copy.getpixel((5, 5)) == pytest.approx((217, 42, 23), abs=2)
+
+
+def test_an_unreadable_colour_profile_leaves_the_pixels_as_stored(ingest_log):
+    """A broken profile is what a browser ignores too; it is logged, not fatal."""
+    copy = model_copy(_profiled(b"not an icc profile")).image
+    assert copy.getpixel((5, 5)) == (255, 0, 0)
+    assert "image colour profile not applied" in ingest_log.text
+
+
+DAMAGED_EXIF = [
+    Path(__file__).parent / "fixtures" / "images" / name
+    for name in ("bad_exif_struct.jpg", "bad_exif_type.jpg")
+]
+
+
+@pytest.mark.parametrize("path", DAMAGED_EXIF, ids=["struct-error", "type-error"])
+def test_a_photo_with_damaged_exif_is_still_read_upright(path):
+    """Found by fuzzing the orientation block: Pillow's exif_transpose rewrites
+    the EXIF it reads, and on these files that raised struct.error and
+    TypeError, escaping every handler. Only the orientation tag is read now."""
+    figure = parse_image(path, name=path.name).figures[0]
+    assert figure.image.size == (96, 128)  # 64x48 stored sideways, upright, enlarged twice
 
 
 @pytest.mark.parametrize(
@@ -671,12 +860,16 @@ def test_a_pdf_figure_is_written_byte_for_byte_as_before(tmp_path, mode, fill):
     assert encode_image(figure, "PNG") == (tmp_path / "before.png").read_bytes()
 
 
-def test_parse_image_makes_one_whole_page_figure_named_after_the_file():
-    parsed = parse_image(REAL_CHART, name="Child stunting 2024.png")
+def test_parse_image_makes_one_whole_page_figure_that_does_not_quote_its_file_name():
+    """The name is the user's, not the image's: in the evidence text it could
+    supply a quote or a year the image never prints ('Stunting fell to 23.2% in
+    2024.png'). It titles the document instead (ingest_image)."""
+    parsed = parse_image(REAL_CHART, name="Stunting fell to 23.2% in 2024.png")
     assert (parsed.title, parsed.sections, parsed.tables) == (None, [], [])
     [figure] = parsed.figures
-    assert (figure.page, figure.caption, figure.fmt) == (None, "Child stunting 2024", "PNG")
+    assert (figure.page, figure.caption, figure.fmt) == (None, "", "PNG")
     assert figure.image.size == (992, 1010)  # enlarged twice to read its small print
+    assert figure.encoded is not None and figure.encoded.startswith(b"\x89PNG")
 
 
 def test_parse_image_runs_the_upload_gate_again(tmp_path, bomb_png, no_decoding):
@@ -692,6 +885,22 @@ def test_a_truncated_image_fails_loudly_when_it_is_decoded_naming_the_file(tmp_p
     path.write_bytes(data[: len(data) // 2])
     with pytest.raises(ValueError, match=r"^'cut.png' could not be read as an image"):
         parse_image(path, name="cut.png")
+
+
+def test_any_decoder_error_type_names_the_file(monkeypatch):
+    """Pillow's decoders raise more than OSError: the damaged-EXIF files raised
+    struct.error and TypeError before the orientation was read by hand. A type
+    nobody has seen yet must still name the file, not fail the run anonymously."""
+    import struct
+
+    def decoder_bug(image):
+        raise struct.error("required argument is not an integer")
+
+    monkeypatch.setattr(ingest_mod, "model_copy", decoder_bug)
+    with pytest.raises(
+        ValueError, match=r"^'odd.jpg' could not be read as an image: error: required argument"
+    ):
+        parse_image(REAL_CHART, name="odd.jpg")
 
 
 def _image_upload(conn, tmp_path, data: bytes, name: str, suffix: str):
@@ -730,13 +939,40 @@ def test_ingest_image_indexes_one_figure_read_by_the_caption_model(conn, tmp_pat
     assert json.loads(document["metadata"]) == {"sections": []}
     [chunk] = conn.execute("SELECT * FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
     assert (chunk["kind"], chunk["page"]) == ("figure", None)
-    assert chunk["text"] == f"stunting chart\n\n{reading}"
+    assert chunk["text"] == f"Figure\n\n{reading}"  # the file name is not evidence
     figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (doc_id,)).fetchone()
     assert figure["description"] == reading
     stored = Path(figure["image_path"])
     assert stored.suffix == ".png" and stored.read_bytes().startswith(b"\x89PNG")
     assert Image.open(stored).size == (992, 1010)
     assert path.read_bytes() == original  # the original upload is never rewritten
+
+
+def test_a_caption_model_failure_names_the_image(conn, tmp_path):
+    """With several images in a run, 'cut off at max_tokens' alone does not
+    say which one to crop or replace."""
+    run_id, upload_id, path = _image_upload(
+        conn, tmp_path, REAL_CHART.read_bytes(), "dense.png", ".png"
+    )
+
+    def cut_off(image):
+        raise RuntimeError("LLM image reading was cut off at max_tokens=4096")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^'dense.png' could not be read by the caption model: RuntimeError: LLM image",
+    ):
+        ingest_image(
+            conn,
+            FakeEmbedder(dim=DIM),
+            run_id,
+            path,
+            name="dense.png",
+            kind="SOURCE",
+            figures_dir=tmp_path / "figures",
+            upload_id=upload_id,
+            describe=cut_off,
+        )
 
 
 def test_an_uploaded_photo_is_kept_for_the_judge_as_a_bounded_jpeg(conn, tmp_path):

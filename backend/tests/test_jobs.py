@@ -1942,7 +1942,7 @@ def test_an_image_upload_is_read_as_an_image_and_never_reaches_docling(conn, tmp
     assert document["title"] == "stunting chart"
     [chunk] = conn.execute("SELECT * FROM chunks WHERE doc_id = ?", (document["id"],)).fetchall()
     assert chunk["kind"] == "figure"
-    assert chunk["text"] == "stunting chart\n\nText in the image:\nBurundi: 55.3"
+    assert chunk["text"] == "Figure\n\nText in the image:\nBurundi: 55.3"
     figure = conn.execute("SELECT * FROM figures WHERE doc_id = ?", (document["id"],)).fetchone()
     assert Path(figure["image_path"]).parent == tmp_path / "figures" / run_id / document["id"]
 
@@ -1961,25 +1961,49 @@ def test_an_unreadable_image_fails_the_ingest_naming_the_file(conn, tmp_path):
     assert conn.execute("SELECT count(*) FROM documents").fetchone()[0] == 0
 
 
-def test_the_same_image_again_is_reused_without_reading_it_twice(conn, tmp_path, monkeypatch):
+def test_the_same_image_is_read_again_never_copied(conn, tmp_path):
+    """An image's whole evidence is the caption model's reading of it, so a
+    copy would carry forward whatever prompt, model and pixel handling made the
+    first reading, however they have changed since (nothing stamps them), for
+    a saving of one caption call."""
     from tests.conftest import FakeLLM
 
     first_run, first_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
+    first = FakeLLM(image_description="first reading")
     assert (
-        _reconcile_upload(_image_context(conn, tmp_path, FakeLLM()), first_run, first_upload)
+        _reconcile_upload(_image_context(conn, tmp_path, first), first_run, first_upload) is False
+    )
+
+    second_run, second_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
+    second = FakeLLM(image_description="second reading")
+    assert (
+        _reconcile_upload(_image_context(conn, tmp_path, second), second_run, second_upload)
         is False
     )
-    first_figure = conn.execute("SELECT * FROM figures WHERE run_id = ?", (first_run,)).fetchone()
 
-    poison_providers(monkeypatch)
-    second_run, second_upload, _ = _image_source(conn, tmp_path, content_hash="5a5e")
-    context = PipelineContext(conn, _dedup_settings(tmp_path))
-    assert _reconcile_upload(context, second_run, second_upload) is True
+    assert (first.image_calls, second.image_calls) == (1, 1)
+    figure = conn.execute("SELECT * FROM figures WHERE run_id = ?", (second_run,)).fetchone()
+    assert figure["description"] == "second reading"
 
-    copy = conn.execute("SELECT * FROM figures WHERE run_id = ?", (second_run,)).fetchone()
-    assert copy["description"] == first_figure["description"]
-    assert Path(copy["image_path"]).name == Path(first_figure["image_path"]).name
-    assert Path(copy["image_path"]).read_bytes() == Path(first_figure["image_path"]).read_bytes()
+
+def test_images_are_read_before_the_report(conn, tmp_path, monkeypatch):
+    """A truncated image passes the header-only upload gate; read first, it
+    fails the run in seconds instead of after the report's parse."""
+    from authorai import jobs as jobsmod
+
+    order = []
+    monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: order.append("pdf"))
+    monkeypatch.setattr(jobsmod, "ingest_image", lambda *a, **k: order.append("image"))
+    run_id = dbmod.create_run(conn)
+    report = dbmod.add_upload(conn, "REPORT", "report.pdf", str(tmp_path / "r.pdf"))
+    paper = dbmod.add_upload(conn, "SOURCE", "paper.pdf", str(tmp_path / "p.pdf"))
+    chart = dbmod.add_upload(
+        conn, "SOURCE", "chart.png", str(tmp_path / "c.png"), source_type="image"
+    )
+    payload = {"report_upload_id": report, "source_upload_ids": [paper, chart]}
+    context = _image_context(conn, tmp_path, None)
+    assert step_ingest(context, run_id, payload) == "Read 3 documents"
+    assert order == ["image", "pdf", "pdf"]
 
 
 def test_deleting_a_run_removes_the_original_image_and_its_copy(conn, tmp_path):

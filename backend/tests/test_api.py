@@ -2065,33 +2065,51 @@ def _bomb_png() -> bytes:
     return buffer.getvalue()
 
 
+def _long_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("L", (1080, 15000)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+# Built when the test runs, not when the module is collected: the bomb is a
+# 72-megapixel allocation every `-k` run would otherwise pay for.
 @pytest.mark.parametrize(
-    ("name", "data", "detail"),
+    ("name", "build", "detail"),
     [
         (
             "chart.png",
-            b'<svg xmlns="http://www.w3.org/2000/svg"/>',
+            lambda: b'<svg xmlns="http://www.w3.org/2000/svg"/>',
             "'chart.png' is not a PNG, JPEG or WebP image",
         ),
-        ("chart.png", PDF_BYTES, "'chart.png' is not a PNG, JPEG or WebP image"),
-        ("anim.png", _animated_png(), "'anim.png' is animated; only still images can be checked"),
+        ("chart.png", lambda: PDF_BYTES, "'chart.png' is not a PNG, JPEG or WebP image"),
+        ("anim.png", _animated_png, "'anim.png' is animated; only still images can be checked"),
         (
             "huge.png",
-            _bomb_png(),
+            _bomb_png,
             "'huge.png' is 12000×6000 pixels; images up to 50,000,000 pixels",
         ),
-        ("chart.svg", b"<svg/>", "'chart.svg' is not a PDF or a PNG, JPEG or WebP image"),
-        ("chart.gif", b"GIF89a", "'chart.gif' is not a PDF or a PNG, JPEG or WebP image"),
+        (
+            "scroll.png",
+            _long_png,
+            "'scroll.png' is 1080×15000 pixels, more than 4 times as tall as it is wide;"
+            " crop it into parts",
+        ),
+        ("chart.svg", lambda: b"<svg/>", "'chart.svg' is not a PDF or a PNG, JPEG or WebP image"),
+        ("chart.gif", lambda: b"GIF89a", "'chart.gif' is not a PDF or a PNG, JPEG or WebP image"),
         (
             "IMG_0042.HEIC",
-            b"\x00\x00\x00\x18ftypheic",
+            lambda: b"\x00\x00\x00\x18ftypheic",
             "'IMG_0042.HEIC' is a HEIC photo; export it as JPEG",
         ),
     ],
-    ids=["svg-named-png", "pdf-named-png", "animated", "bomb", "svg", "gif", "heic"],
+    ids=["svg-named-png", "pdf-named-png", "animated", "bomb", "too-long", "svg", "gif", "heic"],
 )
-def test_a_bad_image_source_rejects_the_whole_request_naming_it(tmp_path, name, data, detail):
-    response = _refused(tmp_path, name, data)
+def test_a_bad_image_source_rejects_the_whole_request_naming_it(tmp_path, name, build, detail):
+    response = _refused(tmp_path, name, build())
     assert response.status_code == 400
     assert detail in response.json()["detail"]
 
