@@ -655,11 +655,23 @@ def test_a_reader_that_fails_on_its_own_is_the_servers_fault_not_the_files(
         assert "ImportError: No module named 'pypdf'" in capfd.readouterr().err
 
 
-def test_the_reader_caps_its_address_space_without_loosening_an_inherited_cap(monkeypatch):
+@pytest.mark.parametrize(
+    "in_use",
+    [None, 64 * 2**20],
+    ids=["usage-unknown-as-on-macos", "usage-read-with-headroom-as-on-linux"],
+)
+def test_the_reader_caps_its_address_space_without_loosening_an_inherited_cap(monkeypatch, in_use):
     """Linux enforces RLIMIT_AS; the reader asks for the tighter of its own
     cap and the one it inherited, and a platform that refuses the request
     (macOS answers EINVAL, a ValueError from the resource module) leaves the
-    wall-clock and CPU bounds as the reader's limits — never a failed read."""
+    wall-clock and CPU bounds as the reader's limits — never a failed read.
+
+    The usage reading is pinned, on both platform shapes. Unpinned, Linux
+    reads it from /proc/self/status, where THIS test process (torch and
+    docling imported) already maps about 1 GB — so the headroom rule, the
+    next test's subject, declined the cap and this test failed on CI while
+    passing on macOS, which has no /proc (2026-09-24)."""
+    monkeypatch.setattr(references, "address_space_in_use", lambda: in_use)
     calls = []
     monkeypatch.setattr(resource, "getrlimit", lambda which: (2**29, resource.RLIM_INFINITY))
     monkeypatch.setattr(resource, "setrlimit", lambda which, limits: calls.append((which, limits)))
