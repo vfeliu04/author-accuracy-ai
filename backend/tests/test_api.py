@@ -1292,11 +1292,14 @@ def test_document_file_serves_each_source_type_with_its_media_type(tmp_path):
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 16)
     jpg = settings.uploads_dir / f"{dbmod.new_id()}.jpg"
     jpg.write_bytes(b"\xff\xd8\xff" + b"0" * 16)
+    webp = settings.uploads_dir / f"{dbmod.new_id()}.webp"
+    webp.write_bytes(b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"0" * 8)
     cases = [
         ("web", snapshot, "web", "https://www.who.int/facts", "application/json"),
         ("video", snapshot, "youtube", "https://youtu.be/abc123def45", "application/json"),
         ("png", png, "image", None, "image/png"),
         ("jpg", jpg, "image", None, "image/jpeg"),
+        ("webp", webp, "image", None, "image/webp"),
     ]
     docs = {}
     for name, path, source_type, url, _media in cases:
@@ -1308,6 +1311,8 @@ def test_document_file_serves_each_source_type_with_its_media_type(tmp_path):
             resp = client.get(f"/api/runs/{run_id}/documents/{docs[name]}/file", headers=AUTH)
             assert resp.status_code == 200, name
             assert resp.headers["content-type"].split(";")[0] == media, name
+            # The stored bytes are served as what they are, never re-guessed.
+            assert resp.headers["x-content-type-options"] == "nosniff", name
 
 
 def test_link_only_run_records_planned_page_uploads(tmp_path):
@@ -1966,3 +1971,158 @@ def test_a_scan_that_fails_frees_its_slot(tmp_path, monkeypatch):
             for thread in threads:
                 thread.join(20)
         assert [resp.status_code for resp in results] == [200] * SCAN_CONCURRENCY
+
+
+# ---- Images as sources -------------------------------------------------------
+
+
+def _image_bytes(fmt: str, size=(40, 30), **options) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, "teal").save(buffer, fmt, **options)
+    return buffer.getvalue()
+
+
+def _upload_rows(settings) -> list:
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    rows = conn.execute("SELECT * FROM uploads WHERE kind = 'SOURCE' ORDER BY rowid").fetchall()
+    conn.close()
+    return rows
+
+
+def test_image_sources_are_stored_under_the_suffix_their_bytes_prove(tmp_path):
+    import hashlib
+
+    settings = _settings(tmp_path)
+    png, jpg, webp = _image_bytes("PNG"), _image_bytes("JPEG"), _image_bytes("WEBP")
+    files = [
+        ("report", ("report.pdf", PDF_BYTES, "application/pdf")),
+        ("sources", ("chart.png", png, "image/png")),
+        ("sources", ("photo.JPEG", jpg, "image/jpeg")),
+        ("sources", ("diagram.webp", webp, "image/webp")),
+        # The name says JPEG, the bytes say PNG: stored and served as a PNG.
+        ("sources", ("mislabelled.jpg", png, "image/jpeg")),
+        ("sources", ("paper.pdf", PDF_BYTES, "application/pdf")),
+    ]
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        response = client.post("/api/runs", headers=AUTH, files=files)
+    assert response.status_code == 202, response.text
+
+    rows = _upload_rows(settings)
+    assert [row["file_name"] for row in rows] == [
+        "chart.png",
+        "photo.JPEG",
+        "diagram.webp",
+        "mislabelled.jpg",
+        "paper.pdf",
+    ]
+    assert [row["source_type"] for row in rows] == ["image"] * 4 + ["pdf"]
+    assert [Path(row["path"]).suffix for row in rows] == [".png", ".jpg", ".webp", ".png", ".pdf"]
+    for row, data in zip(rows, (png, jpg, webp, png, PDF_BYTES), strict=True):
+        assert Path(row["path"]).read_bytes() == data  # the original, untouched
+        assert row["content_hash"] == hashlib.sha256(data).hexdigest()
+
+
+def _refused(tmp_path, name, data, **setting_overrides):
+    settings = _settings(tmp_path, **setting_overrides)
+    files = [
+        ("report", ("report.pdf", PDF_BYTES, "application/pdf")),
+        ("sources", ("good.png", _image_bytes("PNG"), "image/png")),
+        ("sources", (name, data, "application/octet-stream")),
+    ]
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        response = client.post("/api/runs", headers=AUTH, files=files)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    assert conn.execute("SELECT count(*) FROM uploads").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
+    conn.close()
+    # Validation happens before any write: no file of any kind was left.
+    assert not settings.uploads_dir.exists() or not any(settings.uploads_dir.iterdir())
+    return response
+
+
+def _animated_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    first, second = Image.new("RGB", (8, 8), "red"), Image.new("RGB", (8, 8), "blue")
+    first.save(buffer, "PNG", save_all=True, append_images=[second])
+    return buffer.getvalue()
+
+
+def _bomb_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("L", (12000, 6000)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("name", "data", "detail"),
+    [
+        (
+            "chart.png",
+            b'<svg xmlns="http://www.w3.org/2000/svg"/>',
+            "'chart.png' is not a PNG, JPEG or WebP image",
+        ),
+        ("chart.png", PDF_BYTES, "'chart.png' is not a PNG, JPEG or WebP image"),
+        ("anim.png", _animated_png(), "'anim.png' is animated; only still images can be checked"),
+        (
+            "huge.png",
+            _bomb_png(),
+            "'huge.png' is 12000×6000 pixels; images up to 50,000,000 pixels",
+        ),
+        ("chart.svg", b"<svg/>", "'chart.svg' is not a PDF or a PNG, JPEG or WebP image"),
+        ("chart.gif", b"GIF89a", "'chart.gif' is not a PDF or a PNG, JPEG or WebP image"),
+        (
+            "IMG_0042.HEIC",
+            b"\x00\x00\x00\x18ftypheic",
+            "'IMG_0042.HEIC' is a HEIC photo; export it as JPEG",
+        ),
+    ],
+    ids=["svg-named-png", "pdf-named-png", "animated", "bomb", "svg", "gif", "heic"],
+)
+def test_a_bad_image_source_rejects_the_whole_request_naming_it(tmp_path, name, data, detail):
+    response = _refused(tmp_path, name, data)
+    assert response.status_code == 400
+    assert detail in response.json()["detail"]
+
+
+def test_an_image_over_the_size_cap_is_413_like_any_file(tmp_path):
+    big = _image_bytes("PNG", size=(200, 200))
+    response = _refused(tmp_path, "big.png", big, max_upload_bytes=len(big) - 1)
+    assert response.status_code == 413
+
+
+def test_the_report_must_stay_a_pdf(tmp_path):
+    settings = _settings(tmp_path)
+    files = [
+        ("report", ("report.png", _image_bytes("PNG"), "image/png")),
+        ("sources", ("source.pdf", PDF_BYTES, "application/pdf")),
+    ]
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        response = client.post("/api/runs", headers=AUTH, files=files)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "'report.png' is not a .pdf file"
+
+
+def test_an_image_only_source_set_is_a_valid_run(tmp_path):
+    settings = _settings(tmp_path)
+    files = [
+        ("report", ("report.pdf", PDF_BYTES, "application/pdf")),
+        ("sources", ("chart.png", _image_bytes("PNG"), "image/png")),
+    ]
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        response = client.post("/api/runs", headers=AUTH, files=files)
+        assert response.status_code == 202, response.text
+        detail = client.get(f"/api/runs/{response.json()['run_id']}", headers=AUTH).json()
+    [source] = [u for u in detail["uploads"] if u["kind"] == "SOURCE"]
+    assert (source["source_type"], source["url"]) == ("image", None)

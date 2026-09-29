@@ -29,6 +29,7 @@ from authorai import db as dbmod
 from authorai import references as refsmod
 from authorai.config import Settings
 from authorai.fetch import is_youtube_url, validate_source_url
+from authorai.ingest import image_suffix
 from authorai.llm import AnthropicClient
 from authorai.log import setup_logger
 
@@ -104,25 +105,61 @@ router = APIRouter(prefix=API_PREFIX)
 Conn = Annotated[sqlite3.Connection, Depends(get_conn)]
 
 
-def _validate_pdf(upload: UploadFile, max_bytes: int) -> None:
-    """Extension, size, and magic — WITHOUT reading the file into memory.
+def _check_size(upload: UploadFile, max_bytes: int) -> None:
+    """`.size` comes from the already-spooled part: the cap holds without the
+    bytes ever being read into memory (v1's cap fired only after the whole file
+    was resident, so it was decorative)."""
+    if upload.size is not None and upload.size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{upload.filename!r} exceeds the {max_bytes} byte per-file limit",
+        )
 
-    `.size` comes from the already-spooled part, and the magic check reads
-    only the first 5 bytes; the full bytes are never materialized (v1's cap
-    fired only after the whole file was resident, so the cap was decorative).
-    """
+
+def _validate_pdf(upload: UploadFile, max_bytes: int) -> None:
+    """Extension, size, and magic — WITHOUT reading the file into memory: the
+    magic check reads only the first 5 bytes."""
     name = upload.filename
     if not name or not name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail=f"{name!r} is not a .pdf file")
-    if upload.size is not None and upload.size > max_bytes:
-        raise HTTPException(
-            status_code=413, detail=f"{name!r} exceeds the {max_bytes} byte per-file limit"
-        )
+    _check_size(upload, max_bytes)
     upload.file.seek(0)
     head = upload.file.read(5)
     upload.file.seek(0)
     if head != b"%PDF-":
         raise HTTPException(status_code=400, detail=f"{name!r} is not PDF content")
+
+
+_IMAGE_NAMES = (".png", ".jpg", ".jpeg", ".webp")
+# The iPhone camera's default; Pillow cannot read it without a new dependency,
+# and browsers other than Safari cannot display it.
+_HEIC_NAMES = (".heic", ".heif")
+
+
+def _validate_source(upload: UploadFile, max_bytes: int) -> tuple[str, str]:
+    """A source file's (source_type, stored suffix). The name picks PDF or
+    image; for an image the BYTES then decide the suffix it is stored under
+    (so the media type the file endpoint serves), read from its header alone —
+    a truncated image passes here and fails loudly, naming itself, at ingest."""
+    name = upload.filename or ""
+    lowered = name.lower()
+    if lowered.endswith(".pdf"):
+        _validate_pdf(upload, max_bytes)
+        return "pdf", ".pdf"
+    if lowered.endswith(_HEIC_NAMES):
+        raise HTTPException(status_code=400, detail=f"{name!r} is a HEIC photo; export it as JPEG")
+    if not lowered.endswith(_IMAGE_NAMES):
+        raise HTTPException(
+            status_code=400, detail=f"{name!r} is not a PDF or a PNG, JPEG or WebP image"
+        )
+    _check_size(upload, max_bytes)
+    upload.file.seek(0)
+    try:
+        return "image", image_suffix(upload.file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{name!r} {exc}") from exc
+    finally:
+        upload.file.seek(0)
 
 
 def _validate_links(raw_links: list[str]) -> list[str]:
@@ -161,10 +198,11 @@ def create_run(
 ) -> dict:
     """Accept a report + its sources and queue the full pipeline.
 
-    Sources are PDF files (`sources`) and/or web links (`source_urls`, one text
-    part per link); at least one is required and together they share the
-    source cap. A link is only CHECKED here — the ingest step fetches it, so a
-    link that cannot be read fails the run with the link named.
+    Sources are PDF or image files (`sources`: PNG, JPEG or WebP; the report
+    itself must be a PDF) and/or web links (`source_urls`, one text part per
+    link); at least one is required and together they share the source cap.
+    A link is only CHECKED here — the ingest step fetches it, so a link that
+    cannot be read fails the run with the link named.
 
     A sync endpoint (runs on the threadpool, so its blocking file/DB writes
     never freeze the event loop). EVERY file is validated before ANY file is
@@ -177,15 +215,18 @@ def create_run(
     total = len(sources) + len(raw_links)
     if total == 0:
         raise HTTPException(
-            status_code=400, detail="at least one source (a PDF file or a web link) is required"
+            status_code=400,
+            detail="at least one source (a PDF, an image or a web link) is required",
         )
     if total > settings.max_source_files:
         raise HTTPException(
             status_code=400, detail=f"too many sources ({total} > {settings.max_source_files})"
         )
-    uploads = [("REPORT", report)] + [("SOURCE", s) for s in sources]
-    for _kind, upload in uploads:
-        _validate_pdf(upload, settings.max_upload_bytes)
+    _validate_pdf(report, settings.max_upload_bytes)
+    uploads = [("REPORT", report, "pdf", ".pdf")] + [
+        ("SOURCE", source, *_validate_source(source, settings.max_upload_bytes))
+        for source in sources
+    ]
     links = _validate_links(raw_links)
     # The run's display title: the dialog's Name field when given, else the
     # report filename stem (filename is validated non-empty by _validate_pdf).
@@ -199,10 +240,10 @@ def create_run(
     written: list[Path] = []
     try:
         rows: list[dbmod.UploadSpec] = []
-        for kind, upload in uploads:
+        for kind, upload, source_type, suffix in uploads:
             # Server-generated disk name: the client filename never touches the
             # path (kept only as the uploads.file_name column for display).
-            path = settings.uploads_dir / f"{dbmod.new_id()}.pdf"
+            path = settings.uploads_dir / f"{dbmod.new_id()}{suffix}"
             upload.file.seek(0)
             # Hash while writing — the content fingerprint that lets a later
             # run reuse this file's ingested data instead of recomputing it.
@@ -218,6 +259,7 @@ def create_run(
                     file_name=upload.filename,
                     path=str(path),
                     content_hash=hasher.hexdigest(),
+                    source_type=source_type,
                 )
             )
         for link in links:
@@ -334,7 +376,12 @@ def get_job(job_id: str, conn: Conn) -> dict:
     return job
 
 
-_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 def _media_type(source_type: str, path: Path) -> str:
@@ -371,6 +418,9 @@ def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) ->
         media_type=_media_type(source_type, path),
         filename=file_name,
         content_disposition_type="inline",
+        # Served as the type its stored suffix names, which the upload's bytes
+        # decided; a browser must not second-guess that.
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
