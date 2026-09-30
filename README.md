@@ -92,8 +92,7 @@ A source can also be a link to a YouTube video. The video's captions are the tex
 backend/
   authorai/            FastAPI app + pipeline: link fetching, ingest (PDFs, web
                        pages, images, YouTube videos), claims, verification,
-                       scoring, credibility,
-                       jobs, chat, search, CLI
+                       scoring, credibility, jobs, chat, search, CLI
   tests/               pytest suite (runs offline; live tests marked "integration")
   evals/               golden claim/verdict sets + recorded baselines
     holdout/           held-out eval set (scored only at phase boundaries)
