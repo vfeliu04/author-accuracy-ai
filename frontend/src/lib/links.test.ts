@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_LINK_LENGTH,
+  canonicalVideoUrl,
   checkLink,
   linkHost,
   linkHostPath,
   safeHttpUrl,
-  sourceName
+  sourceName,
+  youtubeVideoId
 } from "./links";
 
 describe("checkLink", () => {
@@ -63,23 +65,89 @@ describe("checkLink", () => {
     });
   });
 
-  it("refuses YouTube links on every YouTube host", () => {
+  it("accepts a link naming a single YouTube video, on every YouTube host and path form", () => {
     for (const input of [
-      "https://www.youtube.com/watch?v=abc123def45",
-      "https://youtube.com/watch?v=abc123def45",
-      "https://m.youtube.com/watch?v=abc123def45",
-      "https://music.youtube.com/watch?v=abc123def45",
-      "http://YouTube.com/shorts/abc",
-      "https://youtu.be/abc123def45",
-      "https://www.youtu.be/abc123def45",
-      "https://www.youtube-nocookie.com/embed/abc123def45",
-      "https://youtube.com./watch?v=abc",
-      "https://youtube.com../watch?v=abc",
-      "https://www.youtube.com.../watch?v=abc",
-      "https://youtu.be../abc"
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://gaming.youtube.com/watch?v=dQw4w9WgXcQ",
+      "http://YouTube.com/watch?v=dQw4w9WgXcQ",
+      "https://youtube.com/watch/?v=dQw4w9WgXcQ",
+      // The same id repeated is fine; two different ids is not a video link.
+      "https://youtube.com/watch?v=dQw4w9WgXcQ&v=dQw4w9WgXcQ",
+      "https://youtu.be/dQw4w9WgXcQ",
+      "https://youtu.be/dQw4w9WgXcQ/",
+      "https://www.youtu.be/dQw4w9WgXcQ",
+      "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+      "https://youtube.com/embed/dQw4w9WgXcQ/",
+      "https://youtube.com/shorts/dQw4w9WgXcQ",
+      "https://youtube.com/live/dQw4w9WgXcQ",
+      "https://youtube.com/v/dQw4w9WgXcQ",
+      "https://youtube.com/e/dQw4w9WgXcQ",
+      "https://youtubekids.com/watch?v=dQw4w9WgXcQ",
+      // Trailing root dots name the same host.
+      "https://youtube.com./watch?v=dQw4w9WgXcQ",
+      "https://youtube.com../watch?v=dQw4w9WgXcQ",
+      "https://www.youtube.com.../watch?v=dQw4w9WgXcQ",
+      "https://youtu.be../dQw4w9WgXcQ",
+      // The v= value is percent-decoded first.
+      "https://youtube.com/watch?v=%64Qw4w9WgXcQ"
     ]) {
-      expect(checkLink(input, [])).toEqual({ error: "YouTube links aren't supported yet." });
+      expect(checkLink(input, [])).toEqual({
+        link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      });
     }
+  });
+
+  it("refuses a YouTube link that names no single video, on every host", () => {
+    const refused = {
+      error: "That YouTube link isn't a single video. Add the link of one video."
+    };
+    for (const input of [
+      "https://www.youtube.com/",
+      "https://www.youtube.com/@somechannel",
+      "https://www.youtube.com/@somechannel/live",
+      "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv",
+      "https://www.youtube.com/c/somechannel",
+      "https://www.youtube.com/user/somechannel",
+      "https://www.youtube.com/playlist?list=PLabc",
+      "https://www.youtube.com/results?search_query=water",
+      "https://www.youtube.com/embed/videoseries",
+      "https://www.youtube.com/embed/live_stream",
+      "https://consent.youtube.com/m",
+      // Two different ids is not one video.
+      "https://youtube.com/watch?v=dQw4w9WgXcQ&v=other1111111",
+      // A short/too-long id, wherever it would sit.
+      "https://youtu.be/short",
+      "https://youtube.com/shorts/dQw4w9WgXcQtoolong",
+      // An escaped character in a path id: raw_path stays encoded, so this is
+      // not read as the id it would decode to.
+      "https://youtube.com/shorts/dQ%77w9WgXcQ"
+    ]) {
+      expect(checkLink(input, [])).toEqual(refused);
+    }
+  });
+
+  it("does not read a YouTube video link that has anything else wrong with it as one", () => {
+    // A username on a valid video link is refused for having credentials,
+    // never treated as an unusable-video refusal.
+    expect(checkLink("https://user@youtube.com/watch?v=dQw4w9WgXcQ", [])).toEqual({
+      error: "Links with a username or password can't be added."
+    });
+  });
+
+  it("refuses two spellings of the same video as a duplicate", () => {
+    const duplicate = { error: "That link is already added." };
+    const existing = ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"];
+    expect(checkLink("https://youtu.be/dQw4w9WgXcQ", existing)).toEqual(duplicate);
+    expect(checkLink("https://youtube.com/shorts/dQw4w9WgXcQ", existing)).toEqual(duplicate);
+    expect(checkLink("https://m.youtube.com/watch?v=dQw4w9WgXcQ#t=30", existing)).toEqual(
+      duplicate
+    );
+    expect(checkLink("https://youtu.be/otherId1111", existing)).toEqual({
+      link: "https://www.youtube.com/watch?v=otherId1111"
+    });
   });
 
   it("refuses a link with a username or password in it", () => {
@@ -133,7 +201,35 @@ describe("checkLink", () => {
   });
 });
 
+describe("youtubeVideoId and canonicalVideoUrl", () => {
+  it("reads the id from every accepted form", () => {
+    expect(youtubeVideoId("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+    expect(youtubeVideoId("https://youtu.be/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+    expect(youtubeVideoId("https://youtube.com/shorts/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+  });
+
+  it("reads no id from a link that isn't YouTube's or names no single video", () => {
+    expect(youtubeVideoId("https://example.org/watch?v=dQw4w9WgXcQ")).toBeNull();
+    expect(youtubeVideoId("https://www.youtube.com/channel/UCabc")).toBeNull();
+    expect(youtubeVideoId("not a link")).toBeNull();
+  });
+
+  it("builds the one canonical link every accepted spelling becomes", () => {
+    expect(canonicalVideoUrl("dQw4w9WgXcQ")).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  });
+});
+
 describe("link display helpers", () => {
+  it("names a YouTube video row by its host and id, never by its identical /watch path", () => {
+    // Every stored link is already the canonical www.youtube.com form; the
+    // leading www. is dropped since it adds nothing over the bare id.
+    expect(linkHostPath("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBe(
+      "youtube.com · dQw4w9WgXcQ"
+    );
+    expect(linkHostPath("https://youtu.be/dQw4w9WgXcQ")).toBe("youtu.be · dQw4w9WgXcQ");
+  });
+
+
   it("shows the host, and the host plus a readable path", () => {
     expect(linkHost("https://www.example.org:8443/a/b?c=1#d")).toBe("www.example.org:8443");
     expect(linkHostPath("https://example.org/")).toBe("example.org");

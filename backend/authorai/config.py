@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     # Sections past it are dropped with a warning naming the page
     # (web.cap_sections); PDFs are not subject to it.
     web_max_chars: int = 200_000
+    # Wall-clock budget for reading one YouTube video's captions (video.py):
+    # yt-dlp's page and player requests, deno running YouTube's player code,
+    # and the caption file. Measured at 1-3 s a video; the rest covers a cold
+    # player download and a stalled socket (15 s timeout, one retry).
+    video_timeout_seconds: float = 120.0
     # Identifies the fetcher to the sites it reads.
     fetch_user_agent: str = "AuthorAccuracyAI/2.0 (+https://github.com/vfeliu04/author-accuracy-ai)"
     cors_origins: str = "http://localhost:5173"

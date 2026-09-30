@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import type { Report, ReportSource } from "../api/types";
+import { videoProvenance } from "../test/fixtures";
 import FocusCredibility from "./FocusCredibility";
 
 const scored: ReportSource = {
@@ -20,7 +21,8 @@ const scored: ReportSource = {
     publication_date: "2022",
     doi: "10.1017/9781009325844.005"
   },
-  truncated: null
+  truncated: null,
+  video: null
 };
 
 const unscored: ReportSource = {
@@ -33,7 +35,8 @@ const unscored: ReportSource = {
   tier: null,
   components: null,
   metadata: null,
-  truncated: null
+  truncated: null,
+  video: null
 };
 
 const image: ReportSource = {
@@ -46,7 +49,8 @@ const image: ReportSource = {
   tier: null,
   components: null,
   metadata: null,
-  truncated: null
+  truncated: null,
+  video: null
 };
 
 function reportWith(overrides: Partial<Report>): Report {
@@ -121,6 +125,38 @@ describe("FocusCredibility", () => {
     expect(badges[2]).toHaveAttribute("title", "Not scorable");
   });
 
+  it("says 'channel', and how its authority was earned, for a YouTube source", () => {
+    const verifiedTier1: ReportSource = {
+      ...scored,
+      doc_id: "v1",
+      title: "Coastal Talk",
+      source_type: "youtube",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      metadata: { ...scored.metadata, publisher: "World Health Organization" },
+      video: videoProvenance({ duration_seconds: 600, captions: { kind: "manual", language: "en" } })
+    };
+    renderAt(reportWith({ sources: [verifiedTier1] }), "v1");
+    expect(
+      screen.getByText(
+        "“World Health Organization” is on the tier-1 list of international institutions."
+      )
+    ).toBeInTheDocument();
+
+    const unverified: ReportSource = {
+      ...verifiedTier1,
+      doc_id: "v2",
+      components: { metadata_completeness: 24, authority: 15, recency: 12, verification: 16 },
+      metadata: { ...scored.metadata, publisher: "Some Channel" },
+      video: { ...verifiedTier1.video!, channel_verified: false }
+    };
+    renderAt(reportWith({ sources: [unverified] }), "v2");
+    expect(
+      screen.getByText(
+        "“Some Channel” counts as a named publisher (15 of 30): YouTube has not verified this channel, so its name earns no list authority."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("says what a matched registry record did and did not confirm", () => {
     // A publisher's own article page: the record corroborates it, but the page
     // is not the address that record names, so it is neither verified nor a
@@ -154,6 +190,23 @@ describe("FocusCredibility", () => {
         "Metadata was extracted from the document, and no registry record matched it."
       )
     ).toBeInTheDocument();
+  });
+
+  it("says a video's details are what the video declares, not what was extracted", () => {
+    const video: ReportSource = {
+      ...scored,
+      source_type: "youtube",
+      tier: "METADATA_ONLY",
+      components: { metadata_completeness: 18, authority: 15, recency: 6, verification: 5 },
+      video: videoProvenance({ channel_verified: false })
+    };
+    renderAt(reportWith({ sources: [video] }), "a");
+    expect(
+      screen.getByText(
+        "The details are what the video declares about itself (its channel, title and upload date), and no registry record matched them."
+      )
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("extracted from the document");
   });
 
   it("renders a missing run credibility as a dash with a short reason, never a number", () => {

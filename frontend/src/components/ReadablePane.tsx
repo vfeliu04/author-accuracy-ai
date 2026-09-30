@@ -4,35 +4,7 @@ import type { PageSection } from "../api/types";
 import { UnreadablePageError } from "../api/v2";
 import { linkHost, safeHttpUrl } from "../lib/links";
 import { locateQuote, type TextRange } from "../lib/quote";
-
-type Block = { kind: "paragraph" | "table"; start: number; end: number };
-
-// A section's plain text as blocks that keep their ORIGINAL offsets, so a
-// located quote maps straight onto them: paragraphs split on blank lines, and
-// consecutive lines starting with "|" (a table in markdown rows) kept together.
-function splitBlocks(text: string): Block[] {
-  const blocks: Block[] = [];
-  let current: Block | null = null;
-  let lineStart = 0;
-  for (;;) {
-    const newline = text.indexOf("\n", lineStart);
-    const lineEnd = newline === -1 ? text.length : newline;
-    const line = text.slice(lineStart, lineEnd);
-    if (line.trim() === "") {
-      current = null;
-    } else {
-      const kind = line.trimStart().startsWith("|") ? "table" : "paragraph";
-      if (current !== null && current.kind === kind) {
-        current.end = lineEnd;
-      } else {
-        current = { kind, start: lineStart, end: lineEnd };
-        blocks.push(current);
-      }
-    }
-    if (newline === -1) return blocks;
-    lineStart = newline + 1;
-  }
-}
+import { BlockText, splitBlocks } from "../lib/textBlocks";
 
 type Located = { section: number; range: TextRange };
 
@@ -56,31 +28,6 @@ function findQuote(
     if (range !== null) return { section: index, range };
   }
   return null;
-}
-
-// One block's text as plain React text, with the part the mark covers (if
-// any) wrapped in <mark>. A quote spanning blocks gets one mark per block.
-function BlockText({
-  text,
-  block,
-  mark
-}: {
-  text: string;
-  block: Block;
-  mark: TextRange | null;
-}) {
-  if (mark === null || mark.end <= block.start || mark.start >= block.end) {
-    return <>{text.slice(block.start, block.end)}</>;
-  }
-  const from = Math.max(mark.start, block.start);
-  const to = Math.min(mark.end, block.end);
-  return (
-    <>
-      {text.slice(block.start, from)}
-      <mark>{text.slice(from, to)}</mark>
-      {text.slice(to, block.end)}
-    </>
-  );
 }
 
 // A web page as readable text: its title and origin on top, every section

@@ -8,7 +8,7 @@ Run-grounded Q&A over a completed analysis: `POST /api/runs/{run_id}/chat`, impl
 
 1. **Scores** — accuracy (with the correct/incorrect stance-agreement breakdown when present), coverage, credibility /100, validity /100, and the supported/contradicted/unverifiable counts, from `get_run_scores`.
 2. **Claims** — every verdict row from `list_verdicts_with_evidence`: verdict, claim text, rationale, and (when a chunk was cited) the evidence quote with its source document title and where in the source it sits. Disavowed claims are tagged `(disavowed by the report)`.
-3. **Sources** — every source document from `list_run_sources`, the read behind the report's `sources`: `tier <TIER>, credibility <total>/100` when scored, `not scorable (image)` for an image, `not scored` otherwise.
+3. **Sources** — every source document from `list_run_sources`, the read behind the report's `sources`: `tier <TIER>, credibility <total>/100` when scored, `not scorable (image)` for an image, `not scored` otherwise. A YouTube video's line then says what it was read from and whether YouTube verified its channel (`_video_note`): ` — a YouTube video, read from captions written for it; its channel is verified by YouTube` for written captions, and ` — a YouTube video, read from YouTube's automatic captions (speech recognition, which can mishear words); its channel is not verified by YouTube` for speech recognition — a quote from an automatic transcript can carry a misheard word, and an unverified channel's name earns no authority from the publisher lists. A source the text cap (`AUTHORAI_WEB_MAX_CHARS`) read only in part ends its line with `READ IN PART` (`_partial_note`), from the same `truncated` record the source list beside the chat marks *Read in part*: for a page, ` — READ IN PART: only the first <kept> of <total> characters of this page were analysed, so nothing later in it is covered`; for a video, ` — READ IN PART: only the first <time> of this video's captions were analysed, so nothing later in it is covered`, where `<time>` is `kept_until_seconds`, the end of the last transcript window kept, written by the video reader's own clock (`video.clock`: `3:36:05`; `m:ss` under an hour). A video whose cut recorded no span — a first window longer than the cap, cut mid-window — gets the characters wording instead: ` — READ IN PART: only the first <kept> of <total> characters of this video's captions were analysed, so nothing later in it is covered`.
 
 The evidence locator is phrased by the source's **type** (`_evidence_locator`), never inferred from which locator field is empty — Docling leaves the page unset for some PDF items, and that must not read as a web section:
 
@@ -16,10 +16,10 @@ The evidence locator is phrased by the source's **type** (`_evidence_locator`), 
 |---|---|
 | `pdf` | `(source 'World Hunger 2025' p.3)`; no locator when the chunk has no page |
 | `web` | `(source 'Drinking-water' § Access to services)` — the heading the quoted text sits under; no locator when it has none |
+| `youtube` | `(source 'ScienceCasts: The Power of Light' at 1:15)` — where the transcript window the quoted text sits in starts, by `video.clock` (`at 1:02:03` past an hour); no locator when it has none |
+| `image` | `(source 'Stunting by region', image)` |
 
-The code also phrases `youtube` evidence by start time (`at 12:34`, or `at 1:02:03` past an hour) and `image` evidence as `, image`; no upload creates `youtube` evidence yet.
-
-The system prompt (`CHAT_SYSTEM`) tells the model to answer **only** from this block, to say plainly when the analysis does not cover something, and never to invent claims, verdicts, or sources.
+The system prompt (`CHAT_SYSTEM`) tells the model to answer **only** from this block, to say plainly when the analysis does not cover something, and never to invent claims, verdicts, or sources; and that a source marked READ IN PART, a web page or a video, was read only from its beginning, so the rest of it was never seen.
 
 ## Prompt caching
 

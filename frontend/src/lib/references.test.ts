@@ -185,6 +185,12 @@ describe("alreadyAdded", () => {
       );
     });
 
+    it("matches a cited YouTube video already added under another spelling", () => {
+      const cited = scannedReference({ suggested_url: "https://youtu.be/dQw4w9WgXcQ" });
+      const added = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+      expect(alreadyAdded(cited, [], [added])).toBe(added);
+    });
+
     it("does not match a different query string, or an address that isn't a link", () => {
       expect(
         alreadyAdded(scannedReference({ url: "https://example.org/paper?v=2" }), [], ["https://example.org/paper"])

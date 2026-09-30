@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Claim, PageSnapshot, Report, RunDetail } from "../api/types";
 import * as v2 from "../api/v2";
+import { videoProvenance, videoSnapshot } from "../test/fixtures";
 import RunView from "./RunView";
 
 const doneDetail: RunDetail = {
@@ -121,7 +122,8 @@ const report: Report = {
       tier: "VERIFIED_DOI",
       components: {},
       metadata: {},
-      truncated: null
+      truncated: null,
+      video: null
     }
   ]
 };
@@ -147,6 +149,38 @@ const page: PageSnapshot = {
     scholarly: false
   }
 };
+
+const videoPage: PageSnapshot = videoSnapshot({
+  document: {
+    title: "Coastal Talk",
+    sections: [
+      {
+        title: "1:02:03–1:03:18",
+        page: null,
+        text: "it is confirmed by the speaker.",
+        start_seconds: 3723,
+        end_seconds: 3798
+      }
+    ]
+  },
+  provenance: {
+    url: "https://www.youtube.com/watch?v=abc123def45",
+    final_url: "https://www.youtube.com/watch?v=abc123def45",
+    fetched_at: "2026-09-01T10:00:00Z",
+    title: "Coastal Talk",
+    authors: [],
+    publisher: "Example Channel",
+    publication_date: null,
+    doi: null,
+    scholarly: false,
+    video: videoProvenance({
+      id: "abc123def45",
+      channel_verified: false,
+      duration_seconds: 4000,
+      captions: { kind: "manual", language: "en" }
+    })
+  }
+});
 
 function renderAt(url: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -216,8 +250,8 @@ describe("FocusClaims (via ?focus=claims)", () => {
     renderAt("/runs/r?focus=claims");
     await waitFor(() => expect(screen.getByText("Src · p.3")).toBeInTheDocument());
     expect(screen.getByText("Water in Crisis · § Findings")).toBeInTheDocument();
-    // An untitled video is named by its link and cited by its start time.
-    expect(screen.getByText("www.youtube.com/watch · 1:02:03")).toBeInTheDocument();
+    // An untitled video is named by its host and id, cited by its start time.
+    expect(screen.getByText("youtube.com · abc123def45 · 1:02:03")).toBeInTheDocument();
     expect(screen.getByText("No source coverage")).toBeInTheDocument();
   });
 
@@ -239,15 +273,19 @@ describe("FocusClaims (via ?focus=claims)", () => {
     expect(screen.getByText(/· Water in Crisis · § Findings/)).toBeInTheDocument();
   });
 
-  it("offers a video's original instead of a preview", async () => {
+  it("opens a video source as its player, with the cited caption window and quote marked", async () => {
     mockRun();
+    vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(videoPage);
     renderAt("/runs/r?focus=claims&claim=c4");
-    expect(
-      await screen.findByText(/preview isn't available for this video yet/)
-    ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open original ↗" })).toHaveAttribute(
-      "href",
-      "https://www.youtube.com/watch?v=abc123def45"
+    const frame = await screen.findByTitle("Coastal Talk");
+    expect(frame).toHaveAttribute(
+      "src",
+      "https://www.youtube-nocookie.com/embed/abc123def45?start=3723"
     );
+    expect(screen.getByRole("link", { name: "Open on YouTube ↗" })).toHaveAttribute(
+      "href",
+      "https://www.youtube.com/watch?v=abc123def45&t=3723s"
+    );
+    expect(document.querySelector("mark")?.textContent).toBe("it is confirmed");
   });
 });

@@ -108,7 +108,8 @@ const doneReport: Report = {
       tier: "VERIFIED_DOI",
       components: {},
       metadata: {},
-      truncated: null
+      truncated: null,
+      video: null
     }
   ]
 };

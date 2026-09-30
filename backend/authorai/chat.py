@@ -15,6 +15,7 @@ from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.llm import LLM
 from authorai.log import setup_logger
+from authorai.video import channel_verified, clock
 
 logger = setup_logger(__name__)
 
@@ -24,9 +25,9 @@ pipeline extracted the report's claims, verified each against ingested source
 documents, and scored the report. Everything you know about this run is in the
 ANALYSIS block below. Answer ONLY from it — do not invent claims, verdicts, or
 sources, and when the analysis does not cover something, say so plainly.
-A source marked READ IN PART is a web page the pipeline read only the
-beginning of — treat the rest of that page as never seen, and say so rather
-than implying the whole page was checked.
+A source marked READ IN PART is a web page or a video the pipeline read only
+the beginning of — treat the rest of it as never seen, and say so rather than
+implying the whole source was checked.
 Verdicts mean: SUPPORTED / CONTRADICTED / UNVERIFIABLE *relative to the
 ingested sources only*. A claim marked "disavowed by the report" is one the
 report ITSELF calls false — a CONTRADICTED verdict there means the report was
@@ -86,13 +87,6 @@ def _fmt_score(scores: dict | None) -> str:
     )
 
 
-def format_timestamp(seconds: float) -> str:
-    """12:34 under an hour, 1:02:03 beyond: how video players label time."""
-    hours, remainder = divmod(int(seconds), 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
-
-
 def _evidence_locator(row: dict) -> str:
     """Where in its source the quoted evidence sits, phrased by SOURCE TYPE and
     never inferred from which locator happens to be null: Docling leaves page
@@ -102,7 +96,7 @@ def _evidence_locator(row: dict) -> str:
         return ", image"
     if source_type == "youtube":
         start = row.get("evidence_start_seconds")
-        return f" at {format_timestamp(start)}" if start is not None else ""
+        return f" at {clock(start)}" if start is not None else ""
     if source_type == "web":
         section = row.get("evidence_section")
         return f" § {section}" if section else ""
@@ -140,8 +134,29 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
                 f"tier {source['tier']}{_TIER_GLOSS.get(source['tier'], '')}, "
                 f"credibility {source['total']}/100"
             )
-        lines.append(f"- {source['doc_title']!r}: {standing}{_partial_note(source)}")
+        lines.append(
+            f"- {source['doc_title']!r}: {standing}{_video_note(source)}{_partial_note(source)}"
+        )
     return "\n".join(lines)
+
+
+def _video_note(source: dict) -> str:
+    """What a video source was read from: its captions — and when they are
+    YouTube's speech recognition, that they can mishear a word a quote then
+    carries — and whether YouTube verified its channel, which is why its name
+    may or may not have earned a publisher's authority. Empty for every other
+    source, and for a video whose record is not the shape the reader writes."""
+    video = source.get("video")
+    if source.get("source_type") != "youtube" or not isinstance(video, dict):
+        return ""
+    captions = video.get("captions") if isinstance(video.get("captions"), dict) else {}
+    read_from = (
+        "YouTube's automatic captions (speech recognition, which can mishear words)"
+        if captions.get("kind") == "automatic"
+        else "captions written for it"
+    )
+    verified = "verified" if channel_verified(video) else "not verified"
+    return f" — a YouTube video, read from {read_from}; its channel is {verified} by YouTube"
 
 
 def _partial_note(source: dict) -> str:
@@ -171,9 +186,15 @@ def _partial_note(source: dict) -> str:
             type(truncated).__name__,
         )
         return ""
+    video = source.get("source_type") == "youtube"
+    until = truncated.get("kept_until_seconds")
+    if video and isinstance(until, int | float):
+        read = f"{clock(until)} of this video's captions"
+    else:
+        read = f"{kept:,} of {kept + dropped:,} characters of "
+        read += "this video's captions" if video else "this page"
     return (
-        f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of this "
-        "page were analysed, so nothing later in it is covered"
+        f" — READ IN PART: only the first {read} were analysed, so nothing later in it is covered"
     )
 
 

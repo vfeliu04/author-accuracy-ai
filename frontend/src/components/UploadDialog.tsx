@@ -532,6 +532,9 @@ export default function UploadDialog({ onClose }: { onClose: () => void }) {
           <label className="field-label" htmlFor="source-link">
             Add a link
           </label>
+          <p className="modal__count">
+            A web page, or a single YouTube video — its captions become the text checked.
+          </p>
           <div className="link-add">
             <input
               id="source-link"

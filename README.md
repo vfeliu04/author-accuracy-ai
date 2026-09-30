@@ -3,7 +3,7 @@
 [![CI](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/vfeliu04/author-accuracy-ai/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its sources — PDF files, images (PNG, JPEG or WebP), links to web pages, or any mix; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
+Author AI fact-checks a report against the source documents it claims to rest on. Upload a report PDF plus its sources — PDF files, images (PNG, JPEG or WebP), links to web pages or YouTube videos, or any mix; the pipeline extracts every checkable claim from the report, verifies each one against the sources — every verdict must quote its evidence, and code mechanically confirms the quote actually appears in the cited passage — and scores the report on **accuracy**, **credibility**, and **validity**. Every run is retained in a gallery of past verifications and comparable side by side with any other run.
 
 When you pick the report in the upload dialog, the app reads its own reference list and shows the works it cites that are not among your sources, offering the ones with a free copy online (looked up through Unpaywall) as links you can add with a click — nothing is stored until you start the verification.
 
@@ -15,7 +15,9 @@ When you pick the report in the upload dialog, the app reads its own reference l
  report PDF ──┐
  source PDFs ─┤
  images ──────┤
- web links ───┴─► INGEST   links fetched first (a page's readable text, or the PDF it serves)
+ web links ───┤
+ video links ─┴─► INGEST   links read first (a page's readable text, the PDF it serves,
+                           or a YouTube video's captions)
                            Docling parse of PDFs (text · tables · figure images) ─► chunks
                            images transcribed by the vision model (one chunk each)
                            ─► OpenAI embeddings ─► SQLite (sqlite-vec + FTS5, run-scoped)
@@ -52,7 +54,7 @@ A source can be a link to a web page instead of a file. Add it in the upload dia
 - Deleting a run removes the copies kept for its links and the run's figure images, and never a file of yours kept outside the app's uploads folder, or a copy another run still uses.
 - In the claims view, evidence from a web page opens as the stored text with the quoted passage highlighted, cited by its section heading, with a link to the original page.
 - Credibility uses what the page declares about itself: its authors, publisher, date, DOI, and title. When a page declares nothing beyond a title, its text is read for those details instead, the same way a PDF's is. The web address is never used.
-- YouTube links are not supported yet; the upload refuses them.
+- A link to a YouTube video is read as a video (below); a link to any other YouTube page is refused, and a web link that redirects into YouTube stops the run and names the video's own link to add instead.
 
 ### Images as sources
 
@@ -63,12 +65,23 @@ A source can also be an image: a chart, an infographic, a screenshot or a photo,
 - Animated images, HEIC photos (export them as JPEG), images over 50 megapixels and images more than four times as long as they are wide (a long scroll screenshot: crop it into parts) are refused when you upload them.
 - An image has no author, publisher or date to check, so it is listed with the sources but never counted in the credibility score.
 
+### YouTube videos as sources
+
+A source can also be a link to a YouTube video. The video's captions are the text that is checked: a verdict quotes them, and the claims view plays the video from the moment the quote was spoken.
+
+- The captions read are the ones written for the video in the language it is spoken in; failing those, YouTube's automatic captions of that language; failing both, written captions in another language, English first. A machine translation is never read. The claims view says which kind was read: automatic captions are speech recognition, so a word can be misheard.
+- The captions are cut into 75-second windows, each cited by its start time (`12:34`). A very long video is read up to 200,000 characters (roughly three and a half to four hours of speech), and its source row says how far in: *Read in part: the first 3:42:10 of captions*.
+- A video without usable captions, a private, removed or members-only video, and a live or still-processing stream stop the run with the reason, and a retry reads it again; YouTube sometimes asks to confirm the reader is not a bot, and then trying again later is the fix.
+- Credibility treats the channel as the publisher and the upload date as the date. A channel's name earns the publisher lists' authority only when YouTube has verified the channel — any channel can call itself "World Health Organization" — and an unverified channel counts as a named publisher.
+- The video is read by yt-dlp in a separate process with no access to the app's keys, able to reach only YouTube; its player code runs in deno, with no access to files, the network or the environment. The same video pasted in two spellings (`youtu.be/…`, `…/shorts/…`, `watch?v=…`) is one source.
+
 ## Stack
 
 - **Backend** — FastAPI + Pydantic v2, Python 3.11+
 - **Storage** — SQLite with sqlite-vec (vectors) + FTS5 (keywords), fused by reciprocal-rank hybrid search; every table is keyed by `run_id`, so runs are isolated and nothing is ever reset
 - **PDF parsing** — Docling (sections, tables, and figure images are all first-class)
 - **Web pages** — trafilatura for the readable article text, behind a fetcher that refuses private network addresses, connects only to the address it checked, and caps each page's size, fetch time, and reading time
+- **YouTube videos** — yt-dlp (with deno for YouTube's player code) in a bounded reader process with a scrubbed environment and DNS limited to YouTube; captions only, never the video itself
 - **LLM** — Anthropic SDK: structured outputs (`messages.parse()`) with code-verified evidence quotes, the Batch API for bulk verification, vision for chart evidence, prompt caching for chat. `claude-opus-5` for extraction, verdicts, and the validity rubric; `claude-haiku-4-5` for figure captions and source metadata; `claude-sonnet-5` for chat
 - **Embeddings** — OpenAI `text-embedding-3-large`
 - **Frontend** — React 18 + Vite + TanStack Query
@@ -77,9 +90,9 @@ A source can also be an image: a chart, an infographic, a screenshot or a photo,
 
 ```
 backend/
-  authorai/            FastAPI app + pipeline: link fetching, ingest (PDFs and
-                       web pages), claims, verification, scoring, credibility,
-                       jobs, chat, search, CLI
+  authorai/            FastAPI app + pipeline: link fetching, ingest (PDFs, web
+                       pages, images, YouTube videos), claims, verification,
+                       scoring, credibility, jobs, chat, search, CLI
   tests/               pytest suite (runs offline; live tests marked "integration")
   evals/               golden claim/verdict sets + recorded baselines
     holdout/           held-out eval set (scored only at phase boundaries)

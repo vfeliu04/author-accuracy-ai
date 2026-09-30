@@ -4,6 +4,7 @@ import codecs
 import inspect
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -1677,18 +1678,240 @@ def test_a_link_that_served_a_pdf_is_never_called_a_web_page(conn, tmp_path, mon
     assert label == "Read 2 documents (1 link opened)"
 
 
-def test_youtube_links_fail_loudly_until_supported(conn, tmp_path, monkeypatch):
+VIDEO_URL = "https://www.youtube.com/watch?v=HBtdbaSKexU"
+
+
+def _read_video(sections=None):
+    """A stand-in for video.read_video_bounded: what the reader process returns
+    for the NASA video, recording each call. Its declarations come from the
+    real video_provenance over the video's recorded yt-dlp info."""
+    from authorai.ingest import ParsedDocument, ParsedSection
+    from authorai.video import capped_transcript, choose_track, video_provenance
+    from tests.test_video import _info
+
+    calls: list[tuple] = []
+    sections = sections or [
+        ParsedSection(
+            title="0:00–1:14",
+            page=None,
+            text="The Power of Light",
+            start_seconds=0.01,
+            end_seconds=74.5,
+        ),
+        ParsedSection(
+            title="1:15–2:29",
+            page=None,
+            text="sunrises and sunsets",
+            start_seconds=75.2,
+            end_seconds=149.0,
+        ),
+    ]
+
+    def read(video_id, *, timeout, max_chars):
+        calls.append((video_id, timeout, max_chars))
+        # The real reader cuts in its own process, with the same function.
+        kept, truncated = capped_transcript(list(sections), max_chars=max_chars, url=VIDEO_URL)
+        info = {**_info("HBtdbaSKexU"), "id": video_id}
+        provenance = video_provenance(info, choose_track(info))
+        if truncated:
+            provenance["truncated"] = truncated
+        document = ParsedDocument(
+            title="ScienceCasts: The Power of Light", sections=kept, tables=[], figures=[]
+        )
+        return document, provenance
+
+    read.calls = calls
+    return read
+
+
+def test_a_video_is_read_into_a_snapshot_then_ingested_from_it(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+    from authorai.ingest import load_snapshot
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
+    read = _read_video()
+    ingested: list[tuple] = []
+    poison_providers(monkeypatch)  # no page fetch, no model client for a video
+    monkeypatch.setattr(jobsmod, "read_video_bounded", read)
+    monkeypatch.setattr(
+        jobsmod,
+        "ingest_snapshot",
+        lambda conn_, embedder, run, path, **kw: ingested.append((str(path), kw["upload_id"])),
+    )
+    monkeypatch.setattr(PipelineContext, "embedder", property(lambda self: None))
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+
+    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == (
+        "Read 2 documents (1 link opened)"
+    )
+    # The reader is given the id alone, within the configured budget.
+    assert read.calls == [("HBtdbaSKexU", SETTINGS.video_timeout_seconds, SETTINGS.web_max_chars)]
+    parsed, provenance = load_snapshot(planned)
+    assert [s.start_seconds for s in parsed.sections] == [0.01, 75.2]
+    assert (provenance["url"], provenance["final_url"]) == (VIDEO_URL, VIDEO_URL)
+    assert provenance["fetched_at"]
+    assert provenance["publisher"] == "NASA Science"
+    assert provenance["video"]["captions"] == {"kind": "manual", "language": "en"}
+    assert "truncated" not in provenance and "content_type" not in provenance
+    row = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+    assert (row["source_type"], row["content_hash"], row["path"]) == ("youtube", None, str(planned))
+    assert ingested == [(str(planned), upload_id)]
+
+
+def test_the_video_budget_is_its_own_setting(monkeypatch):
+    assert Settings(anthropic_api_key="x", openai_api_key="x").video_timeout_seconds == 120.0
+    monkeypatch.setenv("AUTHORAI_VIDEO_TIMEOUT_SECONDS", "45")
+    assert Settings(anthropic_api_key="x", openai_api_key="x").video_timeout_seconds == 45.0
+
+
+def test_a_long_videos_captions_are_capped_with_the_span_they_cover(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedSection, load_snapshot
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
+    windows = [
+        ParsedSection(
+            title=f"w{n}",
+            page=None,
+            text="word " * 200,
+            start_seconds=75.0 * n,
+            end_seconds=75.0 * n + 74,
+        )
+        for n in range(10)
+    ]
+    monkeypatch.setattr(jobsmod, "read_video_bounded", _read_video(windows))
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", web_max_chars=3000)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    step_ingest(PipelineContext(conn, settings), run_id, payload)
+    parsed, provenance = load_snapshot(planned)
+    assert len(parsed.sections) == 3
+    # The span read travels with the numbers: "the first 3:44 of the captions".
+    assert provenance["truncated"] == {
+        "kept_chars": 3000,
+        "dropped_chars": 7000,
+        "kept_until_seconds": 224.0,
+    }
+
+
+def test_a_refused_video_fails_the_ingest_before_any_document_naming_it(
+    conn, tmp_path, monkeypatch
+):
+    from authorai import jobs as jobsmod
+    from authorai.video import VideoRefusedError
+
+    run_id = dbmod.create_run(conn)
+    report_pdf = tmp_path / "r.pdf"
+    report_pdf.write_bytes(b"%PDF-r")
+    report = dbmod.add_upload(conn, "REPORT", "r.pdf", str(report_pdf), "aaaa10")
+    upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
+    poison_providers(monkeypatch)
+
+    def refused(video_id, *, timeout, max_chars):
+        raise VideoRefusedError(f"The YouTube video {VIDEO_URL} cannot be read: Private video")
+
+    monkeypatch.setattr(jobsmod, "read_video_bounded", refused)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    with pytest.raises(VideoRefusedError, match=re.escape(VIDEO_URL)):
+        step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+    assert not planned.exists()
+    count = conn.execute("SELECT count(*) FROM documents WHERE run_id = ?", (run_id,)).fetchone()
+    assert count[0] == 0
+
+
+def test_a_retry_never_reads_a_stored_transcript_again(conn, tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedDocument, ParsedSection, write_snapshot
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
+    write_snapshot(
+        planned,
+        ParsedDocument(
+            title="T",
+            sections=[
+                ParsedSection(
+                    title="0:00–0:10", page=None, text="kept", start_seconds=0.0, end_seconds=10.0
+                )
+            ],
+            tables=[],
+            figures=[],
+        ),
+        {"url": VIDEO_URL},
+    )
+    monkeypatch.setattr(
+        jobsmod, "read_video_bounded", lambda *a, **k: pytest.fail("re-read a stored transcript")
+    )
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    assert step_ingest(PipelineContext(conn, SETTINGS), run_id, payload) == "Read 2 documents"
+
+
+def test_a_video_row_whose_link_names_no_video_fails_naming_it(conn, tmp_path, monkeypatch):
     from authorai import jobs as jobsmod
 
     run_id = dbmod.create_run(conn)
     report = _completed_report(conn, tmp_path, run_id)
     upload_id, _ = _link_upload(
-        conn, tmp_path, "https://www.youtube.com/watch?v=abc123def45", source_type="youtube"
+        conn, tmp_path, "https://www.youtube.com/@NASA", source_type="youtube"
     )
-    monkeypatch.setattr(jobsmod, "fetch_url", lambda *a, **k: pytest.fail("fetched a video page"))
+    monkeypatch.setattr(
+        jobsmod, "read_video_bounded", lambda *a, **k: pytest.fail("read a non-video")
+    )
     payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
-    with pytest.raises(ValueError, match="YouTube"):
+    with pytest.raises(ValueError, match="https://www.youtube.com/@NASA"):
         step_ingest(PipelineContext(conn, SETTINGS), run_id, payload)
+
+
+def test_a_videos_self_description_and_span_reach_the_report_source_row(
+    conn, tmp_path, monkeypatch
+):
+    """End to end from the reader's return to the query /report uses, with the
+    real snapshot write and the real ingest: the frontend's player and its
+    "read in part" line read these fields."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedSection
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, _ = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
+    windows = [
+        ParsedSection(
+            title=f"w{n}",
+            page=None,
+            text=f"window {n} " * 40,
+            start_seconds=75.0 * n,
+            end_seconds=75.0 * n + 70,
+        )
+        for n in range(4)
+    ]
+    monkeypatch.setattr(jobsmod, "read_video_bounded", _read_video(windows))
+    settings = Settings(
+        anthropic_api_key="x",
+        openai_api_key="x",
+        figures_dir=tmp_path / "figures",
+        web_max_chars=800,
+    )
+    context = PipelineContext(conn, settings)
+    context._embedder = FakeEmbedder(dim=DIM)
+    step_ingest(context, run_id, {"report_upload_id": report, "source_upload_ids": [upload_id]})
+    [row] = dbmod.list_run_sources(conn, run_id)
+    assert row["source_type"] == "youtube"
+    assert row["video"]["embeddable"] is True
+    assert row["video"]["channel_verified"] is False
+    assert row["truncated"]["kept_until_seconds"] == 145.0
+    starts = [
+        chunk["start_seconds"]
+        for chunk in conn.execute(
+            "SELECT start_seconds FROM chunks WHERE doc_id = ? ORDER BY rowid", (row["doc_id"],)
+        )
+    ]
+    assert starts and set(starts) <= {0.0, 75.0}
 
 
 def test_a_page_whose_charset_only_the_http_header_names_is_decoded_with_it(

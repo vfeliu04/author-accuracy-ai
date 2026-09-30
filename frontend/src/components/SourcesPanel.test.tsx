@@ -37,7 +37,8 @@ const sources: ReportSource[] = [
     tier: "VERIFIED_DOI",
     components: { authority: 30 },
     metadata: {},
-    truncated: null
+    truncated: null,
+    video: null
   },
   {
     doc_id: "b",
@@ -49,7 +50,8 @@ const sources: ReportSource[] = [
     tier: null,
     components: null,
     metadata: null,
-    truncated: null
+    truncated: null,
+    video: null
   },
   {
     doc_id: "c",
@@ -61,7 +63,8 @@ const sources: ReportSource[] = [
     tier: null,
     components: null,
     metadata: null,
-    truncated: null
+    truncated: null,
+    video: null
   },
   {
     doc_id: "e",
@@ -73,7 +76,8 @@ const sources: ReportSource[] = [
     tier: "METADATA_ONLY",
     components: {},
     metadata: {},
-    truncated: null
+    truncated: null,
+    video: null
   }
 ];
 
@@ -295,8 +299,8 @@ describe("SourcesPanel", () => {
     expect(screen.getByText("Not scorable")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Image" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Video" })).toBeInTheDocument();
-    // An untitled video is named by its link.
-    expect(screen.getByText("www.youtube.com/watch")).toBeInTheDocument();
+    // An untitled video is named by its host and id, not its identical path.
+    expect(screen.getByText("youtube.com · abc123def45")).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/NaN|undefined|null/);
   });
 
@@ -311,7 +315,8 @@ describe("SourcesPanel", () => {
       tier: "MATCHED_RECORD",
       components: {},
       metadata: {},
-      truncated: null
+      truncated: null,
+      video: null
     };
     render(
       <SourcesPanel
@@ -337,7 +342,8 @@ describe("SourcesPanel", () => {
       tier: "METADATA_ONLY",
       components: {},
       metadata: {},
-      truncated: null
+      truncated: null,
+      video: null
     };
     render(
       <SourcesPanel
@@ -374,6 +380,40 @@ describe("SourcesPanel", () => {
     expect(note.closest(".src-row")).toContainElement(screen.getByText("Water report 2024"));
     // Only the page that was cut says so.
     expect(screen.getAllByText("Read in part")).toHaveLength(1);
+  });
+
+  it("says how much of a video's captions were read, as a span, not a character count", () => {
+    const partial: ReportSource = {
+      ...sources[3],
+      truncated: { kept_chars: 750000, dropped_chars: 128000, kept_until_seconds: 13330 }
+    };
+    render(
+      <SourcesPanel
+        uploads={uploads}
+        report={{ ...doneReport, sources: [sources[0], partial] }}
+        ingestStatus="done"
+      />
+    );
+    const note = screen.getByText("Read in part: the first 3:42:10 of captions");
+    expect(note).toHaveAttribute("title", "The rest of this video's captions were not analysed.");
+  });
+
+  it("counts characters for a video cut mid-window, and still calls it captions", () => {
+    const partial: ReportSource = {
+      ...sources[3],
+      truncated: { kept_chars: 200000, dropped_chars: 50000 }
+    };
+    render(
+      <SourcesPanel
+        uploads={uploads}
+        report={{ ...doneReport, sources: [sources[0], partial] }}
+        ingestStatus="done"
+      />
+    );
+    expect(screen.getByText("Read in part")).toHaveAttribute(
+      "title",
+      `Read ${(200000).toLocaleString()} of ${(250000).toLocaleString()} characters. The rest of this video's captions were not analysed.`
+    );
   });
 
   it("opens any source, including one that can't be scored", () => {

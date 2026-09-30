@@ -40,6 +40,13 @@ dependencies = [
     # pypdf reads the same files in well under a second and needs no layout.
     # Not a docling dependency (docling uses pypdfium2), so it is pinned here.
     "pypdf==3.17.4",
+    # YouTube sources: a video's caption tracks and captions (video.py). The
+    # [default] extra pins yt-dlp-ejs, the solver for YouTube's player code,
+    # which needs a JavaScript runtime: deno, from its PyPI wheel, runs that
+    # code with no file, network or environment access. Pinned exactly — see
+    # docs/development.md for the bump routine.
+    "yt-dlp[default]==2026.8.19",
+    "deno==2.9.5",
 ]
 
 [project.optional-dependencies]

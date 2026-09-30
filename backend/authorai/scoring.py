@@ -40,6 +40,7 @@ from authorai.credibility import (
 from authorai.llm import LLM
 from authorai.log import setup_logger
 from authorai.verification import normalize_quote, verdict_stamp
+from authorai.video import channel_verified
 
 logger = setup_logger(__name__)
 
@@ -429,6 +430,7 @@ def score_run(
             # operator uploaded is the file they meant.
             address = document["fetched_from"]
             fetched = address is not None
+            listed = (tier1, tier2)
             if document["source_type"] in dbmod.LINK_SOURCE_TYPES:
                 # The page declared its own metadata at ingest; a model call is the
                 # fallback only when it declared nothing beyond a title.
@@ -442,6 +444,13 @@ def score_run(
                 # page owner's words, so the fallback extraction below is gated
                 # the same way.
                 address = provenance.get("final_url") or address
+                if document["source_type"] == "youtube" and not channel_verified(
+                    provenance.get("video")
+                ):
+                    # Any channel can name itself after an organisation; YouTube's
+                    # verification is its check that the channel is that one. An
+                    # unverified channel still names a publisher, and earns that.
+                    listed = ([], [])
             # No usable address: Fetched decides that, and decides it closed.
             origin: Origin = Fetched(address) if fetched else UPLOADED
             if metadata is None:
@@ -455,8 +464,8 @@ def score_run(
             scored = score_source(
                 merged,
                 tier,
-                tier1_publishers=tier1,
-                tier2_publishers=tier2,
+                tier1_publishers=listed[0],
+                tier2_publishers=listed[1],
                 current_year=current_year,
             )
             year_match = re.search(r"\b(19|20)\d{2}\b", merged.publication_date or "")

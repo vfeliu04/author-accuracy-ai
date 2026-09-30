@@ -45,10 +45,10 @@ from authorai.credibility import clean_doi, get_json_with_retries, registry_clie
 from authorai.fetch import (
     MAX_URL_LENGTH,
     is_public_address,
-    is_youtube_url,
     shown_text,
     url_host,
     validate_source_url,
+    video_link,
 )
 from authorai.llm import LLM
 from authorai.log import setup_logger
@@ -1123,8 +1123,10 @@ def offerable_url(url: str) -> str:
     """The address in the form a pasted link takes, or ValueError when the
     app would refuse the link: every refusal the upload dialog's own link
     check makes (lib/links.ts checkLink) — the syntax gate a pasted link
-    passes and the YouTube refusal `POST /api/runs` makes, so the scan never
-    suggests a link the dialog then refuses to add — then the one refusal
+    passes and the refusal of a YouTube page that is not one video `POST
+    /api/runs` makes, so the scan never suggests a link the dialog then
+    refuses to add; a single video is offered in its canonical form — then
+    the one refusal
     the fetcher would make that needs no network. A LITERAL address host
     must pass fetch.is_public_address — the gate the fetcher applies to
     every resolved hop — and `localhost`, or any name under it, is the local
@@ -1137,8 +1139,9 @@ def offerable_url(url: str) -> str:
     and refused at ingest, where every resolved answer is gated. An offer
     is only ever as good as that gate."""
     normalized = validate_source_url(url)
-    if is_youtube_url(normalized):
-        raise ValueError(f"Source URL {normalized!r}: YouTube links are not supported yet")
+    video = video_link(normalized)
+    if video is not None:
+        return video  # the one form the dialog and POST /api/runs store a video under
     host = url_host(normalized) or ""
     if host == "localhost" or host.endswith(".localhost"):
         raise ValueError(f"Source URL {normalized!r} names the local machine")

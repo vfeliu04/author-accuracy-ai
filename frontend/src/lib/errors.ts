@@ -1,9 +1,12 @@
 // Raw exception text is for logs; users get the translation (the raw message
 // stays visible in a collapsible block wherever this is rendered).
 
+import { youtubeVideoId } from "./links";
+
 type ErrorHint = {
   match: RegExp;
-  hint: (found: RegExpExecArray) => string;
+  // `about.video`: the link the message names is a YouTube video.
+  hint: (found: RegExpExecArray, about: { video: boolean }) => string;
   // "prefix": a link failure names the link, so the reader knows which one to
   // fix. "required": the same, and the hint is skipped when the message names
   // no link — "HTTP 404" and "timed out" are generic network phrasing that
@@ -56,13 +59,91 @@ const ERROR_HINTS: ErrorHint[] = [
     link: "required",
     hint: () => "That page is too large or complex to read in time."
   },
-  // Any other way reading an arrived page fails: the reader stopped, or raised
-  // something unexpected. Its inner text must not pick a hint below.
+  // A YouTube video source (video.py): its message always names the video's
+  // own canonical link via _cannot/_could_not, so these come before the
+  // generic "could not be read: " catch-all below, which would otherwise
+  // swallow the deno-runtime failure with a "page" message that fits neither.
+  {
+    match: /cannot be read: it has no usable captions/,
+    link: "required",
+    hint: () =>
+      "That video has no usable captions — neither ones written for it nor YouTube's automatic captions in its spoken language — so it can't be checked."
+  },
+  {
+    match: /YouTube asked to confirm the reader is not a bot/,
+    link: "required",
+    hint: () =>
+      "YouTube asked to confirm the reader isn't a bot (it does this for live streams, and when it limits requests from this network). Try again later."
+  },
+  {
+    match: /it is live now|it has not started yet|it has just ended/,
+    link: "required",
+    hint: () =>
+      "That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later."
+  },
+  {
+    match: /YouTube withheld this video's captions/,
+    link: "required",
+    hint: () => "YouTube withheld this video's captions from the reader. Try again later."
+  },
+  {
+    match: /cannot be read: (?:Private video|Video unavailable)/,
+    link: "required",
+    hint: () => "YouTube says that video is private or has been removed, so it can't be read."
+  },
+  {
+    match: /took longer than [\d.]+ seconds to read — YouTube may be slow to answer/,
+    link: "required",
+    hint: () => "Reading that video took too long — YouTube may be slow to answer. Try again later."
+  },
+  {
+    match: /its captions are larger than [\d,]+ bytes/,
+    link: "required",
+    hint: () => "That video's captions are larger than the reader can handle."
+  },
+  {
+    match: /could not use its JavaScript runtime \(deno\)/,
+    link: "required",
+    hint: () =>
+      "The verification server's video reader couldn't start its JavaScript runtime. This is a server problem, not the link — let the operator know."
+  },
+  {
+    // The server names the video it was about to read, like its "could not
+    // use" neighbor above.
+    match: /JavaScript runtime \(deno\) is not installed/,
+    link: "required",
+    hint: () =>
+      "The verification server's video reader isn't fully installed. This is a server problem, not the link — let the operator know."
+  },
+  {
+    match: /redirects to the YouTube video/,
+    link: "required",
+    hint: () =>
+      "That link redirects to a YouTube video — add the video's own link as a source instead of the web page."
+  },
+  {
+    match: /redirects to a YouTube page/,
+    link: "required",
+    hint: () =>
+      "That link redirects to a YouTube page (a channel, playlist or search page), which can't be read as a source."
+  },
+  {
+    // YouTube rate-limiting the video reader: yt-dlp's own words, inside the
+    // reader's failure, which the catch-all below would otherwise take.
+    match: /The YouTube video\s+could not be read: [^]*?\bHTTP (?:Error )?429\b/,
+    link: "required",
+    hint: () => "YouTube is limiting requests from this network. Try again later."
+  },
+  // Any other way reading an arrived page or a video fails: the reader
+  // stopped, or raised something unexpected. Its inner text must not pick a
+  // hint below.
   {
     match: /could not be read: /,
     link: "required",
-    hint: () =>
-      "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    hint: (_found, { video }) =>
+      video
+        ? "Reading that video failed unexpectedly. Retrying may help; if it keeps failing, remove that video."
+        : "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
   },
   // The ways a link fails before its page arrives, each keyed to the server's
   // own wording. They come before the generic status and timeout phrasing: a
@@ -234,6 +315,9 @@ function asQuoted(link: string): string {
 // cut a long link short and the added link starts with what is left. Each link
 // is looked for as added and as quoted.
 export function linksNamedIn(error: string, links: readonly string[]): string[] {
+  // A page that redirects into YouTube is refused naming the video it leads
+  // to, as the link to add instead: that video is not what failed.
+  error = error.replace(/redirects to the YouTube video \S+/g, "redirects to the YouTube video");
   const cutStarts = namedLinks(error)
     .filter((named) => named.cut)
     .map((named) => named.link);
@@ -253,10 +337,11 @@ export function humanizeError(error: string | null): string | null {
   const { named, words } = scanLinks(error);
   const first = named[0];
   const shown = first ? `${first.link}${first.cut ? "…" : ""}` : null;
+  const video = first !== undefined && youtubeVideoId(first.link) !== null;
   for (const { match, hint, link } of ERROR_HINTS) {
     const found = match.exec(words);
     if (found === null || (link === "required" && shown === null)) continue;
-    const sentence = hint(found);
+    const sentence = hint(found, { video });
     return link !== undefined && shown !== null ? `${shown} — ${sentence}` : sentence;
   }
   return null;

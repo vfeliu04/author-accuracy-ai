@@ -33,7 +33,7 @@ from authorai import db as dbmod
 from authorai.claims import claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.fetch import FetchedResponse, _where, fetch_url
+from authorai.fetch import FetchedResponse, _where, fetch_url, youtube_video_id
 from authorai.ingest import (
     FIGURE_DESCRIPTION_PROMPT,
     IMAGE_DESCRIPTION_MAX_TOKENS,
@@ -49,6 +49,7 @@ from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
 from authorai.verification import verify_run
+from authorai.video import read_video_bounded
 from authorai.web import (
     ExtractionTimeoutError,
     ThinPageError,
@@ -297,7 +298,7 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
 
 
 def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list[str]) -> int:
-    """Fetch every link whose page is not stored yet, BEFORE any document is
+    """Fetch every link whose page (or video's captions) is not stored yet, BEFORE any document is
     processed: a link that cannot be read fails the run in seconds, not after
     the report's parse, figure captions, and embeddings have spent money.
     A stored page that loads is never fetched again, so a retry resumes where
@@ -312,8 +313,6 @@ def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list
         upload = conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
         if upload is None or upload["source_type"] not in dbmod.LINK_SOURCE_TYPES:
             continue  # an unknown upload id is reported loudly by _reconcile_upload
-        if upload["source_type"] == "youtube":
-            raise ValueError(f"YouTube sources are not supported yet: {upload['url']!r}")
         path = Path(upload["path"])
         if path.exists():
             problem = _snapshot_problem(path)
@@ -332,7 +331,10 @@ def _fetch_pending_links(context: PipelineContext, run_id: str, upload_ids: list
                 "stored page for %s will not load (%s) — fetching it again", upload["url"], problem
             )
             path.unlink()
-        _fetch_link(context, upload)
+        if upload["source_type"] == "youtube":
+            _read_video(context, upload)
+        else:
+            _fetch_link(context, upload)
         fetched += 1
     return fetched
 
@@ -407,6 +409,34 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
         **({"truncated": capped.truncated} if capped.truncated else {}),
         **asdict(page),
     }
+    write_snapshot(planned, parsed, provenance)
+    _drop_other_link_artifacts(planned, keep=planned)
+
+
+def _read_video(context: PipelineContext, upload: sqlite3.Row) -> None:
+    """Read one video's captions and store them as the link's snapshot, like a
+    page: capped at web_max_chars by the reader itself — the cut recorded in
+    the provenance, with the span of video it kept whenever that is known,
+    since "read in part" alone cannot say which minutes were checked — and
+    never hashed, since videos do not dedup. The reader is given the id
+    alone (video.read_video_bounded); its refusal, timeout or failure
+    propagates naming the video, and the retry reads it again."""
+    video_id = youtube_video_id(upload["url"])
+    if video_id is None:
+        raise ValueError(f"Source {upload['url']!r} is recorded as a YouTube video but names none")
+    parsed, declared = read_video_bounded(
+        video_id,
+        timeout=context.settings.video_timeout_seconds,
+        max_chars=context.settings.web_max_chars,
+    )
+    provenance = {
+        **declared,
+        "url": upload["url"],
+        "final_url": upload["url"],
+        "fetched_at": dbmod.now_iso(),
+    }
+    planned = Path(upload["path"])
+    planned.parent.mkdir(parents=True, exist_ok=True)
     write_snapshot(planned, parsed, provenance)
     _drop_other_link_artifacts(planned, keep=planned)
 

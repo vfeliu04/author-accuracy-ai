@@ -21,6 +21,7 @@ import textwrap
 import threading
 import time
 from multiprocessing import resource_tracker
+from pathlib import Path
 
 import pytest
 
@@ -431,6 +432,171 @@ def test_a_reader_whose_server_dies_stops_reading(tmp_path):
             os.kill(reader, signal.SIGKILL)
     assert not orphaned, "the reader kept running after its server died"
     assert list(server_tmp.glob("authorai-page-*")) == []
+
+
+# --- what a reader starts ends with it ----------------------------------------
+
+
+def _reader_reports_its_group(sender, _payload_path, cpu_seconds):
+    web_mod.end_with_parent(cpu_seconds)
+    web_mod.report_outcome(sender, lambda: (os.getpid(), os.getpgid(0)), lambda exc: "other")
+
+
+def _reader_that_starts_a_sleeper(sender, _payload_path, pid_file, then, cpu_seconds):
+    """A reader that starts a program of its own (as yt-dlp starts deno), notes
+    the program's pid, then reports at once or holds its whole budget."""
+    web_mod.end_with_parent(cpu_seconds)
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    Path(pid_file).write_text(str(sleeper.pid))
+    if then == "report":
+        web_mod.report_outcome(sender, lambda: "done", lambda exc: "other")
+    else:
+        threading.Event().wait(60)
+
+
+def _run_sleeper_reader(pid_file: Path, then: str) -> None:
+    """Run _reader_that_starts_a_sleeper to its end: it reports ("report") or
+    is stopped at its deadline ("hold")."""
+    kwargs = {"payload_path": None, "url": "https://example.org/s"}
+    if then == "report":
+        result = web_mod.in_bounded_child(
+            _reader_that_starts_a_sleeper, (str(pid_file), then), timeout=30, **kwargs
+        )
+        assert result == ("result", "done")
+    else:
+        with pytest.raises(ExtractionTimeoutError):
+            web_mod.in_bounded_child(
+                _reader_that_starts_a_sleeper, (str(pid_file), then), timeout=8, **kwargs
+            )
+
+
+def _wait_for_pid(pid_file: Path, seconds: float = 20) -> int:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if pid_file.exists() and pid_file.read_text():
+            return int(pid_file.read_text())
+        time.sleep(0.02)
+    raise AssertionError("the reader never started its program")
+
+
+def _gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while _running(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _running(pid)
+
+
+def test_a_reader_leads_its_own_process_group():
+    kind, (pid, group) = web_mod.in_bounded_child(
+        _reader_reports_its_group, (), payload_path=None, url="https://example.org/g", timeout=30
+    )
+    assert kind == "result"
+    assert group == pid != os.getpgid(0)
+
+
+@pytest.mark.parametrize("then", ["report", "hold"])
+def test_stopping_a_reader_stops_what_it_started(tmp_path, then):
+    """Reported or stopped at the deadline, a reader leaves nothing running:
+    the program it started (yt-dlp's deno, for the video reader) is in its
+    process group, and stopping the reader kills the group."""
+    pid_file = tmp_path / "sleeper.pid"
+    sleeper = None
+    try:
+        _run_sleeper_reader(pid_file, then)
+        sleeper = _wait_for_pid(pid_file, 1)
+        assert _gone_within(sleeper, 5), "the reader's program outlived it"
+    finally:
+        if sleeper is not None and _running(sleeper):
+            os.kill(sleeper, signal.SIGKILL)
+
+
+def _reader_that_exits_without_reporting(sender, _payload_path, cpu_seconds):
+    web_mod.end_with_parent(cpu_seconds)
+    os._exit(0)
+
+
+def _present(pid: int) -> bool:
+    """Whether the process table still holds `pid`, running or a zombie."""
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return state.returncode == 0 and state.stdout.strip() != ""
+
+
+@pytest.mark.parametrize("how", ["report", "hold", "exit"])
+def test_a_readers_group_is_killed_before_the_reader_is_reaped(tmp_path, monkeypatch, how):
+    """While the reader is unreaped (running, or a zombie), its pid — and so its
+    group's id — cannot be given to another process: the group kill must come
+    first, or it could reach an unrelated group that took the freed number."""
+    seen = []
+    real = web_mod._kill_group
+
+    def watching(pid):
+        seen.append(_present(pid))
+        real(pid)
+
+    monkeypatch.setattr(web_mod, "_kill_group", watching)
+    pid_file = tmp_path / "sleeper.pid"
+    if how == "exit":
+        with pytest.raises(web_mod.ReaderExitedError):
+            web_mod.in_bounded_child(
+                _reader_that_exits_without_reporting,
+                (),
+                payload_path=None,
+                url="https://example.org/e",
+                timeout=30,
+            )
+    else:
+        _run_sleeper_reader(pid_file, how)
+    if pid_file.exists():
+        sleeper = int(pid_file.read_text())
+        assert _gone_within(sleeper, 5)
+    assert seen == [True]
+
+
+_DYING_SERVER_WITH_A_PROGRAM = textwrap.dedent(
+    """
+    import os, signal, sys, threading, time
+    from pathlib import Path
+    import authorai.web as web
+    from tests.test_web_reader import _reader_that_starts_a_sleeper
+    pid_file = Path(sys.argv[1])
+    threading.Thread(
+        target=web.in_bounded_child,
+        args=(_reader_that_starts_a_sleeper, (str(pid_file), "hold")),
+        kwargs={"payload_path": None, "url": "https://example.org/s", "timeout": 60.0},
+        daemon=True,
+    ).start()
+    deadline = time.monotonic() + 30
+    while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not pid_file.exists():
+        sys.exit(2)
+    print(pid_file.read_text(), flush=True)
+    os.kill(os.getpid(), signal.SIGKILL)
+    """
+)
+
+
+def test_a_reader_whose_server_dies_takes_its_program_with_it(tmp_path):
+    pid_file = tmp_path / "sleeper.pid"
+    errors = tmp_path / "stderr.txt"
+    with errors.open("w") as stderr:
+        server = subprocess.Popen(
+            [sys.executable, "-c", _DYING_SERVER_WITH_A_PROGRAM, str(pid_file)],
+            cwd=BACKEND,
+            env=_subprocess_env(),
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            text=True,
+        )
+    line = server.stdout.readline().strip()
+    server.stdout.close()
+    assert server.wait(timeout=60) == -signal.SIGKILL, errors.read_text()
+    sleeper = int(line)
+    try:
+        assert _gone_within(sleeper, 10), "the reader's program outlived its server"
+    finally:
+        if _running(sleeper):
+            os.kill(sleeper, signal.SIGKILL)
 
 
 def test_a_reader_carries_a_cpu_limit_that_ends_it_without_its_parent():

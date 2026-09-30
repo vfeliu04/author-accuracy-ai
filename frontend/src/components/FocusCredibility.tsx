@@ -1,5 +1,5 @@
 import { useSearchParams } from "react-router-dom";
-import type { Report, ReportSource, SourceBiblio } from "../api/types";
+import type { Report, ReportSource, SourceBiblio, VideoProvenance } from "../api/types";
 import { plural } from "../lib/format";
 import { sourceName } from "../lib/links";
 import { BAND_COLORS, credibilityGapHint, scoreBand } from "../lib/score";
@@ -61,7 +61,8 @@ function explainComponent(
   key: string,
   value: number | undefined,
   biblio: SourceBiblio,
-  tier: string
+  tier: string,
+  video: VideoProvenance | null
 ): string | null {
   if (value === undefined) return null;
   if (key === "metadata_completeness") {
@@ -72,12 +73,21 @@ function explainComponent(
   }
   if (key === "authority") {
     const publisher = biblio.publisher;
+    // A video's publisher is its channel; only a channel YouTube has verified
+    // may earn list authority (scoring.py's _channel_verified gate) — an
+    // unverified one still names a publisher, and earns that much only.
+    if (video && !video.channel_verified) {
+      return value >= 15
+        ? `“${publisher}” counts as a named publisher (15 of 30): YouTube has not verified this channel, so its name earns no list authority.`
+        : "No channel name could be found — unknown earns nothing, there are no floors.";
+    }
+    const named = video ? "channel" : "publisher";
     if (value >= 30) return `“${publisher}” is on the tier-1 list of international institutions.`;
     if (value >= 22.5)
       return `“${publisher}” is on the tier-2 list of established outlets and journals.`;
     if (value >= 15)
-      return `“${publisher}” is a named publisher, but not on the configured authority lists.`;
-    return "No publisher could be found — unknown earns nothing, there are no floors.";
+      return `“${publisher}” is a named ${named}, but not on the configured authority lists.`;
+    return `No ${named} could be found — unknown earns nothing, there are no floors.`;
   }
   if (key === "recency") {
     const band = RECENCY_BANDS[value];
@@ -86,6 +96,11 @@ function explainComponent(
     return `${year !== null ? `Published ${year} — ` : ""}${band} when scored (20 pts under 2 years, 12 under 5, 6 under 10, 3 older).`;
   }
   if (key === "verification") {
+    // A video's details are its own declarations, read by the video reader —
+    // no text was extracted from it the way a PDF's or a bare page's are.
+    if (video && tier === "METADATA_ONLY") {
+      return "The details are what the video declares about itself (its channel, title and upload date), and no registry record matched them.";
+    }
     return TIER_EXPLANATIONS[tier] ?? null;
   }
   return null;
@@ -217,7 +232,8 @@ export default function FocusCredibility({ report }: { report: Report }) {
                       key,
                       value,
                       selected.metadata ?? {},
-                      selected.tier ?? ""
+                      selected.tier ?? "",
+                      selected.video
                     );
                     return (
                       <div key={key} className="component-card">

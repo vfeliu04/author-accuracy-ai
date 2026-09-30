@@ -2126,22 +2126,38 @@ def test_an_address_the_fetcher_would_refuse_is_never_offered(bad, references_lo
     [
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         "https://youtu.be/dQw4w9WgXcQ",
-        "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=30",
         "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
         "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
     ],
 )
-def test_a_youtube_address_is_never_offered_because_the_dialog_would_refuse_it(
-    video, references_log
-):
+def test_a_cited_video_is_offered_in_the_one_form_the_dialog_adds(video):
+    """A single video is a source the dialog accepts, so a cited one is
+    offered — as the link the dialog and POST /api/runs store it under, so the
+    checklist's already-added match sees the same video in any spelling."""
+    canonical = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert retrievability(_record(url_for_pdf=video)) == ("pdf", canonical), video
+    assert printed_url(Reference(url=video)) == canonical, video
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "https://www.youtube.com/@NASA",
+        "https://www.youtube.com/playlist?list=PL0123456789",
+        "https://www.youtube.com/channel/UCLA_DiR1FfKNvjuUpBHmylQ",
+        "https://consent.youtube.com/m?continue=x",
+    ],
+)
+def test_a_youtube_page_that_is_not_one_video_is_never_offered(page, references_log):
     """The offer gate applies every refusal the dialog's own link check
-    applies (lib/links.ts checkLink), YouTube included: a suggested link the
-    dialog then refuses is a row the user can tick but never add. A record's
-    next address is tried; a printed one is not offered."""
-    record = _record(url_for_pdf=video, url_for_landing_page="https://x.org/a")
-    assert retrievability(record) == ("landing", "https://x.org/a"), video
-    assert "YouTube" in references_log.text
-    assert printed_url(Reference(url=video)) is None, video
+    applies (lib/links.ts checkLink): a suggested link the dialog then refuses
+    is a row the user can tick but never add. A record's next address is
+    tried; a printed one is not offered."""
+    record = _record(url_for_pdf=page, url_for_landing_page="https://x.org/a")
+    assert retrievability(record) == ("landing", "https://x.org/a"), page
+    assert "not a single YouTube video" in references_log.text
+    assert printed_url(Reference(url=page)) is None, page
 
 
 def test_a_host_that_merely_contains_youtube_is_offered():

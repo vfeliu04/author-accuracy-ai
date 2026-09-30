@@ -335,6 +335,21 @@ describe("humanizeError explains every way a link can fail to open", () => {
       "https://who.int/facts/ — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
     ],
     [
+      "a video YouTube is rate-limiting",
+      "VideoReaderError: The YouTube video https://www.youtube.com/watch?v=HBtdbaSKexU could not be read: Unable to download API page: HTTP Error 429: Too Many Requests (yt-dlp 2026.8.19)",
+      "https://www.youtube.com/watch?v=HBtdbaSKexU — YouTube is limiting requests from this network. Try again later."
+    ],
+    [
+      "a video whose caption download failed",
+      "VideoReaderError: The YouTube video https://www.youtube.com/watch?v=HBtdbaSKexU could not be read: its captions could not be downloaded (HTTPError, HTTP 403) (yt-dlp 2026.8.19)",
+      "https://www.youtube.com/watch?v=HBtdbaSKexU — Reading that video failed unexpectedly. Retrying may help; if it keeps failing, remove that video."
+    ],
+    [
+      "a video whose reader stopped without a result",
+      "ReaderExitedError: https://www.youtube.com/watch?v=HBtdbaSKexU could not be read: the reader process exited without a result",
+      "https://www.youtube.com/watch?v=HBtdbaSKexU — Reading that video failed unexpectedly. Retrying may help; if it keeps failing, remove that video."
+    ],
+    [
       "a thin page reached by a redirect",
       "ThinPageError: 'https://www.example.org/a/' (redirected from 'https://example.org/a'): https://www.example.org/a/ has no readable article text (0 characters extracted, at least 250 needed) — JavaScript-only pages are not supported",
       "https://www.example.org/a/ — That page has no readable text. Pages that need JavaScript to show their content can't be read."
@@ -374,6 +389,102 @@ describe("humanizeError explains every way a link can fail to open", () => {
       humanizeError("ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
     ).toBeNull();
     expect(humanizeError("OSError: 'localhost' could not be resolved")).toBeNull();
+  });
+});
+
+// Each message below is exactly what video.py or fetch.py stores for the
+// failure (video.py's _cannot/_could_not/ExtractionTimeoutError always name
+// the video's own canonical link; fetch.py's redirect refusal names the web
+// link that redirected).
+describe("humanizeError explains a YouTube video source's ways of failing", () => {
+  const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const cases: [string, string, string][] = [
+    [
+      "no usable captions",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it has no usable captions (neither captions written for it nor YouTube's automatic captions of the language it is spoken in)`,
+      `${video} — That video has no usable captions — neither ones written for it nor YouTube's automatic captions in its spoken language — so it can't be checked.`
+    ],
+    [
+      "a bot check",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: YouTube asked to confirm the reader is not a bot (it asks this of live streams, and when it limits requests from this network) — try again later`,
+      `${video} — YouTube asked to confirm the reader isn't a bot (it does this for live streams, and when it limits requests from this network). Try again later.`
+    ],
+    [
+      "a live stream",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it is live now, and YouTube writes a stream's captions only after it ends — try again later`,
+      `${video} — That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later.`
+    ],
+    [
+      "an upcoming stream",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it has not started yet — try again later, once it has been recorded`,
+      `${video} — That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later.`
+    ],
+    [
+      "a stream that just ended",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it has just ended, and YouTube is still processing the recording — try again later`,
+      `${video} — That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later.`
+    ],
+    [
+      "captions YouTube withheld",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: YouTube withheld this video's captions from the reader (it asked for a proof-of-origin token) — try again later`,
+      `${video} — YouTube withheld this video's captions from the reader. Try again later.`
+    ],
+    [
+      "a private video",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: Private video. Sign in if you've been granted access to this video`,
+      `${video} — YouTube says that video is private or has been removed, so it can't be read.`
+    ],
+    [
+      "a removed video",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: Video unavailable. This video has been removed by the uploader`,
+      `${video} — YouTube says that video is private or has been removed, so it can't be read.`
+    ],
+    [
+      "a slow answer",
+      `ExtractionTimeoutError: The YouTube video ${video} took longer than 60 seconds to read — YouTube may be slow to answer; try again later`,
+      `${video} — Reading that video took too long — YouTube may be slow to answer. Try again later.`
+    ],
+    [
+      "captions over the reader's byte cap",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: its captions are larger than 16,777,216 bytes`,
+      `${video} — That video's captions are larger than the reader can handle.`
+    ],
+    [
+      "a broken JavaScript runtime, while reading one video",
+      `RuntimeError: The YouTube video ${video} could not be read: yt-dlp could not use its JavaScript runtime (deno) (yt-dlp 2025.09.05)`,
+      `${video} — The verification server's video reader couldn't start its JavaScript runtime. This is a server problem, not the link — let the operator know.`
+    ],
+    [
+      "an uninstalled JavaScript runtime",
+      `VideoReaderError: The YouTube video ${video} could not be read: the video reader's JavaScript runtime (deno) is not installed — reinstall the backend's pinned dependencies (pip install -e .) (yt-dlp 2026.8.19)`,
+      `${video} — The verification server's video reader isn't fully installed. This is a server problem, not the link — let the operator know.`
+    ]
+  ];
+
+  for (const [name, error, expected] of cases) {
+    it(`explains ${name}`, () => {
+      expect(humanizeError(error)).toBe(expected);
+    });
+  }
+
+  it("explains a web link that redirects into a YouTube video, and names the web link, not the video", () => {
+    const web = "https://example.org/blog";
+    expect(
+      humanizeError(
+        `FetchError: Fetching '${web}' failed: it redirects to the YouTube video ${video} — add that link as a source instead`
+      )
+    ).toBe(`${web} — That link redirects to a YouTube video — add the video's own link as a source instead of the web page.`);
+  });
+
+  it("explains a web link that redirects into a YouTube channel or playlist page", () => {
+    const web = "https://example.org/blog";
+    expect(
+      humanizeError(
+        `FetchError: Fetching '${web}' failed: it redirects to a YouTube page ('https://www.youtube.com/channel/UCabc'), which is not read as a web page`
+      )
+    ).toBe(
+      `${web} — That link redirects to a YouTube page (a channel, playlist or search page), which can't be read as a source.`
+    );
   });
 });
 
@@ -445,6 +556,15 @@ describe("namedLink", () => {
 describe("linksNamedIn", () => {
   const wiki = "https://en.wikipedia.org/wiki/Mercury_(planet)";
   const other = "https://example.org/b";
+
+  it("never counts the video a page redirects to as the link that failed", () => {
+    // The message names the video only to say which link to add instead: when
+    // the user already added it too, its row read fine and is not the failure.
+    const page = "https://example.org/talk";
+    const video = "https://www.youtube.com/watch?v=HBtdbaSKexU";
+    const error = `FetchError: Fetching '${page}' failed: it redirects to the YouTube video ${video} — add that link as a source instead`;
+    expect(linksNamedIn(error, [page, video])).toEqual([page]);
+  });
 
   it("finds an added link however the message quotes it", () => {
     expect(linksNamedIn(`FetchError: Could not read ${wiki}: HTTP 404`, [wiki, other])).toEqual([

@@ -319,11 +319,25 @@ describe("UploadDialog", () => {
     expect(screen.getAllByText("example.org/page")).toHaveLength(1);
   });
 
-  it("rejects YouTube links", () => {
+  it("accepts a single YouTube video link, stored under its one canonical link", () => {
     renderDialog();
     typeLink("https://youtu.be/abc123def45");
     clickAdd();
-    expect(screen.getByText("YouTube links aren't supported yet.")).toBeInTheDocument();
+    expect(linkInput()).toHaveValue("");
+    expect(screen.getByText("Sources (1)")).toBeInTheDocument();
+    expect(screen.getByText("youtube.com · abc123def45")).toHaveAttribute(
+      "title",
+      "https://www.youtube.com/watch?v=abc123def45"
+    );
+  });
+
+  it("rejects a YouTube link that isn't a single video", () => {
+    renderDialog();
+    typeLink("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
+    clickAdd();
+    expect(
+      screen.getByText("That YouTube link isn't a single video. Add the link of one video.")
+    ).toBeInTheDocument();
     expect(linkInput()).toHaveAttribute("aria-invalid", "true");
     expect(document.querySelector(".file-row__host")).toBeNull();
     expect(screen.getByText("Sources (0)")).toBeInTheDocument();
@@ -431,10 +445,12 @@ describe("UploadDialog", () => {
     fireEvent.change(fileInput(), { target: { files: [pdf("report.pdf"), pdf("s.pdf")] } });
     await waitFor(() => expect(screen.getByText("s.pdf")).toBeInTheDocument());
 
-    typeLink("https://youtu.be/abc123def45");
+    typeLink("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
     fireEvent.click(verify());
-    expect(screen.getByText("YouTube links aren't supported yet.")).toBeInTheDocument();
-    expect(linkInput()).toHaveValue("https://youtu.be/abc123def45");
+    expect(
+      screen.getByText("That YouTube link isn't a single video. Add the link of one video.")
+    ).toBeInTheDocument();
+    expect(linkInput()).toHaveValue("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
     expect(create).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -1027,7 +1043,9 @@ describe("UploadDialog reference checklist", () => {
     renderDialog();
     await addReport();
     await waitFor(() => expect(heading(3)).toBeInTheDocument());
-    expect(screen.getAllByText("YouTube links aren't supported yet.")).toHaveLength(2);
+    expect(
+      screen.getAllByText("That YouTube link isn't a single video. Add the link of one video.")
+    ).toHaveLength(2);
     expect(screen.queryByRole("checkbox", { name: /webinar/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /video/ })).not.toBeInTheDocument();
     expect(screen.getByText("www.youtube.com")).toBeInTheDocument();
@@ -1039,7 +1057,9 @@ describe("UploadDialog reference checklist", () => {
     fireEvent.click(addLinks());
     expect(screen.getByText("Sources (1)")).toBeInTheDocument();
     expect(screen.queryByText(/^Added \d+ of \d+/)).not.toBeInTheDocument();
-    expect(screen.getAllByText("YouTube links aren't supported yet.")).toHaveLength(2);
+    expect(
+      screen.getAllByText("That YouTube link isn't a single video. Add the link of one video.")
+    ).toHaveLength(2);
     expect(screen.queryByRole("button", { name: /^Add \d+ links?$/ })).not.toBeInTheDocument();
     expect(heading(2)).toBeInTheDocument();
   });
