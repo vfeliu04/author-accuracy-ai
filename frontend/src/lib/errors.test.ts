@@ -335,6 +335,21 @@ describe("humanizeError explains every way a link can fail to open", () => {
       "https://who.int/facts/ — Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
     ],
     [
+      "a video YouTube is rate-limiting",
+      "VideoReaderError: The YouTube video https://www.youtube.com/watch?v=HBtdbaSKexU could not be read: Unable to download API page: HTTP Error 429: Too Many Requests (yt-dlp 2026.8.19)",
+      "https://www.youtube.com/watch?v=HBtdbaSKexU — YouTube is limiting requests from this network. Try again later."
+    ],
+    [
+      "a video whose caption download failed",
+      "VideoReaderError: The YouTube video https://www.youtube.com/watch?v=HBtdbaSKexU could not be read: its captions could not be downloaded (HTTPError, HTTP 403) (yt-dlp 2026.8.19)",
+      "https://www.youtube.com/watch?v=HBtdbaSKexU — Reading that video failed unexpectedly. Retrying may help; if it keeps failing, remove that video."
+    ],
+    [
+      "a video whose reader stopped without a result",
+      "ReaderExitedError: https://www.youtube.com/watch?v=HBtdbaSKexU could not be read: the reader process exited without a result",
+      "https://www.youtube.com/watch?v=HBtdbaSKexU — Reading that video failed unexpectedly. Retrying may help; if it keeps failing, remove that video."
+    ],
+    [
       "a thin page reached by a redirect",
       "ThinPageError: 'https://www.example.org/a/' (redirected from 'https://example.org/a'): https://www.example.org/a/ has no readable article text (0 characters extracted, at least 250 needed) — JavaScript-only pages are not supported",
       "https://www.example.org/a/ — That page has no readable text. Pages that need JavaScript to show their content can't be read."
@@ -546,6 +561,15 @@ describe("namedLink", () => {
 describe("linksNamedIn", () => {
   const wiki = "https://en.wikipedia.org/wiki/Mercury_(planet)";
   const other = "https://example.org/b";
+
+  it("never counts the video a page redirects to as the link that failed", () => {
+    // The message names the video only to say which link to add instead: when
+    // the user already added it too, its row read fine and is not the failure.
+    const page = "https://example.org/talk";
+    const video = "https://www.youtube.com/watch?v=HBtdbaSKexU";
+    const error = `FetchError: Fetching '${page}' failed: it redirects to the YouTube video ${video} — add that link as a source instead`;
+    expect(linksNamedIn(error, [page, video])).toEqual([page]);
+  });
 
   it("finds an added link however the message quotes it", () => {
     expect(linksNamedIn(`FetchError: Could not read ${wiki}: HTTP 404`, [wiki, other])).toEqual([

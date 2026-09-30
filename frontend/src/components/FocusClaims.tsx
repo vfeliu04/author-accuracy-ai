@@ -158,6 +158,7 @@ export default function FocusClaims({ report, runId }: { report: Report; runId: 
                       runId={runId}
                       source={selected.evidence_source}
                       quote={selected.quote}
+                      claimId={selected.claim_id}
                     />
                   ) : (
                     <div className="pdf-pane__empty">

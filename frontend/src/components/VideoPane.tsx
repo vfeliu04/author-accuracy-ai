@@ -59,12 +59,16 @@ function captionsLabel(captions: VideoProvenance["captions"]): string {
 export default function VideoPane({
   runId,
   docId,
+  claimId,
   startSeconds,
   section,
   quote
 }: {
   runId: string;
   docId: string;
+  // The claim the pane is showing: another claim reloads the player at its
+  // moment, even one citing the same window after the user played on.
+  claimId?: string;
   startSeconds: number | null;
   section: string | null;
   quote: string | null;
@@ -113,7 +117,7 @@ export default function VideoPane({
       <div className="video-pane__player">
         {video.embeddable && embedSrc ? (
           <iframe
-            key={`${video.id}-${embedStart ?? 0}`}
+            key={`${claimId ?? ""}-${video.id}-${embedStart ?? 0}`}
             className="video-pane__frame"
             src={embedSrc}
             title={title}
@@ -125,7 +129,7 @@ export default function VideoPane({
           />
         ) : (
           <div className="video-pane__unplayable">
-            This channel doesn&apos;t allow playing this video here.
+            This video can&apos;t be played here.
           </div>
         )}
       </div>

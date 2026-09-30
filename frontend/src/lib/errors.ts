@@ -1,9 +1,12 @@
 // Raw exception text is for logs; users get the translation (the raw message
 // stays visible in a collapsible block wherever this is rendered).
 
+import { youtubeVideoId } from "./links";
+
 type ErrorHint = {
   match: RegExp;
-  hint: (found: RegExpExecArray) => string;
+  // `about.video`: the link the message names is a YouTube video.
+  hint: (found: RegExpExecArray, about: { video: boolean }) => string;
   // "prefix": a link failure names the link, so the reader knows which one to
   // fix. "required": the same, and the hint is skipped when the message names
   // no link — "HTTP 404" and "timed out" are generic network phrasing that
@@ -122,13 +125,23 @@ const ERROR_HINTS: ErrorHint[] = [
     hint: () =>
       "That link redirects to a YouTube page (a channel, playlist or search page), which can't be read as a source."
   },
-  // Any other way reading an arrived page fails: the reader stopped, or raised
-  // something unexpected. Its inner text must not pick a hint below.
+  {
+    // YouTube rate-limiting the video reader: yt-dlp's own words, inside the
+    // reader's failure, which the catch-all below would otherwise take.
+    match: /The YouTube video\s+could not be read: [^]*?\bHTTP (?:Error )?429\b/,
+    link: "required",
+    hint: () => "YouTube is limiting requests from this network. Try again later."
+  },
+  // Any other way reading an arrived page or a video fails: the reader
+  // stopped, or raised something unexpected. Its inner text must not pick a
+  // hint below.
   {
     match: /could not be read: /,
     link: "required",
-    hint: () =>
-      "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
+    hint: (_found, { video }) =>
+      video
+        ? "Reading that video failed unexpectedly. Retrying may help; if it keeps failing, remove that video."
+        : "Reading that page failed unexpectedly. Retrying may help; if it keeps failing, remove that link."
   },
   // The ways a link fails before its page arrives, each keyed to the server's
   // own wording. They come before the generic status and timeout phrasing: a
@@ -300,6 +313,9 @@ function asQuoted(link: string): string {
 // cut a long link short and the added link starts with what is left. Each link
 // is looked for as added and as quoted.
 export function linksNamedIn(error: string, links: readonly string[]): string[] {
+  // A page that redirects into YouTube is refused naming the video it leads
+  // to, as the link to add instead: that video is not what failed.
+  error = error.replace(/redirects to the YouTube video \S+/g, "redirects to the YouTube video");
   const cutStarts = namedLinks(error)
     .filter((named) => named.cut)
     .map((named) => named.link);
@@ -319,10 +335,11 @@ export function humanizeError(error: string | null): string | null {
   const { named, words } = scanLinks(error);
   const first = named[0];
   const shown = first ? `${first.link}${first.cut ? "…" : ""}` : null;
+  const video = first !== undefined && youtubeVideoId(first.link) !== null;
   for (const { match, hint, link } of ERROR_HINTS) {
     const found = match.exec(words);
     if (found === null || (link === "required" && shown === null)) continue;
-    const sentence = hint(found);
+    const sentence = hint(found, { video });
     return link !== undefined && shown !== null ? `${shown} — ${sentence}` : sentence;
   }
   return null;

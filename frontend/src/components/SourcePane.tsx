@@ -13,11 +13,13 @@ import VideoPane from "./VideoPane";
 export default function SourcePane({
   runId,
   source,
-  quote
+  quote,
+  claimId
 }: {
   runId: string;
   source: EvidenceSource;
   quote: string | null;
+  claimId?: string;
 }) {
   if (source.source_type === "pdf") {
     return (
@@ -52,6 +54,7 @@ export default function SourcePane({
         <VideoPane
           runId={runId}
           docId={source.doc_id}
+          claimId={claimId}
           startSeconds={source.start_seconds}
           section={source.section}
           quote={quote}

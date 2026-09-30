@@ -83,6 +83,24 @@ describe("VideoPane", () => {
     expect(open).toHaveAttribute("rel", "noopener noreferrer");
   });
 
+  it("reloads the player for another claim cited at the same moment", async () => {
+    // Two claims citing one window share a start: the user may have played on
+    // in between, and choosing the other claim must bring the player back.
+    vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(page);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const pane = (claimId: string) => (
+      <QueryClientProvider client={client}>
+        <VideoPane runId="r" docId="d" claimId={claimId} startSeconds={75} section={null} quote={null} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(pane("claim-a"));
+    const first = await screen.findByTitle("How Water Crises Start");
+    rerender(pane("claim-b"));
+    const second = await screen.findByTitle("How Water Crises Start");
+    expect(second).not.toBe(first);
+    expect(second).toHaveAttribute("src", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=75");
+  });
+
   it("omits the embed's start param when the cited moment is 0", async () => {
     vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(page);
     renderPane({ startSeconds: 0 });
@@ -122,7 +140,7 @@ describe("VideoPane", () => {
     });
     renderPane({});
     expect(
-      await screen.findByText("This channel doesn't allow playing this video here.")
+      await screen.findByText("This video can't be played here.")
     ).toBeInTheDocument();
     expect(document.querySelector("iframe")).toBeNull();
   });
