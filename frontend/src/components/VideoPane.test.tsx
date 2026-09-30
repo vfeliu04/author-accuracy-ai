@@ -5,43 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PageSnapshot } from "../api/types";
 import * as v2 from "../api/v2";
 import { UnreadablePageError } from "../api/v2";
+import { videoSnapshot } from "../test/fixtures";
 import VideoPane from "./VideoPane";
 
-const page: PageSnapshot = {
-  schema: 1,
-  document: {
-    title: "How Water Crises Start",
-    sections: [
-      { title: "0:00–1:15", page: null, text: "An introduction.", start_seconds: 0, end_seconds: 75 },
-      {
-        title: "1:15–2:29",
-        page: null,
-        text: "Two billion people lack safe water at home.",
-        start_seconds: 75,
-        end_seconds: 149
-      }
-    ]
-  },
-  provenance: {
-    url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    final_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    fetched_at: "2026-09-01T10:00:00Z",
-    title: "How Water Crises Start",
-    authors: [],
-    publisher: "Example Channel",
-    publication_date: "2024-03-01",
-    doi: null,
-    scholarly: false,
-    video: {
-      id: "dQw4w9WgXcQ",
-      channel_id: "UCabc",
-      channel_verified: true,
-      duration_seconds: 300,
-      embeddable: true,
-      captions: { kind: "automatic", language: "en" }
-    }
-  }
-};
+const page: PageSnapshot = videoSnapshot();
 
 function renderPane(props: Partial<ComponentProps<typeof VideoPane>> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

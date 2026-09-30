@@ -522,13 +522,13 @@ def test_web_source_is_scored_from_page_provenance_without_a_metadata_call(conn,
     assert rows[scored_run["source"]]["tier"] == "VERIFIED_TITLE"
 
 
-def _video_provenance(*, verified, publisher="World Health Organization"):
+def _video_provenance(*, verified):
     return {
         "url": "https://www.youtube.com/watch?v=HBtdbaSKexU",
         "final_url": "https://www.youtube.com/watch?v=HBtdbaSKexU",
         "title": "Drinking-water explained",
         "authors": [],
-        "publisher": publisher,
+        "publisher": "World Health Organization",
         "publication_date": "2025-06-01",
         "doi": None,
         "scholarly": False,

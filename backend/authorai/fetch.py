@@ -249,10 +249,20 @@ def is_youtube_url(url: str) -> bool:
     """True when the URL's host is YouTube's: one of its domains or any host
     under one (www., m., music., gaming., consent., ...). A link there is read
     as a single video or refused; it is never fetched as a web page."""
-    host = url_host(url)
-    return host is not None and any(
-        host == domain or host.endswith(f".{domain}") for domain in _YOUTUBE_DOMAINS
-    )
+    return _youtube_host(url_host(url))
+
+
+def _youtube_host(host: str | None) -> bool:
+    return host is not None and any(_under(host, domain) for domain in _YOUTUBE_DOMAINS)
+
+
+def _under(host: str, domain: str) -> bool:
+    """`host` is `domain` or a host under it."""
+    return host == domain or host.endswith(f".{domain}")
+
+
+def _is_video_id(value: str) -> bool:
+    return _VIDEO_ID.fullmatch(value) is not None and value not in _NOT_VIDEO_IDS
 
 
 def youtube_video_id(url: str) -> str | None:
@@ -265,14 +275,14 @@ def youtube_video_id(url: str) -> str | None:
     watch?v= (one id, however often repeated), youtu.be/ID, and
     /shorts|live|embed|v|e/ID, each with at most a trailing slash after the id.
     """
-    if not is_youtube_url(url):
+    host = url_host(url)
+    if host is None or not _youtube_host(host):
         return None
     parsed = httpx.URL(url.strip())
-    host = url_host(url) or ""
     # raw_path is ASCII (httpx percent-encodes the rest), so an escaped
     # character in a path id fails the pattern instead of being decoded.
     path = parsed.raw_path.split(b"?", 1)[0].decode()
-    if host == "youtu.be" or host.endswith(".youtu.be"):
+    if _under(host, "youtu.be"):
         match = _SHORT_LINK_PATH.fullmatch(path)
         candidate = match[1] if match else None
     elif path in ("/watch", "/watch/"):
@@ -281,9 +291,7 @@ def youtube_video_id(url: str) -> str | None:
     else:
         match = _VIDEO_PATH.fullmatch(path)
         candidate = match[1] if match else None
-    if candidate is None or not _VIDEO_ID.fullmatch(candidate) or candidate in _NOT_VIDEO_IDS:
-        return None
-    return candidate
+    return candidate if candidate is not None and _is_video_id(candidate) else None
 
 
 def video_link(url: str) -> str | None:
@@ -306,7 +314,7 @@ def canonical_video_url(video_id: str) -> str:
     form becomes this, so the same video twice is a duplicate, and nothing the
     user typed beyond the id reaches the reader. Raises ValueError for a value
     that is not a video id."""
-    if not _VIDEO_ID.fullmatch(video_id) or video_id in _NOT_VIDEO_IDS:
+    if not _is_video_id(video_id):
         raise ValueError(f"{shown_text(video_id)!r} is not a YouTube video id")
     return f"https://www.youtube.com/watch?v={video_id}"
 
@@ -582,19 +590,20 @@ def _redirect_target(response: httpx.Response, current: str, where: str) -> str:
         target = validate_source_url(joined)
     except ValueError as exc:
         raise FetchError(f"Fetching {where} failed: refused redirect. {exc}") from exc
-    if is_youtube_url(target):
-        # Refused on the Location alone, before YouTube is asked for anything:
-        # its pages are not articles, and a video is read by the video reader
-        # only from a link the user added as one.
-        video_id = youtube_video_id(target)
-        if video_id is None:
-            raise FetchError(
-                f"Fetching {where} failed: it redirects to a YouTube page "
-                f"({_shown(target)}), which is not read as a web page"
-            )
+    # Refused on the Location alone, before YouTube is asked for anything: its
+    # pages are not articles, and a video is read by the video reader only from
+    # a link the user added as one.
+    try:
+        video = video_link(target)
+    except ValueError:
         raise FetchError(
-            f"Fetching {where} failed: it redirects to the YouTube video "
-            f"{canonical_video_url(video_id)} — add that link as a source instead"
+            f"Fetching {where} failed: it redirects to a YouTube page "
+            f"({_shown(target)}), which is not read as a web page"
+        ) from None
+    if video is not None:
+        raise FetchError(
+            f"Fetching {where} failed: it redirects to the YouTube video {video} — add that "
+            "link as a source instead"
         )
     return target
 

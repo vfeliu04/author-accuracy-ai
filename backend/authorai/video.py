@@ -40,10 +40,9 @@ import json
 import math
 import os
 import re
-import signal
 import socket
 from collections.abc import Callable, MutableMapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date
 from typing import TypeGuard
 from urllib.parse import urlsplit
@@ -123,16 +122,17 @@ class CaptionTrack:
 def choose_track(info: dict) -> CaptionTrack | None:
     """The one caption track a video is read from, or None when it has none
     that counts (see the module docstring for the order)."""
+    # Each usable track's json3 address, by key.
     manual = {
-        key: formats
+        key: url
         for key, formats in (info.get("subtitles") or {}).items()
-        if key != "live_chat" and _json3(formats)
+        if key != "live_chat" and (url := _json3(formats))
     }
     # Plain automatic keys are machine translations; only "-orig" ones are speech.
     speech = {
-        key: formats
+        key: url
         for key, formats in (info.get("automatic_captions") or {}).items()
-        if key.endswith("-orig") and _json3(formats)
+        if key.endswith("-orig") and (url := _json3(formats))
     }
     original = original_language(info)
     if original is not None:
@@ -164,21 +164,21 @@ def original_language(info: dict) -> str | None:
     return _language_tag(speech[0]) if len(speech) == 1 else None
 
 
-def _written_in(manual: dict, language: str) -> str | None:
+def _written_in(manual: dict[str, str], language: str) -> str | None:
     if language in manual:
         return language
     return next((key for key in manual if _primary(key) == _primary(language)), None)
 
 
-def _spoken_in(speech: dict, language: str) -> str | None:
+def _spoken_in(speech: dict[str, str], language: str) -> str | None:
     if f"{language}-orig" in speech:
         return f"{language}-orig"
     same = [key for key in speech if _primary(key) == _primary(language)]
     return same[0] if len(same) == 1 else None
 
 
-def _track(kind: str, key: str, tracks: dict) -> CaptionTrack:
-    return CaptionTrack(kind=kind, key=key, language=_language_tag(key), url=_json3(tracks[key]))
+def _track(kind: str, key: str, urls: dict[str, str]) -> CaptionTrack:
+    return CaptionTrack(kind=kind, key=key, language=_language_tag(key), url=urls[key])
 
 
 def _json3(formats) -> str | None:
@@ -208,10 +208,8 @@ def _primary(tag: str) -> str:
 # --- captions into time-stamped sections -------------------------------------------
 
 
-def transcript_windows(
-    captions: object, *, window_seconds: float = WINDOW_SECONDS
-) -> list[ParsedSection]:
-    """A json3 caption file as sections of `window_seconds` each, titled by
+def transcript_windows(captions: object) -> list[ParsedSection]:
+    """A json3 caption file as sections of WINDOW_SECONDS each, titled by
     the span of speech they hold ("1:15–2:29"), with that span as their time
     locator.
 
@@ -234,18 +232,18 @@ def transcript_windows(
         if segments is None:
             continue
         start, duration = event.get("tStartMs"), event.get("dDurationMs", 0)
-        if not isinstance(segments, list) or not _milliseconds(start):
+        if not isinstance(segments, list) or not _non_negative(start):
             raise ValueError("the caption file is not in YouTube's json3 shape (an event's timing)")
         text = " ".join("".join(_segment_text(segment) for segment in segments).split())
         if text:
-            end = start + (duration if _milliseconds(duration) else 0)
+            end = start + (duration if _non_negative(duration) else 0)
             lines.append((start / 1000, end / 1000, text))
     if not lines:
         raise VideoRefusedError("its captions have no text")
     lines.sort(key=lambda line: line[0])
     windows: dict[int, list[tuple[float, float, str]]] = {}
     for line in lines:
-        windows.setdefault(int(line[0] // window_seconds), []).append(line)
+        windows.setdefault(int(line[0] // WINDOW_SECONDS), []).append(line)
     sections = []
     for index in sorted(windows):
         window = windows[index]
@@ -262,13 +260,17 @@ def transcript_windows(
     return sections
 
 
-def _milliseconds(value: object) -> TypeGuard[int | float]:
-    return (
-        isinstance(value, int | float)
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value >= 0
-    )
+def _non_negative(value: object) -> TypeGuard[int | float]:
+    """A JSON number that is a time or a duration: finite, not negative, and
+    within a float's range (json reads an integer of any length, and a float
+    cannot hold one past ~10^308)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        number = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(number) and number >= 0
 
 
 def _segment_text(segment: object) -> str:
@@ -311,13 +313,20 @@ def video_provenance(info: dict, track: CaptionTrack) -> dict:
             "id": info.get("id"),
             "channel_id": _cut(info.get("channel_id")),
             "channel_verified": info.get("channel_is_verified") is True,
-            "duration_seconds": duration if _milliseconds(duration) else None,
+            "duration_seconds": duration if _non_negative(duration) else None,
             "embeddable": info.get("playable_in_embed") is True
             and isinstance(age_limit, int)
             and age_limit < 18,
             "captions": {"kind": track.kind, "language": track.language},
         },
     }
+
+
+def channel_verified(video: object) -> bool:
+    """Whether a stored video's channel carries YouTube's verification — False
+    for anything its record does not affirm. The one reading of the badge that
+    credibility scoring and the chat both use."""
+    return isinstance(video, dict) and video.get("channel_verified") is True
 
 
 def _cut(value: object) -> str | None:
@@ -409,10 +418,15 @@ def _deno_path() -> str:
 
         return deno.find_deno_bin()
     except (ImportError, FileNotFoundError) as exc:
-        raise VideoReaderError(
+        raise _MissingRuntime(
             "the video reader's JavaScript runtime (deno) is not installed — reinstall the "
             "backend's pinned dependencies (pip install -e .)"
         ) from exc
+
+
+class _MissingRuntime(RuntimeError):
+    """deno, or its binary, is not installed. read_video reports it as its own
+    failure, naming the video."""
 
 
 class _YtDlpLog:
@@ -462,7 +476,7 @@ def read_video(
     log = _YtDlpLog()
     try:
         options = video_options(log)
-    except VideoReaderError as exc:
+    except _MissingRuntime as exc:
         raise VideoReaderError(_could_not(url, str(exc))) from None
     with ydl_class(options) as ydl:
         try:
@@ -511,9 +525,7 @@ def read_video(
         sections, truncated = capped_transcript(sections, max_chars=max_chars, url=url)
         if truncated is not None:
             provenance["truncated"] = truncated
-    document = ParsedDocument(
-        title=_cut(info.get("title")), sections=sections, tables=[], figures=[]
-    )
+    document = ParsedDocument(title=provenance["title"], sections=sections, tables=[], figures=[])
     return document, provenance
 
 
@@ -603,28 +615,17 @@ def guarded_getaddrinfo(real: Callable) -> Callable:
 
 
 def prepare_reader_process() -> None:
-    """The reader process's own isolation, before yt-dlp is imported. Also
-    ends the reader's process group (deno with it) on SIGTERM: a server that
-    stops gracefully has multiprocessing's exit hook terminate the reader, and
-    neither in_bounded_child's cleanup nor the parent-death watcher runs then.
-    Safe here, unlike in the page reader, because this process never sits in a
-    long C call that would hold a Python handler back."""
+    """The reader process's own isolation, before yt-dlp is imported."""
     scrub_environment(os.environ)
     socket.getaddrinfo = guarded_getaddrinfo(socket.getaddrinfo)
-    if os.getpgid(0) == os.getpid():  # end_with_parent made it a group of its own
-        signal.signal(signal.SIGTERM, lambda signum, frame: os.killpg(0, signal.SIGKILL))
 
 
 def _read_in_child(sender, _payload_path, video_id: str, max_chars: int, cpu_seconds: int) -> None:
-    end_with_parent(cpu_seconds)
+    # A graceful server stop only SIGTERMs the reader: it must take deno with it.
+    end_with_parent(cpu_seconds, end_group_on_sigterm=True)
     prepare_reader_process()
-
-    def read():
-        # Cut here, so the server receives only what it keeps.
-        document, provenance = read_video(video_id, max_chars=max_chars)
-        return document.title, [asdict(section) for section in document.sections], provenance
-
-    report_outcome(sender, read, _failure_kind)
+    # Cut here, so the server receives only what it keeps.
+    report_outcome(sender, lambda: read_video(video_id, max_chars=max_chars), _failure_kind)
 
 
 def _failure_kind(exc: Exception) -> str:
@@ -656,14 +657,7 @@ def read_video_bounded(
             "YouTube may be slow to answer; try again later"
         ) from None
     if kind == "result":
-        title, sections, provenance = payload
-        document = ParsedDocument(
-            title=title,
-            sections=[ParsedSection(**section) for section in sections],
-            tables=[],
-            figures=[],
-        )
-        return document, provenance
+        return payload
     name, message, child_traceback = payload
     if kind == "refused":
         raise VideoRefusedError(message)

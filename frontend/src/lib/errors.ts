@@ -108,8 +108,10 @@ const ERROR_HINTS: ErrorHint[] = [
       "The verification server's video reader couldn't start its JavaScript runtime. This is a server problem, not the link — let the operator know."
   },
   {
-    // No link: this comes from starting the reader, before any video is read.
+    // The server names the video it was about to read, like its "could not
+    // use" neighbor above.
     match: /JavaScript runtime \(deno\) is not installed/,
+    link: "required",
     hint: () =>
       "The verification server's video reader isn't fully installed. This is a server problem, not the link — let the operator know."
   },

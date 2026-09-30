@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from authorai import video as videomod
-from authorai.ingest import ParsedSection
+from authorai.ingest import ParsedDocument, ParsedSection
 from authorai.video import (
     CaptionTrack,
     VideoRefusedError,
@@ -27,10 +27,12 @@ from authorai.video import (
     video_options,
     video_provenance,
 )
+from tests.test_web import BACKEND, _subprocess_env
 
 FIXTURES = Path(__file__).parent / "fixtures" / "youtube"
 TRACKS = json.loads((FIXTURES / "tracks.json").read_text(encoding="utf-8"))
-MANUAL = json.loads((FIXTURES / "HBtdbaSKexU.en.json3").read_text(encoding="utf-8"))
+MANUAL_BYTES = (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes()
+MANUAL = json.loads(MANUAL_BYTES)
 ASR = json.loads((FIXTURES / "BVVzkThVMg4.en-orig.json3").read_text(encoding="utf-8"))
 
 
@@ -45,17 +47,10 @@ def _formats(keys):
     }
 
 
-def _info(video_id: str) -> dict:
-    """A yt-dlp info dict rebuilt from a real video's recorded shape. Its
-    automatic captions also carry two auto-TRANSLATED tracks (plain keys),
-    as every real one does: they must never be chosen."""
-    shape = TRACKS[video_id]
-    automatic = _formats([*shape["automatic_captions_orig"], "fr", "de"])
+def _planted(*, manual=(), automatic=(), audio=()) -> dict:
     return {
-        **shape["fields"],
-        "id": video_id,
-        "subtitles": _formats(shape["subtitles"]),
-        "automatic_captions": automatic if shape["automatic_captions_orig"] else {},
+        "subtitles": _formats(manual),
+        "automatic_captions": _formats(automatic),
         "formats": [
             {
                 "language": language,
@@ -63,8 +58,25 @@ def _info(video_id: str) -> dict:
                 "acodec": "opus",
                 "vcodec": "none",
             }
-            for language, preference in shape["audio_formats"]
+            for language, preference in audio
         ],
+    }
+
+
+def _info(video_id: str) -> dict:
+    """A yt-dlp info dict rebuilt from a real video's recorded shape. Its
+    automatic captions also carry two auto-TRANSLATED tracks (plain keys),
+    as every real one does: they must never be chosen."""
+    shape = TRACKS[video_id]
+    orig = shape["automatic_captions_orig"]
+    return {
+        **shape["fields"],
+        "id": video_id,
+        **_planted(
+            manual=shape["subtitles"],
+            automatic=[*orig, "fr", "de"] if orig else (),
+            audio=shape["audio_formats"],
+        ),
     }
 
 
@@ -99,22 +111,6 @@ def _chosen(info: dict) -> tuple | None:
 )
 def test_the_track_read_is_the_best_one_in_the_videos_own_language(video_id, expected):
     assert _chosen(_info(video_id)) == expected
-
-
-def _planted(*, manual=(), automatic=(), audio=()) -> dict:
-    return {
-        "subtitles": _formats(manual),
-        "automatic_captions": _formats(automatic),
-        "formats": [
-            {
-                "language": language,
-                "language_preference": preference,
-                "acodec": "opus",
-                "vcodec": "none",
-            }
-            for language, preference in audio
-        ],
-    }
 
 
 @pytest.mark.parametrize(
@@ -197,14 +193,18 @@ def test_manual_captions_become_75_second_windows_of_plain_text():
     assert "  " not in _text(sections)
 
 
-def test_every_word_of_the_captions_is_kept_in_order():
-    words = [
+def _words(captions: dict) -> list[str]:
+    """Every word of a caption file, in file order."""
+    return [
         word
-        for event in MANUAL["events"]
+        for event in captions["events"]
         for seg in event.get("segs", [])
         for word in seg.get("utf8", "").split()
     ]
-    assert _text(transcript_windows(MANUAL)).split() == words
+
+
+def test_every_word_of_the_captions_is_kept_in_order():
+    assert _text(transcript_windows(MANUAL)).split() == _words(MANUAL)
 
 
 def test_speech_recognition_captions_lose_their_line_events_but_no_words():
@@ -214,13 +214,7 @@ def test_speech_recognition_captions_lose_their_line_events_but_no_words():
         "As we all know, this morning we're gathered here primarily for the purpose of uh "
         "the crew being briefed by the students on the two experiments slated to fly on STS-26."
     )
-    words = [
-        word
-        for event in ASR["events"]
-        for seg in event.get("segs", [])
-        for word in seg.get("utf8", "").split()
-    ]
-    assert text.split() == words
+    assert text.split() == _words(ASR)
     # The first event is a display window with no text; the first words are at 18.32 s.
     assert sections[0].start_seconds == 18.32
     # Displayed lines overlap in time, but a window's end is its last caption's.
@@ -265,10 +259,21 @@ def test_a_video_longer_than_an_hour_is_titled_with_hours():
     assert videomod.clock(3600) == "1:00:00"
 
 
-def test_a_window_is_75_seconds_by_default_and_can_be_set():
+def test_a_window_is_75_seconds():
     events = _events(*[_event(second * 1000, f"w{second}") for second in range(0, 300, 10)])
     assert len(transcript_windows(events)) == 4
-    assert len(transcript_windows(events, window_seconds=30)) == 10
+
+
+def test_a_time_too_large_for_a_float_is_not_a_time():
+    # json reads an integer of any length; a float cannot hold one past ~10^308.
+    huge = "9" * 400
+    with pytest.raises(ValueError, match="caption file"):
+        transcript_windows(
+            json.loads(f'{{"events": [{{"tStartMs": {huge}, "segs": [{{"utf8": "x"}}]}}]}}')
+        )
+    event = f'{{"tStartMs": 1000, "dDurationMs": {huge}, "segs": [{{"utf8": "x"}}]}}'
+    [only] = transcript_windows(json.loads(f'{{"events": [{event}]}}'))
+    assert (only.start_seconds, only.end_seconds) == (1.0, 1.0)  # an unusable duration counts as 0
 
 
 @pytest.mark.parametrize(
@@ -418,23 +423,26 @@ def test_the_reader_options_confine_yt_dlp_to_one_video_on_youtube(monkeypatch):
     assert options.get("nocheckcertificate") is not True
 
 
-def test_a_missing_javascript_runtime_is_a_loud_failure(monkeypatch):
-    import deno
-
-    def missing():
-        raise FileNotFoundError("/env/bin/deno")
-
-    monkeypatch.setattr(deno, "find_deno_bin", missing)
-    with pytest.raises(videomod.VideoReaderError, match="JavaScript runtime"):
-        video_options(logger=object())
-
-
-def test_a_missing_runtime_package_is_the_same_loud_failure(monkeypatch):
+@pytest.mark.parametrize("missing", ["binary", "package"])
+def test_a_missing_javascript_runtime_is_the_readers_failure_naming_the_video(monkeypatch, missing):
     import sys
 
-    monkeypatch.setitem(sys.modules, "deno", None)  # import deno now raises ImportError
-    with pytest.raises(videomod.VideoReaderError, match=r"runtime \(deno\) is not installed"):
-        video_options(logger=object())
+    import deno
+
+    def no_binary():
+        raise FileNotFoundError("/env/bin/deno")
+
+    if missing == "binary":
+        monkeypatch.setattr(deno, "find_deno_bin", no_binary)
+    else:
+        monkeypatch.setitem(sys.modules, "deno", None)  # import deno now raises ImportError
+    with pytest.raises(videomod.VideoReaderError) as info:
+        videomod.read_video("HBtdbaSKexU", ydl_class=FakeYDL())
+    assert str(info.value) == (
+        f"The YouTube video {CANONICAL} could not be read: the video reader's JavaScript "
+        "runtime (deno) is not installed — reinstall the backend's pinned dependencies "
+        f"(pip install -e .) (yt-dlp {videomod._ytdlp_version()})"
+    )
 
 
 def test_a_missing_yt_dlp_is_the_readers_failure_naming_the_video(monkeypatch):
@@ -463,7 +471,8 @@ def test_the_server_imports_neither_yt_dlp_nor_deno():
             "import sys, authorai.jobs, authorai.api, authorai.video as v; v._ytdlp_version; "
             "print('yt_dlp' in sys.modules, 'deno' in sys.modules)",
         ],
-        cwd=Path(__file__).parents[1],
+        cwd=BACKEND,
+        env=_subprocess_env(),
         capture_output=True,
         text=True,
         timeout=120,
@@ -527,7 +536,7 @@ def _nasa(**fields) -> dict:
 
 
 def test_a_captioned_video_is_read_into_sections_and_provenance(deno_found):
-    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(), MANUAL_BYTES)
     document, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
     # The reader is handed the canonical link it built, never the one pasted.
     assert ydl.extracted == [(CANONICAL, False, False)]
@@ -603,11 +612,11 @@ def test_a_failed_caption_download_is_the_readers_failure_named_once(deno_found)
 
 
 def test_the_reader_cuts_a_long_transcript_and_records_the_span_it_kept(deno_found):
-    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(), MANUAL_BYTES)
     whole, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
     assert "truncated" not in provenance
     kept_two = len(whole.sections[0].text) + len(whole.sections[1].text)
-    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(), MANUAL_BYTES)
     document, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl, max_chars=kept_two)
     assert document.sections == whole.sections[:2]
     total = sum(len(section.text) for section in whole.sections)
@@ -621,7 +630,7 @@ def test_the_reader_cuts_a_long_transcript_and_records_the_span_it_kept(deno_fou
 def test_a_window_cut_by_the_cap_claims_no_span(deno_found):
     """A first window longer than the cap is cut mid-window, and how far into
     the video the cut falls is not known: the record keeps the two numbers only."""
-    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(), MANUAL_BYTES)
     document, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl, max_chars=100)
     assert len(document.sections) == 1 and len(document.sections[0].text) <= 100
     assert set(provenance["truncated"]) == {"kept_chars", "dropped_chars"}
@@ -634,7 +643,7 @@ def _reader_that_is_terminated(sender, _payload_path, pid_file, cpu_seconds):
 
     from authorai import web
 
-    web.end_with_parent(cpu_seconds)
+    web.end_with_parent(cpu_seconds, end_group_on_sigterm=True)
     videomod.prepare_reader_process()
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     Path(pid_file).write_text(str(sleeper.pid))
@@ -642,22 +651,25 @@ def _reader_that_is_terminated(sender, _payload_path, pid_file, cpu_seconds):
 
 
 _EXITING_SERVER = """
-import sys, threading
+import contextlib, logging, sys, threading
 from pathlib import Path
 import authorai.web as web
 from tests.test_video import _reader_that_is_terminated
+# Quiet: the reader thread is a daemon still running as the interpreter ends,
+# and a daemon thread writing to stderr then makes Python abort the exit.
+logging.disable(logging.CRITICAL)
 # The reader thread may or may not reach its own cleanup before the interpreter
 # ends (a race it won in a trial run): take that cleanup out, so the reader's
 # own handler is what is tested.
 web._kill_group = lambda pid: None
 pid_file = Path(sys.argv[1])
-threading.Thread(
-    target=web.in_bounded_child,
-    args=(_reader_that_is_terminated, (str(pid_file),)),
-    kwargs={"payload_path": None, "url": "https://www.youtube.com/watch?v=HBtdbaSKexU",
-            "timeout": 60.0},
-    daemon=True,
-).start()
+def read():
+    with contextlib.suppress(Exception):
+        web.in_bounded_child(
+            _reader_that_is_terminated, (str(pid_file),), payload_path=None,
+            url="https://www.youtube.com/watch?v=HBtdbaSKexU", timeout=60.0,
+        )
+threading.Thread(target=read, daemon=True).start()
 import time
 deadline = time.monotonic() + 30
 while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
@@ -685,7 +697,8 @@ def test_a_reader_terminated_by_the_servers_exit_takes_deno_with_it(tmp_path):
     with output.open("w") as out:
         server = subprocess.run(
             [sys.executable, "-c", _EXITING_SERVER, str(pid_file)],
-            cwd=Path(__file__).parents[1],
+            cwd=BACKEND,
+            env=_subprocess_env(),
             stdout=out,
             stderr=subprocess.STDOUT,
             text=True,
@@ -717,7 +730,7 @@ def test_a_live_or_unfinished_video_is_refused_until_later(deno_found, status, r
 
 
 def test_a_recording_of_a_past_stream_is_read(deno_found):
-    ydl = FakeYDL(_nasa(live_status="was_live"), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(live_status="was_live"), MANUAL_BYTES)
     document, _ = videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
     assert document.sections
 
@@ -760,7 +773,7 @@ def test_a_runtime_yt_dlp_could_not_use_fails_the_read(deno_found):
     # yt-dlp extracts anyway and only warns; formats and captions may be missing.
     ydl = FakeYDL(
         _nasa(),
-        (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes(),
+        MANUAL_BYTES,
         warnings=["[youtube] No supported JavaScript runtime could be found. Only deno is enabled"],
     )
     with pytest.raises(RuntimeError, match="JavaScript runtime"):
@@ -780,7 +793,7 @@ def test_a_caption_address_that_is_not_youtubes_is_refused_without_quoting_it(de
 
 def test_captions_over_the_byte_cap_are_refused(deno_found, monkeypatch):
     monkeypatch.setattr(videomod, "CAPTION_MAX_BYTES", 1000)
-    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(), MANUAL_BYTES)
     with pytest.raises(VideoRefusedError, match="larger than 1,000 bytes"):
         videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
 
@@ -793,7 +806,7 @@ def test_a_caption_file_that_is_not_json_is_refused(deno_found):
 
 @pytest.mark.parametrize("fields", [{"_type": "playlist"}, {"_type": "url"}, {"id": "aaaaaaaaaaa"}])
 def test_anything_but_the_one_video_asked_for_is_refused(deno_found, fields):
-    ydl = FakeYDL(_nasa(**fields), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    ydl = FakeYDL(_nasa(**fields), MANUAL_BYTES)
     with pytest.raises(RuntimeError, match="not the video"):
         videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
 
@@ -945,7 +958,8 @@ def test_the_readers_own_failures_are_told_apart_from_unexpected_ones(deno_found
 
 def test_the_bounded_reader_returns_what_the_reader_read(monkeypatch):
     sections = transcript_windows(MANUAL)
-    result = ("result", ("Title", [s.__dict__ for s in sections], {"publisher": "NASA Science"}))
+    read = ParsedDocument(title="Title", sections=sections, tables=[], figures=[])
+    result = ("result", (read, {"publisher": "NASA Science"}))
     seen = {}
 
     def fake(target, args, **kwargs):

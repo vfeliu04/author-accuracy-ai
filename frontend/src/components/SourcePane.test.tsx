@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvidenceSource, PageSnapshot } from "../api/types";
 import * as v2 from "../api/v2";
+import { videoProvenance, videoSnapshot } from "../test/fixtures";
 import SourcePane from "./SourcePane";
 
 const pdfSource: EvidenceSource = {
@@ -112,8 +113,7 @@ describe("SourcePane", () => {
   });
 
   it("shows a YouTube video source as its player, with start_seconds and section threaded from the source", async () => {
-    const videoPage: PageSnapshot = {
-      schema: 1,
+    const videoPage: PageSnapshot = videoSnapshot({
       document: {
         title: "How Water Crises Start",
         sections: [
@@ -136,16 +136,9 @@ describe("SourcePane", () => {
         publication_date: null,
         doi: null,
         scholarly: false,
-        video: {
-          id: "abc123def45",
-          channel_id: "UCabc",
-          channel_verified: true,
-          duration_seconds: 900,
-          embeddable: true,
-          captions: { kind: "automatic", language: "en" }
-        }
+        video: videoProvenance({ id: "abc123def45", duration_seconds: 900 })
       }
-    };
+    });
     const json = vi.spyOn(v2, "fetchDocumentJson").mockResolvedValue(videoPage);
     const blob = vi.spyOn(v2, "fetchDocumentBlob");
     renderPane(

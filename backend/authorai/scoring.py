@@ -40,6 +40,7 @@ from authorai.credibility import (
 from authorai.llm import LLM
 from authorai.log import setup_logger
 from authorai.verification import normalize_quote, verdict_stamp
+from authorai.video import channel_verified
 
 logger = setup_logger(__name__)
 
@@ -443,7 +444,9 @@ def score_run(
                 # page owner's words, so the fallback extraction below is gated
                 # the same way.
                 address = provenance.get("final_url") or address
-                if document["source_type"] == "youtube" and not _channel_verified(provenance):
+                if document["source_type"] == "youtube" and not channel_verified(
+                    provenance.get("video")
+                ):
                     # Any channel can name itself after an organisation; YouTube's
                     # verification is its check that the channel is that one. An
                     # unverified channel still names a publisher, and earns that.
@@ -501,11 +504,3 @@ def score_run(
         conn, run_id, accuracy=accuracy, credibility=credibility, validity=validity
     )
     return {"accuracy": accuracy, "credibility": credibility, "validity": validity}
-
-
-def _channel_verified(provenance: dict) -> bool:
-    """Whether YouTube verified the channel a stored video came from — False
-    for anything a video's provenance does not affirm (video.video_provenance
-    records the badge as a strict boolean)."""
-    video = provenance.get("video")
-    return isinstance(video, dict) and video.get("channel_verified") is True

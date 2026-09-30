@@ -453,6 +453,11 @@ describe("humanizeError explains a YouTube video source's ways of failing", () =
       "a broken JavaScript runtime, while reading one video",
       `RuntimeError: The YouTube video ${video} could not be read: yt-dlp could not use its JavaScript runtime (deno) (yt-dlp 2025.09.05)`,
       `${video} — The verification server's video reader couldn't start its JavaScript runtime. This is a server problem, not the link — let the operator know.`
+    ],
+    [
+      "an uninstalled JavaScript runtime",
+      `VideoReaderError: The YouTube video ${video} could not be read: the video reader's JavaScript runtime (deno) is not installed — reinstall the backend's pinned dependencies (pip install -e .) (yt-dlp 2026.8.19)`,
+      `${video} — The verification server's video reader isn't fully installed. This is a server problem, not the link — let the operator know.`
     ]
   ];
 
@@ -461,16 +466,6 @@ describe("humanizeError explains a YouTube video source's ways of failing", () =
       expect(humanizeError(error)).toBe(expected);
     });
   }
-
-  it("explains an uninstalled JavaScript runtime without naming any link", () => {
-    expect(
-      humanizeError(
-        "RuntimeError: The video reader's JavaScript runtime (deno) is not installed: reinstall the backend's pinned dependencies (pip install -e .)"
-      )
-    ).toBe(
-      "The verification server's video reader isn't fully installed. This is a server problem, not the link — let the operator know."
-    );
-  });
 
   it("explains a web link that redirects into a YouTube video, and names the web link, not the video", () => {
     const web = "https://example.org/blog";

@@ -15,7 +15,7 @@ from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.llm import LLM
 from authorai.log import setup_logger
-from authorai.video import clock
+from authorai.video import channel_verified, clock
 
 logger = setup_logger(__name__)
 
@@ -155,7 +155,7 @@ def _video_note(source: dict) -> str:
         if captions.get("kind") == "automatic"
         else "its captions"
     )
-    verified = "verified" if video.get("channel_verified") is True else "not verified"
+    verified = "verified" if channel_verified(video) else "not verified"
     return f" — a YouTube video, read from {read_from}; its channel is {verified} by YouTube"
 
 
@@ -186,16 +186,15 @@ def _partial_note(source: dict) -> str:
             type(truncated).__name__,
         )
         return ""
+    video = source.get("source_type") == "youtube"
     until = truncated.get("kept_until_seconds")
-    if source.get("source_type") == "youtube" and isinstance(until, int | float):
-        return (
-            f" — READ IN PART: only the first {clock(until)} of this video's captions "
-            "were analysed, so nothing later in it is covered"
-        )
-    what = "this video's captions" if source.get("source_type") == "youtube" else "this page"
+    if video and isinstance(until, int | float):
+        read = f"{clock(until)} of this video's captions"
+    else:
+        read = f"{kept:,} of {kept + dropped:,} characters of "
+        read += "this video's captions" if video else "this page"
     return (
-        f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of {what} "
-        "were analysed, so nothing later in it is covered"
+        f" — READ IN PART: only the first {read} were analysed, so nothing later in it is covered"
     )
 
 

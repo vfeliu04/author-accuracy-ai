@@ -48,22 +48,25 @@ function stripTrailingDots(host: string): string {
 // True for a host that is one of YouTube's domains or any host under one
 // (www., m., music., gaming., consent., ...). A link there is read as a
 // single video or refused; it is never added as a web page.
-function isYoutubeHost(hostname: string): boolean {
-  const host = stripTrailingDots(hostname.toLowerCase());
+function isYoutubeDomain(host: string): boolean {
   return YOUTUBE_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
-// The id of the one video a YouTube link names, or null when the link isn't
-// YouTube's or names no single video (a channel, a playlist, a search).
+function isYoutubeHost(hostname: string): boolean {
+  return isYoutubeDomain(stripTrailingDots(hostname.toLowerCase()));
+}
+
+// The id of the one video a URL names, or null when its host isn't
+// YouTube's, or it names no single video (a channel, a playlist, a search).
 // Mirrors the server's fetch.youtube_video_id: the forms are watch?v= (one
 // id, however often repeated), youtu.be/ID, and /shorts|live|embed|v|e/ID.
 // `url.pathname` is already percent-encoded, so an escaped character in a
 // path id fails the pattern instead of being decoded; `searchParams` decodes
-// a query value the way the server's parse_qs does.
-export function youtubeVideoId(raw: string): string | null {
-  const url = parse(raw);
-  if (url === null || !isYoutubeHost(url.hostname)) return null;
+// a query value the way the server's parse_qs does. The host is lowercased
+// and its trailing dots stripped once, here, and reused for every check.
+function videoIdOf(url: URL): string | null {
   const host = stripTrailingDots(url.hostname.toLowerCase());
+  if (!isYoutubeDomain(host)) return null;
   let candidate: string | null;
   if (host === "youtu.be" || host.endsWith(".youtu.be")) {
     candidate = SHORT_LINK_PATH.exec(url.pathname)?.[1] ?? null;
@@ -77,6 +80,13 @@ export function youtubeVideoId(raw: string): string | null {
     return null;
   }
   return candidate;
+}
+
+// A thin wrapper for callers with only a raw string in hand; `videoIdOf`
+// above does the actual work from an already-parsed URL.
+export function youtubeVideoId(raw: string): string | null {
+  const url = parse(raw);
+  return url === null ? null : videoIdOf(url);
 }
 
 // The one link a video is stored, compared and read by — every accepted
@@ -93,7 +103,7 @@ export function canonicalVideoUrl(id: string): string {
 // either spelling was written.
 function identity(url: URL): LinkCheck {
   if (isYoutubeHost(url.hostname)) {
-    const id = youtubeVideoId(url.href);
+    const id = videoIdOf(url);
     return id === null
       ? { error: "That YouTube link isn't a single video. Add the link of one video." }
       : { link: canonicalVideoUrl(id) };
@@ -253,7 +263,7 @@ export function linkHost(raw: string): string {
 export function linkHostPath(raw: string): string {
   const url = parse(raw);
   if (url === null) return raw;
-  const id = youtubeVideoId(raw);
+  const id = videoIdOf(url);
   if (id !== null) return `${displayHost(url).replace(/^www\./, "")} · ${id}`;
   let path = url.pathname;
   try {

@@ -1,8 +1,7 @@
-import { useMemo } from "react";
 import { useSnapshot } from "../api/queries";
 import type { PageSection, VideoProvenance } from "../api/types";
 import { UnreadablePageError } from "../api/v2";
-import { safeHttpUrl } from "../lib/links";
+import { canonicalVideoUrl } from "../lib/links";
 import { locateQuote } from "../lib/quote";
 import { BlockText, splitBlocks } from "../lib/textBlocks";
 
@@ -15,23 +14,23 @@ function pickSection(
   sections: PageSection[],
   startSeconds: number | null,
   sectionTitle: string | null
-): number | null {
+): PageSection | null {
   if (startSeconds !== null) {
-    const exact = sections.findIndex((section) => section.start_seconds === startSeconds);
-    if (exact !== -1) return exact;
-    const containing = sections.findIndex(
+    const exact = sections.find((section) => section.start_seconds === startSeconds);
+    if (exact !== undefined) return exact;
+    const containing = sections.find(
       (section) =>
         section.start_seconds !== undefined &&
         section.start_seconds <= startSeconds &&
         (section.end_seconds === undefined || startSeconds < section.end_seconds)
     );
-    if (containing !== -1) return containing;
+    if (containing !== undefined) return containing;
   }
   if (sectionTitle !== null) {
-    const named = sections.findIndex((section) => section.title === sectionTitle);
-    if (named !== -1) return named;
+    const named = sections.find((section) => section.title === sectionTitle);
+    if (named !== undefined) return named;
   }
-  return sections.length > 0 ? 0 : null;
+  return sections.length > 0 ? sections[0] : null;
 }
 
 // A BCP-47 tag's English name ("en" -> "English"), or the tag itself when it
@@ -75,11 +74,6 @@ export default function VideoPane({
 }) {
   const { data: page, error, isLoading } = useSnapshot(runId, docId);
 
-  const sectionIndex = useMemo(
-    () => (page ? pickSection(page.document.sections, startSeconds, section) : null),
-    [page, startSeconds, section]
-  );
-
   if (isLoading) {
     return <div className="pdf-pane__empty">Loading video…</div>;
   }
@@ -100,22 +94,19 @@ export default function VideoPane({
   const title = content.title || provenance.title || "Untitled video";
   // Omitted at 0/null: a fresh embed already starts at the beginning.
   const embedStart = startSeconds !== null && startSeconds > 0 ? Math.floor(startSeconds) : null;
-  const embedSrc = safeHttpUrl(
+  const embedSrc =
     `https://www.youtube-nocookie.com/embed/${video.id}` +
-      (embedStart !== null ? `?start=${embedStart}` : "")
-  );
+    (embedStart !== null ? `?start=${embedStart}` : "");
   const watchSeconds = startSeconds !== null ? Math.floor(startSeconds) : null;
-  const openHref = safeHttpUrl(
-    `https://www.youtube.com/watch?v=${video.id}` +
-      (watchSeconds !== null ? `&t=${watchSeconds}s` : "")
-  );
-  const excerpt = sectionIndex !== null ? content.sections[sectionIndex] : null;
+  const openHref =
+    canonicalVideoUrl(video.id) + (watchSeconds !== null ? `&t=${watchSeconds}s` : "");
+  const excerpt = pickSection(content.sections, startSeconds, section);
   const mark = excerpt && quote ? locateQuote(excerpt.text, quote) : null;
 
   return (
     <div className="video-pane">
       <div className="video-pane__player">
-        {video.embeddable && embedSrc ? (
+        {video.embeddable ? (
           <iframe
             key={`${claimId ?? ""}-${video.id}-${embedStart ?? 0}`}
             className="video-pane__frame"
@@ -140,16 +131,9 @@ export default function VideoPane({
             {provenance.publisher ? <span>{provenance.publisher}</span> : null}
             {provenance.publication_date ? <span>{provenance.publication_date}</span> : null}
             <span>{captionsLabel(video.captions)}</span>
-            {openHref ? (
-              <a
-                className="readable__open"
-                href={openHref}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Open on YouTube ↗
-              </a>
-            ) : null}
+            <a className="readable__open" href={openHref} target="_blank" rel="noopener noreferrer">
+              Open on YouTube ↗
+            </a>
           </div>
         </header>
         <div className="readable__body">

@@ -186,10 +186,10 @@ def _validate_links(raw_links: list[str]) -> list[tuple[str, str]]:
         except ValueError as exc:
             # The fetch module's message already quotes the link, credentials cut.
             raise HTTPException(status_code=400, detail=f"not a usable link: {exc}") from exc
-        entry = (video, "youtube") if video is not None else (link, "web")
-        if any(added == entry[0] for added, _ in links):
-            raise HTTPException(status_code=400, detail=f"{entry[0]!r} was added twice")
-        links.append(entry)
+        link, source_type = (video, "youtube") if video is not None else (link, "web")
+        if any(added == link for added, _ in links):
+            raise HTTPException(status_code=400, detail=f"{link!r} was added twice")
+        links.append((link, source_type))
     return links
 
 

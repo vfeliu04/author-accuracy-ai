@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import type { Report, ReportSource } from "../api/types";
+import { videoProvenance } from "../test/fixtures";
 import FocusCredibility from "./FocusCredibility";
 
 const scored: ReportSource = {
@@ -132,14 +133,7 @@ describe("FocusCredibility", () => {
       source_type: "youtube",
       url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
       metadata: { ...scored.metadata, publisher: "World Health Organization" },
-      video: {
-        id: "dQw4w9WgXcQ",
-        channel_id: "UCabc",
-        channel_verified: true,
-        duration_seconds: 600,
-        embeddable: true,
-        captions: { kind: "manual", language: "en" }
-      }
+      video: videoProvenance({ duration_seconds: 600, captions: { kind: "manual", language: "en" } })
     };
     renderAt(reportWith({ sources: [verifiedTier1] }), "v1");
     expect(

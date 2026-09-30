@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Claim, PageSnapshot, Report, RunDetail } from "../api/types";
 import * as v2 from "../api/v2";
+import { videoProvenance, videoSnapshot } from "../test/fixtures";
 import RunView from "./RunView";
 
 const doneDetail: RunDetail = {
@@ -149,8 +150,7 @@ const page: PageSnapshot = {
   }
 };
 
-const videoPage: PageSnapshot = {
-  schema: 1,
+const videoPage: PageSnapshot = videoSnapshot({
   document: {
     title: "Coastal Talk",
     sections: [
@@ -173,16 +173,14 @@ const videoPage: PageSnapshot = {
     publication_date: null,
     doi: null,
     scholarly: false,
-    video: {
+    video: videoProvenance({
       id: "abc123def45",
-      channel_id: "UCabc",
       channel_verified: false,
       duration_seconds: 4000,
-      embeddable: true,
       captions: { kind: "manual", language: "en" }
-    }
+    })
   }
-};
+});
 
 function renderAt(url: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

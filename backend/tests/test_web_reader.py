@@ -454,6 +454,22 @@ def _reader_that_starts_a_sleeper(sender, _payload_path, pid_file, then, cpu_sec
         threading.Event().wait(60)
 
 
+def _run_sleeper_reader(pid_file: Path, then: str) -> None:
+    """Run _reader_that_starts_a_sleeper to its end: it reports ("report") or
+    is stopped at its deadline ("hold")."""
+    kwargs = {"payload_path": None, "url": "https://example.org/s"}
+    if then == "report":
+        result = web_mod.in_bounded_child(
+            _reader_that_starts_a_sleeper, (str(pid_file), then), timeout=30, **kwargs
+        )
+        assert result == ("result", "done")
+    else:
+        with pytest.raises(ExtractionTimeoutError):
+            web_mod.in_bounded_child(
+                _reader_that_starts_a_sleeper, (str(pid_file), then), timeout=8, **kwargs
+            )
+
+
 def _wait_for_pid(pid_file: Path, seconds: float = 20) -> int:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -486,24 +502,7 @@ def test_stopping_a_reader_stops_what_it_started(tmp_path, then):
     pid_file = tmp_path / "sleeper.pid"
     sleeper = None
     try:
-        if then == "report":
-            kind, value = web_mod.in_bounded_child(
-                _reader_that_starts_a_sleeper,
-                (str(pid_file), then),
-                payload_path=None,
-                url="https://example.org/s",
-                timeout=30,
-            )
-            assert (kind, value) == ("result", "done")
-        else:
-            with pytest.raises(ExtractionTimeoutError):
-                web_mod.in_bounded_child(
-                    _reader_that_starts_a_sleeper,
-                    (str(pid_file), then),
-                    payload_path=None,
-                    url="https://example.org/s",
-                    timeout=8,
-                )
+        _run_sleeper_reader(pid_file, then)
         sleeper = _wait_for_pid(pid_file, 1)
         assert _gone_within(sleeper, 5), "the reader's program outlived it"
     finally:
@@ -545,23 +544,8 @@ def test_a_readers_group_is_killed_before_the_reader_is_reaped(tmp_path, monkeyp
                 url="https://example.org/e",
                 timeout=30,
             )
-    elif how == "report":
-        web_mod.in_bounded_child(
-            _reader_that_starts_a_sleeper,
-            (str(pid_file), "report"),
-            payload_path=None,
-            url="https://example.org/r",
-            timeout=30,
-        )
     else:
-        with pytest.raises(ExtractionTimeoutError):
-            web_mod.in_bounded_child(
-                _reader_that_starts_a_sleeper,
-                (str(pid_file), "hold"),
-                payload_path=None,
-                url="https://example.org/h",
-                timeout=8,
-            )
+        _run_sleeper_reader(pid_file, how)
     if pid_file.exists():
         sleeper = int(pid_file.read_text())
         assert _gone_within(sleeper, 5)

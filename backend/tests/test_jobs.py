@@ -1681,10 +1681,13 @@ def test_a_link_that_served_a_pdf_is_never_called_a_web_page(conn, tmp_path, mon
 VIDEO_URL = "https://www.youtube.com/watch?v=HBtdbaSKexU"
 
 
-def _read_video(sections=None, **video):
+def _read_video(sections=None):
     """A stand-in for video.read_video_bounded: what the reader process returns
-    for the NASA video, recording each call."""
+    for the NASA video, recording each call. Its declarations come from the
+    real video_provenance over the video's recorded yt-dlp info."""
     from authorai.ingest import ParsedDocument, ParsedSection
+    from authorai.video import capped_transcript, choose_track, video_provenance
+    from tests.test_video import _info
 
     calls: list[tuple] = []
     sections = sections or [
@@ -1705,29 +1708,13 @@ def _read_video(sections=None, **video):
     ]
 
     def read(video_id, *, timeout, max_chars):
-        from authorai.video import capped_transcript
-
         calls.append((video_id, timeout, max_chars))
         # The real reader cuts in its own process, with the same function.
         kept, truncated = capped_transcript(list(sections), max_chars=max_chars, url=VIDEO_URL)
-        provenance = {
-            "title": "ScienceCasts: The Power of Light",
-            "authors": [],
-            "publisher": "NASA Science",
-            "publication_date": "2016-12-13",
-            "doi": None,
-            "scholarly": False,
-            "video": {
-                "id": video_id,
-                "channel_id": "UCKt6dYzHqHfpcp1lgj4bl1A",
-                "channel_verified": False,
-                "duration_seconds": 255,
-                "embeddable": True,
-                "captions": {"kind": "manual", "language": "en"},
-                **video,
-            },
-            **({"truncated": truncated} if truncated else {}),
-        }
+        info = {**_info("HBtdbaSKexU"), "id": video_id}
+        provenance = video_provenance(info, choose_track(info))
+        if truncated:
+            provenance["truncated"] = truncated
         document = ParsedDocument(
             title="ScienceCasts: The Power of Light", sections=kept, tables=[], figures=[]
         )

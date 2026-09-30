@@ -461,7 +461,7 @@ def _failure_kind(exc: Exception) -> str:
     return "value" if isinstance(exc, ValueError) else "other"
 
 
-def end_with_parent(cpu_seconds: int) -> None:
+def end_with_parent(cpu_seconds: int, *, end_group_on_sigterm: bool = False) -> None:
     """Tie the reader's life to its parent's. Only the parent stops a reader
     (_stop at the deadline, multiprocessing's exit hook for daemons), and a
     server killed outright — SIGTERM's default action after uvicorn's graceful
@@ -475,8 +475,17 @@ def end_with_parent(cpu_seconds: int) -> None:
     so a program it starts (yt-dlp starts deno) is in that group: _stop kills
     the group once the reader is stopped, and the watcher kills it, the reader
     included, when the parent is gone. A terminal's Ctrl-C, sent to the
-    server's group, no longer reaches it either."""
+    server's group, no longer reaches it either.
+
+    A reader whose programs must not outlive it passes `end_group_on_sigterm`:
+    a server that stops gracefully has multiprocessing's exit hook SIGTERM the
+    reader, and neither in_bounded_child's cleanup nor the watcher runs then,
+    so the reader's own handler kills its group. Not the default: a Python
+    handler waits for the main thread, and a page or PDF reader deep in one
+    long C call (lxml, pypdf) would hold the exit hook's join back."""
     os.setpgid(0, 0)
+    if end_group_on_sigterm:
+        signal.signal(signal.SIGTERM, lambda signum, frame: os.killpg(0, signal.SIGKILL))
     parent = multiprocessing.parent_process()
     threading.Thread(
         target=lambda: (connection.wait([parent.sentinel]), os.killpg(0, signal.SIGKILL)),
