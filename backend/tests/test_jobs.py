@@ -1704,8 +1704,12 @@ def _read_video(sections=None, **video):
         ),
     ]
 
-    def read(video_id, *, timeout):
-        calls.append((video_id, timeout))
+    def read(video_id, *, timeout, max_chars):
+        from authorai.video import capped_transcript
+
+        calls.append((video_id, timeout, max_chars))
+        # The real reader cuts in its own process, with the same function.
+        kept, truncated = capped_transcript(list(sections), max_chars=max_chars, url=VIDEO_URL)
         provenance = {
             "title": "ScienceCasts: The Power of Light",
             "authors": [],
@@ -1722,9 +1726,10 @@ def _read_video(sections=None, **video):
                 "captions": {"kind": "manual", "language": "en"},
                 **video,
             },
+            **({"truncated": truncated} if truncated else {}),
         }
         document = ParsedDocument(
-            title="ScienceCasts: The Power of Light", sections=list(sections), tables=[], figures=[]
+            title="ScienceCasts: The Power of Light", sections=kept, tables=[], figures=[]
         )
         return document, provenance
 
@@ -1755,7 +1760,7 @@ def test_a_video_is_read_into_a_snapshot_then_ingested_from_it(conn, tmp_path, m
         "Read 2 documents (1 link opened)"
     )
     # The reader is given the id alone, within the configured budget.
-    assert read.calls == [("HBtdbaSKexU", SETTINGS.video_timeout_seconds)]
+    assert read.calls == [("HBtdbaSKexU", SETTINGS.video_timeout_seconds, SETTINGS.web_max_chars)]
     parsed, provenance = load_snapshot(planned)
     assert [s.start_seconds for s in parsed.sections] == [0.01, 75.2]
     assert (provenance["url"], provenance["final_url"]) == (VIDEO_URL, VIDEO_URL)
@@ -1806,32 +1811,6 @@ def test_a_long_videos_captions_are_capped_with_the_span_they_cover(conn, tmp_pa
     }
 
 
-def test_a_window_cut_by_the_cap_is_not_counted_as_read_to_its_end(conn, tmp_path, monkeypatch):
-    """With a cap below one window, the cap cuts the first window's text: the
-    span recorded must not claim the whole window was read."""
-    from authorai import jobs as jobsmod
-    from authorai.ingest import ParsedSection, load_snapshot
-
-    run_id = dbmod.create_run(conn)
-    report = _completed_report(conn, tmp_path, run_id)
-    upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
-    windows = [
-        ParsedSection(
-            title="w0", page=None, text="word " * 400, start_seconds=0.5, end_seconds=74.0
-        ),
-        ParsedSection(
-            title="w1", page=None, text="word " * 400, start_seconds=75.0, end_seconds=149.0
-        ),
-    ]
-    monkeypatch.setattr(jobsmod, "read_video_bounded", _read_video(windows))
-    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
-    settings = Settings(anthropic_api_key="x", openai_api_key="x", web_max_chars=500)
-    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
-    step_ingest(PipelineContext(conn, settings), run_id, payload)
-    _, provenance = load_snapshot(planned)
-    assert provenance["truncated"]["kept_until_seconds"] == 0.5
-
-
 def test_a_refused_video_fails_the_ingest_before_any_document_naming_it(
     conn, tmp_path, monkeypatch
 ):
@@ -1845,7 +1824,7 @@ def test_a_refused_video_fails_the_ingest_before_any_document_naming_it(
     upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
     poison_providers(monkeypatch)
 
-    def refused(video_id, *, timeout):
+    def refused(video_id, *, timeout, max_chars):
         raise VideoRefusedError(f"The YouTube video {VIDEO_URL} cannot be read: Private video")
 
     monkeypatch.setattr(jobsmod, "read_video_bounded", refused)

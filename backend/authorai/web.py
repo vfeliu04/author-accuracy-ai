@@ -127,10 +127,11 @@ class ReaderExitedError(RuntimeError):
 # process. recv_bytes refuses a frame on its length header, before a byte
 # of the body is read (the connection is then no longer readable, as
 # documented), and in_bounded_child reports the refusal as a bound of the
-# reader's. 64 MiB is twice the largest result either reader can send: the
+# reader's. 64 MiB is twice the largest result any reader can send: the
 # PDF reader's 8,000,000 characters pickle as at most 32 MiB of UTF-8 (~8
-# MiB for the Latin text of a real report), and a page's sections are at
-# most the 10 MB body they came from.
+# MiB for the Latin text of a real report), a page's sections are at most
+# the 10 MB body they came from, and a video's windows are cut to
+# AUTHORAI_WEB_MAX_CHARS in the reader, before they are sent.
 RESULT_MAX_BYTES = 64 * 1024 * 1024
 
 
@@ -342,8 +343,10 @@ def in_bounded_child(
                 # its pipe closed would otherwise be terminated, and the
                 # status would always read SIGTERM. One that closed its pipe
                 # and reads on is stopped after the grace. A child that
-                # reported is reaped at once: its status is never read.
-                child.join(_EXIT_GRACE_SECONDS)
+                # reported is stopped at once: its status is never read. The
+                # wait is on the sentinel, which reaps nothing: _stop must
+                # kill the reader's group before the reader is reaped.
+                _ended(child, _EXIT_GRACE_SECONDS)
         finally:
             sender.close()
             receiver.close()
@@ -403,11 +406,13 @@ def handover_file(payload: bytes | str | BinaryIO, url: str) -> str:
 
 def _start(child) -> None:
     """Start the reader with SIGINT blocked for its whole life. A terminal
-    Ctrl-C signals the server's whole process group, the reader included; one
-    killed by it reports nothing, and the run would be recorded FAILED blaming
-    the link instead of staying RUNNING for startup recovery. The mask is per
-    thread and survives spawn's fork+exec. The resource tracker is started
-    first: its first launch UNBLOCKS these signals in the calling thread."""
+    Ctrl-C signals the server's whole process group, which the reader belongs
+    to until end_with_parent gives it a group of its own — so while it starts
+    up; one killed by it reports nothing, and the run would be recorded FAILED
+    blaming the link instead of staying RUNNING for startup recovery. The mask
+    is per thread and survives spawn's fork+exec. The resource tracker is
+    started first: its first launch UNBLOCKS these signals in the calling
+    thread."""
     resource_tracker.ensure_running()
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
     try:
@@ -496,28 +501,38 @@ def _orphan_cpu_seconds(timeout: float) -> int:
 
 
 def _stop(child) -> int | None:
-    """Reap the reader process: one still running is terminated, then killed;
-    then whatever it started and left running is killed with its process
-    group. Returns its exit status (negative: the signal that ended it)."""
-    if child.is_alive():
+    """Stop the reader process and reap it: one still running is terminated,
+    then killed; whatever it started and left running is killed with its
+    process group, BEFORE the reader is reaped. Returns its exit status
+    (negative: the signal that ended it).
+
+    Its end is watched on its sentinel, never with is_alive() or join(), which
+    reap it: until it is reaped, the reader holds its pid — so its group's id
+    — and the group kill cannot reach another process that was given the
+    freed number (another reader, started by a thread beside this one)."""
+    if not _ended(child, 0):
         child.terminate()
-        child.join(1.0)
-        if child.is_alive():
+        if not _ended(child, 1.0):
             child.kill()
-    child.join()
+            _ended(child, None)
     _kill_group(child.pid)
+    child.join()
     exitcode = child.exitcode
     child.close()
     return exitcode
 
 
+def _ended(child, timeout: float | None) -> bool:
+    """Whether the reader has exited, waiting up to `timeout` seconds (None:
+    until it does) — without reaping it."""
+    return bool(connection.wait([child.sentinel], timeout))
+
+
 def _kill_group(pid: int) -> None:
-    """Kill what is left of a stopped reader's process group, whose id is the
-    reader's pid (end_with_parent). While any program of the reader's is still
-    in the group, the id cannot name another process or group, so the signal
-    reaches only what the reader started; with the group empty there is
-    nothing to signal, and the lookup fails — the reader was stopped before
-    it made the group, or everything in it had already ended."""
+    """Kill what is left of a stopped, unreaped reader's process group, whose
+    id is the reader's pid (end_with_parent), so the signal reaches only the
+    reader and what it started. The lookup fails when there is no such group:
+    the reader was stopped before it made one."""
     try:
         os.killpg(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):

@@ -307,7 +307,19 @@ def test_context_says_what_a_video_was_read_from_and_how_much(conn):
         truncated={"kept_chars": 200_000, "dropped_chars": 9_000, "kept_until_seconds": 13_330.5},
     )
     video("Lecture", "https://www.youtube.com/watch?v=bbbbbbbbbbb", kind="manual", verified=True)
+    video(
+        "Cut talk",
+        "https://www.youtube.com/watch?v=ccccccccccc",
+        kind="manual",
+        verified=True,
+        truncated={"kept_chars": 200_000, "dropped_chars": 50_000},  # a window cut: no span
+    )
     context = chatmod.build_context(conn, run_id)
+    assert (
+        "- 'Cut talk': not scored — a YouTube video, read from its captions; its channel is "
+        "verified by YouTube — READ IN PART: only the first 200,000 of 250,000 characters of "
+        "this video's captions were analysed, so nothing later in it is covered"
+    ) in context
     assert (
         "- 'Water talk': not scored — a YouTube video, read from YouTube's automatic captions "
         "(speech recognition, which can mishear words); its channel is not verified by YouTube"

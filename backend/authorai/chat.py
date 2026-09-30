@@ -15,6 +15,7 @@ from authorai import db as dbmod
 from authorai.config import Settings
 from authorai.llm import LLM
 from authorai.log import setup_logger
+from authorai.video import clock
 
 logger = setup_logger(__name__)
 
@@ -86,13 +87,6 @@ def _fmt_score(scores: dict | None) -> str:
     )
 
 
-def format_timestamp(seconds: float) -> str:
-    """12:34 under an hour, 1:02:03 beyond: how video players label time."""
-    hours, remainder = divmod(int(seconds), 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
-
-
 def _evidence_locator(row: dict) -> str:
     """Where in its source the quoted evidence sits, phrased by SOURCE TYPE and
     never inferred from which locator happens to be null: Docling leaves page
@@ -102,7 +96,7 @@ def _evidence_locator(row: dict) -> str:
         return ", image"
     if source_type == "youtube":
         start = row.get("evidence_start_seconds")
-        return f" at {format_timestamp(start)}" if start is not None else ""
+        return f" at {clock(start)}" if start is not None else ""
     if source_type == "web":
         section = row.get("evidence_section")
         return f" § {section}" if section else ""
@@ -195,12 +189,13 @@ def _partial_note(source: dict) -> str:
     until = truncated.get("kept_until_seconds")
     if source.get("source_type") == "youtube" and isinstance(until, int | float):
         return (
-            f" — READ IN PART: only the first {format_timestamp(until)} of this video's captions "
+            f" — READ IN PART: only the first {clock(until)} of this video's captions "
             "were analysed, so nothing later in it is covered"
         )
+    what = "this video's captions" if source.get("source_type") == "youtube" else "this page"
     return (
-        f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of this "
-        "page were analysed, so nothing later in it is covered"
+        f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of {what} "
+        "were analysed, so nothing later in it is covered"
     )
 
 

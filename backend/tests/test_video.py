@@ -409,18 +409,54 @@ def test_the_reader_options_confine_yt_dlp_to_one_video_on_youtube(monkeypatch):
     assert options["js_runtimes"] == {"deno": {"path": "/opt/deno"}}
     assert options["remote_components"] == set()  # no solver code fetched from the network
     assert options["socket_timeout"] == videomod.SOCKET_TIMEOUT_SECONDS
+    # Captions are what is wanted: with these set, yt-dlp reports captions it
+    # withheld for want of a token as a warning instead of a debug line
+    # (nothing is written: skip_download, and extract_info never processes).
+    assert options["writesubtitles"] is True and options["writeautomaticsub"] is True
     assert options["retries"] == options["extractor_retries"] == 1
     assert "cookiefile" not in options and "cookiesfrombrowser" not in options
     assert options.get("nocheckcertificate") is not True
 
 
 def test_a_missing_javascript_runtime_is_a_loud_failure(monkeypatch):
+    import deno
+
     def missing():
         raise FileNotFoundError("/env/bin/deno")
 
-    monkeypatch.setattr(videomod.deno, "find_deno_bin", missing)
-    with pytest.raises(RuntimeError, match="JavaScript runtime"):
+    monkeypatch.setattr(deno, "find_deno_bin", missing)
+    with pytest.raises(videomod.VideoReaderError, match="JavaScript runtime"):
         video_options(logger=object())
+
+
+def test_a_missing_runtime_package_is_the_same_loud_failure(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "deno", None)  # import deno now raises ImportError
+    with pytest.raises(videomod.VideoReaderError, match=r"runtime \(deno\) is not installed"):
+        video_options(logger=object())
+
+
+def test_the_server_imports_neither_yt_dlp_nor_deno():
+    """Both load only in the reader process: a server whose environment lacks
+    them still starts and reads PDFs, and a video read fails naming the video."""
+    import subprocess
+    import sys
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, authorai.jobs, authorai.api, authorai.video as v; v._ytdlp_version; "
+            "print('yt_dlp' in sys.modules, 'deno' in sys.modules)",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.split() == ["False", "False"]
 
 
 # --- reading one video (yt-dlp replaced by a recording stand-in) ------------------
@@ -434,8 +470,9 @@ class FakeYDL:
     `warnings` are logged through the options' logger during extraction, as
     yt-dlp logs them."""
 
-    def __init__(self, info=None, caption=b"", error=None, warnings=()):
+    def __init__(self, info=None, caption=b"", error=None, warnings=(), open_error=None):
         self.info, self.caption, self.error, self.warnings = info, caption, error, warnings
+        self.open_error = open_error
         self.params: dict | None = None
         self.extracted: list[tuple] = []
         self.opened: list[str] = []
@@ -460,6 +497,8 @@ class FakeYDL:
 
     def urlopen(self, url):
         self.opened.append(url)
+        if self.open_error is not None:
+            raise self.open_error
         import io
 
         return io.BytesIO(self.caption)
@@ -499,16 +538,153 @@ def test_a_video_without_usable_captions_is_refused_naming_it(deno_found):
     assert ydl.opened == []
 
 
-def test_captions_withheld_for_want_of_a_token_are_not_called_missing(deno_found):
-    ydl = FakeYDL(
-        _info("C1wFmXGPbUg"),
-        warnings=[
-            "[youtube] C1wFmXGPbUg: There are missing subtitles languages because a PO token "
-            "was not provided."
-        ],
-    )
+def test_yt_dlp_itself_reports_withheld_captions_to_the_readers_log(deno_found):
+    """Not a stand-in: yt-dlp's own YouTube extractor, given the reader's
+    options, routes its "missing subtitles ... PO token" notice to the log as a
+    warning — the path the refusal below reads."""
+    import yt_dlp
+
+    log = videomod._YtDlpLog()
+    with yt_dlp.YoutubeDL(video_options(log)) as ydl:
+        extractor = ydl.get_info_extractor("Youtube")
+        extractor._report_pot_subtitles_skipped(
+            "C1wFmXGPbUg",
+            True,
+            msg="C1wFmXGPbUg: There are missing subtitles languages because a PO token was not "
+            "provided.",
+        )
+    assert any("PO token" in warning for warning in log.warnings)
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "[youtube] C1wFmXGPbUg: There are missing subtitles languages because a PO token was not "
+        "provided.",
+        "[youtube] C1wFmXGPbUg: Some web client subtitles require a PO Token which was not "
+        "provided.",
+    ],
+)
+def test_captions_withheld_in_either_wording_are_not_called_missing(deno_found, warning):
+    ydl = FakeYDL(_info("C1wFmXGPbUg"), warnings=[warning])
     with pytest.raises(VideoRefusedError, match="YouTube withheld this video's captions"):
         videomod.read_video("C1wFmXGPbUg", ydl_class=ydl)
+
+
+class _HTTPError(Exception):
+    status = 429
+
+
+def test_a_failed_caption_download_is_the_readers_failure_named_once(deno_found):
+    ydl = FakeYDL(
+        _nasa(), open_error=_HTTPError("https://www.youtube.com/api/timedtext?ip=1.2.3.4")
+    )
+    with pytest.raises(videomod.VideoReaderError) as info:
+        videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
+    message = str(info.value)
+    assert message.startswith(f"The YouTube video {CANONICAL} could not be read: its captions ")
+    assert "(_HTTPError, HTTP 429)" in message
+    assert message.count("could not be read") == 1
+    assert "1.2.3.4" not in message  # the caption address carries the reader's IP
+    assert videomod._failure_kind(info.value) == "failed"
+
+
+def test_the_reader_cuts_a_long_transcript_and_records_the_span_it_kept(deno_found):
+    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    whole, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
+    assert "truncated" not in provenance
+    kept_two = len(whole.sections[0].text) + len(whole.sections[1].text)
+    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    document, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl, max_chars=kept_two)
+    assert document.sections == whole.sections[:2]
+    total = sum(len(section.text) for section in whole.sections)
+    assert provenance["truncated"] == {
+        "kept_chars": kept_two,
+        "dropped_chars": total - kept_two,
+        "kept_until_seconds": whole.sections[1].end_seconds,
+    }
+
+
+def test_a_window_cut_by_the_cap_claims_no_span(deno_found):
+    """A first window longer than the cap is cut mid-window, and how far into
+    the video the cut falls is not known: the record keeps the two numbers only."""
+    ydl = FakeYDL(_nasa(), (FIXTURES / "HBtdbaSKexU.en.json3").read_bytes())
+    document, provenance = videomod.read_video("HBtdbaSKexU", ydl_class=ydl, max_chars=100)
+    assert len(document.sections) == 1 and len(document.sections[0].text) <= 100
+    assert set(provenance["truncated"]) == {"kept_chars", "dropped_chars"}
+
+
+def _reader_that_is_terminated(sender, _payload_path, pid_file, cpu_seconds):
+    import subprocess
+    import sys
+    import threading
+
+    from authorai import web
+
+    web.end_with_parent(cpu_seconds)
+    videomod.prepare_reader_process()
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    Path(pid_file).write_text(str(sleeper.pid))
+    threading.Event().wait(60)
+
+
+_EXITING_SERVER = """
+import sys, threading
+from pathlib import Path
+import authorai.web as web
+from tests.test_video import _reader_that_is_terminated
+# The reader thread may or may not reach its own cleanup before the interpreter
+# ends (a race it won in a trial run): take that cleanup out, so the reader's
+# own handler is what is tested.
+web._kill_group = lambda pid: None
+pid_file = Path(sys.argv[1])
+threading.Thread(
+    target=web.in_bounded_child,
+    args=(_reader_that_is_terminated, (str(pid_file),)),
+    kwargs={"payload_path": None, "url": "https://www.youtube.com/watch?v=HBtdbaSKexU",
+            "timeout": 60.0},
+    daemon=True,
+).start()
+import time
+deadline = time.monotonic() + 30
+while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
+    time.sleep(0.01)
+print(pid_file.read_text() if pid_file.exists() else "", flush=True)
+sys.exit(0)  # a graceful exit: multiprocessing's exit hook terminates the reader
+"""
+
+
+def test_a_reader_terminated_by_the_servers_exit_takes_deno_with_it(tmp_path):
+    """On a graceful stop the server's in_bounded_child never gets to stop the
+    reader: multiprocessing's exit hook sends the daemon reader SIGTERM, and
+    nothing else runs. The reader's own handler must end its group, or the
+    deno it started runs on."""
+    import signal
+    import subprocess
+    import sys
+
+    from tests.test_web_reader import _gone_within, _running
+
+    pid_file = tmp_path / "sleeper.pid"
+    output = tmp_path / "server.txt"
+    # Files, not pipes: an orphan holding a pipe open would make the run wait
+    # for it, and read as the server exiting only when the orphan did.
+    with output.open("w") as out:
+        server = subprocess.run(
+            [sys.executable, "-c", _EXITING_SERVER, str(pid_file)],
+            cwd=Path(__file__).parents[1],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=90,
+        )
+    assert server.returncode == 0, output.read_text()
+    sleeper = int(pid_file.read_text())
+    try:
+        assert _gone_within(sleeper, 5), "deno (here a sleeper) outlived its reader"
+    finally:
+        if _running(sleeper):
+            os.kill(sleeper, signal.SIGKILL)
 
 
 @pytest.mark.parametrize(
@@ -564,7 +740,7 @@ def test_an_unexpected_extraction_failure_names_the_video_and_the_reader_version
     message = str(info.value)
     assert CANONICAL in message
     assert "Unable to extract initial player response" in message
-    assert f"yt-dlp {videomod.YT_DLP_VERSION}" in message
+    assert f"yt-dlp {videomod._ytdlp_version()}" in message
 
 
 def test_a_runtime_yt_dlp_could_not_use_fails_the_read(deno_found):
@@ -740,7 +916,7 @@ def test_a_reader_process_holds_no_keys_and_resolves_nothing_but_youtube(monkeyp
 def test_the_readers_failures_come_back_as_their_own_kind(monkeypatch, outcome, error, message):
     monkeypatch.setattr(videomod, "in_bounded_child", lambda *a, **k: outcome)
     with pytest.raises(error) as info:
-        videomod.read_video_bounded("HBtdbaSKexU", timeout=5)
+        videomod.read_video_bounded("HBtdbaSKexU", timeout=5, max_chars=5000)
     assert type(info.value) is error
     assert str(info.value) == message
 
@@ -764,9 +940,9 @@ def test_the_bounded_reader_returns_what_the_reader_read(monkeypatch):
         return result
 
     monkeypatch.setattr(videomod, "in_bounded_child", fake)
-    document, provenance = videomod.read_video_bounded("HBtdbaSKexU", timeout=90)
+    document, provenance = videomod.read_video_bounded("HBtdbaSKexU", timeout=90, max_chars=5000)
     assert document.title == "Title" and document.sections == sections
     assert provenance == {"publisher": "NASA Science"}
-    assert seen["args"] == ("HBtdbaSKexU",)
+    assert seen["args"] == ("HBtdbaSKexU", 5000)
     assert seen["payload_path"] is None
     assert seen["url"] == CANONICAL and seen["timeout"] == 90

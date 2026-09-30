@@ -15,7 +15,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_a_video_with_written_captions_is_read_whole():
-    document, provenance = read_video_bounded("HBtdbaSKexU", timeout=120)
+    document, provenance = read_video_bounded("HBtdbaSKexU", timeout=120, max_chars=200_000)
     assert document.title == "ScienceCasts: The Power of Light"
     assert provenance["publisher"] == "NASA Science"
     assert provenance["publication_date"] == "2016-12-13"
@@ -29,11 +29,11 @@ def test_a_video_with_written_captions_is_read_whole():
 def test_a_dubbed_video_is_read_from_its_own_languages_speech():
     # 18 speech-recognition tracks, one per dubbed audio track, Arabic listed
     # first: the English one is read, because the original audio is English.
-    document, provenance = read_video_bounded("BVVzkThVMg4", timeout=120)
+    document, provenance = read_video_bounded("BVVzkThVMg4", timeout=120, max_chars=200_000)
     assert provenance["video"]["captions"] == {"kind": "automatic", "language": "en"}
     assert document.sections[0].text.startswith("As we all know, this morning we're gathered")
 
 
 def test_a_video_without_captions_is_refused_naming_it():
     with pytest.raises(VideoRefusedError, match="C1wFmXGPbUg cannot be read: it has no usable"):
-        read_video_bounded("C1wFmXGPbUg", timeout=120)
+        read_video_bounded("C1wFmXGPbUg", timeout=120, max_chars=200_000)

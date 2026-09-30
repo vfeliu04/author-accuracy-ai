@@ -415,31 +415,25 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
 
 def _read_video(context: PipelineContext, upload: sqlite3.Row) -> None:
     """Read one video's captions and store them as the link's snapshot, like a
-    page: capped at web_max_chars — the cut recorded with the span of video it
-    kept, since "read in part" alone cannot say which minutes were checked —
-    and never hashed, since videos do not dedup. The reader is given the id
+    page: capped at web_max_chars by the reader itself — the cut recorded in
+    the provenance with the span of video it kept, since "read in part" alone
+    cannot say which minutes were checked — and never hashed, since videos do
+    not dedup. The reader is given the id
     alone (video.read_video_bounded); its refusal, timeout or failure
     propagates naming the video, and the retry reads it again."""
     video_id = youtube_video_id(upload["url"])
     if video_id is None:
         raise ValueError(f"Source {upload['url']!r} is recorded as a YouTube video but names none")
-    parsed, declared = read_video_bounded(video_id, timeout=context.settings.video_timeout_seconds)
-    capped = cap_sections(parsed.sections, limit=context.settings.web_max_chars, url=upload["url"])
-    last = capped.sections[-1]
-    # The cap keeps whole windows, except a first window over the cap alone,
-    # which it cuts: that one was read from its start, not to its end.
-    whole = last.text == parsed.sections[len(capped.sections) - 1].text
-    parsed.sections = capped.sections
-    truncated = capped.truncated and {
-        **capped.truncated,
-        "kept_until_seconds": last.end_seconds if whole else last.start_seconds,
-    }
+    parsed, declared = read_video_bounded(
+        video_id,
+        timeout=context.settings.video_timeout_seconds,
+        max_chars=context.settings.web_max_chars,
+    )
     provenance = {
         **declared,
         "url": upload["url"],
         "final_url": upload["url"],
         "fetched_at": dbmod.now_iso(),
-        **({"truncated": truncated} if truncated else {}),
     }
     planned = Path(upload["path"])
     planned.parent.mkdir(parents=True, exist_ok=True)

@@ -34,11 +34,13 @@ Isolation, in the order a read meets it:
    signature, so it is never logged, stored or quoted.
 """
 
+import functools
 import importlib.metadata
 import json
 import math
 import os
 import re
+import signal
 import socket
 from collections.abc import Callable, MutableMapping
 from dataclasses import asdict, dataclass
@@ -46,14 +48,13 @@ from datetime import date
 from typing import TypeGuard
 from urllib.parse import urlsplit
 
-import deno
-
 from authorai.fetch import canonical_video_url, is_public_address, shown_text
 from authorai.ingest import ParsedDocument, ParsedSection
 from authorai.log import setup_logger
 from authorai.web import (
     MAX_METADATA_CHARS,
     ExtractionTimeoutError,
+    cap_sections,
     end_with_parent,
     in_bounded_child,
     report_outcome,
@@ -70,7 +71,6 @@ WINDOW_SECONDS = 75
 # refused rather than cut, since a cut JSON file cannot be read.
 CAPTION_MAX_BYTES = 16 * 1024 * 1024
 SOCKET_TIMEOUT_SECONDS = 15
-YT_DLP_VERSION = importlib.metadata.version("yt-dlp")
 
 # The hosts and port a read was measured to use (author_ai/PR_D_SPIKE.md).
 READER_HOSTS = frozenset({"www.youtube.com", "youtube.com"})
@@ -355,7 +355,19 @@ def _cannot(url: str, reason: str) -> str:
 
 
 def _could_not(url: str, reason: str) -> str:
-    return f"The YouTube video {url} could not be read: {reason} (yt-dlp {YT_DLP_VERSION})"
+    return f"The YouTube video {url} could not be read: {reason} (yt-dlp {_ytdlp_version()})"
+
+
+@functools.cache
+def _ytdlp_version() -> str:
+    """The installed yt-dlp's version, read without importing it: yt-dlp and
+    deno are imported only in the reader process, so a server whose
+    environment lacks them still starts, and a video read fails naming the
+    video."""
+    try:
+        return importlib.metadata.version("yt-dlp")
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed"
 
 
 # --- the reader ------------------------------------------------------------------
@@ -378,6 +390,13 @@ def video_options(logger) -> dict:
         "socket_timeout": SOCKET_TIMEOUT_SECONDS,
         "retries": 1,
         "extractor_retries": 1,
+        # Captions are what is wanted. Nothing is written (skip_download, and
+        # extract_info never processes), but with these set yt-dlp reports
+        # captions it withheld for want of a proof-of-origin token as a
+        # warning, which read_video turns into its own refusal, instead of a
+        # debug line nobody sees.
+        "writesubtitles": True,
+        "writeautomaticsub": True,
         "cachedir": False,
         "js_runtimes": {"deno": {"path": _deno_path()}},
         "remote_components": set(),
@@ -386,8 +405,10 @@ def video_options(logger) -> dict:
 
 def _deno_path() -> str:
     try:
+        import deno
+
         return deno.find_deno_bin()
-    except FileNotFoundError as exc:
+    except (ImportError, FileNotFoundError) as exc:
         raise VideoReaderError(
             "the video reader's JavaScript runtime (deno) is not installed — reinstall the "
             "backend's pinned dependencies (pip install -e .)"
@@ -415,7 +436,9 @@ class _YtDlpLog:
         logger.warning("yt-dlp: %s", shown_text(message))
 
 
-def read_video(video_id: str, *, ydl_class: Callable | None = None) -> tuple[ParsedDocument, dict]:
+def read_video(
+    video_id: str, *, max_chars: int | None = None, ydl_class: Callable | None = None
+) -> tuple[ParsedDocument, dict]:
     """Read one video's captions into a document and what the video declares
     about itself. Runs in the reader process (read_video_bounded); `ydl_class`
     replaces yt_dlp.YoutubeDL in tests.
@@ -426,10 +449,15 @@ def read_video(video_id: str, *, ydl_class: Callable | None = None) -> tuple[Par
     failure of the reader itself (no JavaScript runtime, an unexpected
     answer) — every message naming the video."""
     url = canonical_video_url(video_id)
-    from yt_dlp.utils import DownloadError  # the reader process's import, never the server's
+    try:  # the reader process's import, never the server's
+        from yt_dlp.utils import DownloadError
 
-    if ydl_class is None:
-        from yt_dlp import YoutubeDL as ydl_class
+        if ydl_class is None:
+            from yt_dlp import YoutubeDL as ydl_class
+    except ImportError:
+        raise VideoReaderError(
+            _could_not(url, "yt-dlp is not installed — reinstall the backend's pinned dependencies")
+        ) from None
     log = _YtDlpLog()
     try:
         options = video_options(log)
@@ -452,7 +480,7 @@ def read_video(video_id: str, *, ydl_class: Callable | None = None) -> tuple[Par
             raise VideoRefusedError(_cannot(url, _UNFINISHED[info["live_status"]]))
         track = choose_track(info)
         if track is None:
-            if any("PO token" in warning for warning in log.warnings):
+            if any("po token" in warning.lower() for warning in log.warnings):
                 raise VideoRefusedError(
                     _cannot(
                         url,
@@ -477,10 +505,32 @@ def read_video(video_id: str, *, ydl_class: Callable | None = None) -> tuple[Par
             str(exc) if exc.args and "caption file" in str(exc) else "the caption file is not JSON"
         )
         raise ValueError(_cannot(url, reason)) from None
+    provenance = video_provenance(info, track)
+    if max_chars is not None:
+        sections, truncated = capped_transcript(sections, max_chars=max_chars, url=url)
+        if truncated is not None:
+            provenance["truncated"] = truncated
     document = ParsedDocument(
         title=_cut(info.get("title")), sections=sections, tables=[], figures=[]
     )
-    return document, video_provenance(info, track)
+    return document, provenance
+
+
+def capped_transcript(
+    sections: list[ParsedSection], *, max_chars: int, url: str
+) -> tuple[list[ParsedSection], dict | None]:
+    """The windows cut to `max_chars` (web.cap_sections, as for a page), and
+    the record of the cut — None when the transcript was kept whole. The
+    record carries `kept_until_seconds`, where the kept windows end, only when
+    the last one was kept whole: a first window longer than the cap is cut
+    mid-window, and how far into the video that cut falls is not known."""
+    capped = cap_sections(sections, limit=max_chars, url=url)
+    if capped.truncated is None:
+        return capped.sections, None
+    last = capped.sections[-1]
+    whole = last.text == sections[len(capped.sections) - 1].text
+    span = {"kept_until_seconds": last.end_seconds} if whole else {}
+    return capped.sections, {**capped.truncated, **span}
 
 
 def _extraction_failure(exc: Exception, video_id: str, url: str) -> Exception:
@@ -505,7 +555,7 @@ def _read_captions(ydl, track: CaptionTrack, url: str) -> bytes:
     except Exception as exc:  # noqa: BLE001 - yt-dlp's network errors; its text may hold the address
         status = getattr(exc, "status", None)
         detail = f"{type(exc).__name__}" + (f", HTTP {status}" if status else "")
-        raise RuntimeError(
+        raise VideoReaderError(
             _could_not(url, f"its captions could not be downloaded ({detail})")
         ) from None
     if len(data) > CAPTION_MAX_BYTES:
@@ -552,17 +602,25 @@ def guarded_getaddrinfo(real: Callable) -> Callable:
 
 
 def prepare_reader_process() -> None:
-    """The reader process's own isolation, before yt-dlp is imported."""
+    """The reader process's own isolation, before yt-dlp is imported. Also
+    ends the reader's process group (deno with it) on SIGTERM: a server that
+    stops gracefully has multiprocessing's exit hook terminate the reader, and
+    neither in_bounded_child's cleanup nor the parent-death watcher runs then.
+    Safe here, unlike in the page reader, because this process never sits in a
+    long C call that would hold a Python handler back."""
     scrub_environment(os.environ)
     socket.getaddrinfo = guarded_getaddrinfo(socket.getaddrinfo)
+    if os.getpgid(0) == os.getpid():  # end_with_parent made it a group of its own
+        signal.signal(signal.SIGTERM, lambda signum, frame: os.killpg(0, signal.SIGKILL))
 
 
-def _read_in_child(sender, _payload_path, video_id: str, cpu_seconds: int) -> None:
+def _read_in_child(sender, _payload_path, video_id: str, max_chars: int, cpu_seconds: int) -> None:
     end_with_parent(cpu_seconds)
     prepare_reader_process()
 
     def read():
-        document, provenance = read_video(video_id)
+        # Cut here, so the server receives only what it keeps.
+        document, provenance = read_video(video_id, max_chars=max_chars)
         return document.title, [asdict(section) for section in document.sections], provenance
 
     report_outcome(sender, read, _failure_kind)
@@ -576,16 +634,20 @@ def _failure_kind(exc: Exception) -> str:
     return "value" if isinstance(exc, ValueError) else "other"
 
 
-def read_video_bounded(video_id: str, *, timeout: float) -> tuple[ParsedDocument, dict]:
+def read_video_bounded(
+    video_id: str, *, timeout: float, max_chars: int
+) -> tuple[ParsedDocument, dict]:
     """read_video in a bounded child process (web.in_bounded_child), stopped
-    after `timeout` seconds of wall clock. The child's refusal and ValueError
-    come back as the same type with the same message, and so does its own
-    failure (VideoReaderError, which already names the video); anything else
-    is a RuntimeError naming the video, with the child's traceback in the log."""
+    after `timeout` seconds of wall clock, its transcript cut to `max_chars`
+    in the child (capped_transcript; the record is in the provenance). The
+    child's refusal and ValueError come back as the same type with the same
+    message, and so does its own failure (VideoReaderError, which already
+    names the video); anything else is a RuntimeError naming the video, with
+    the child's traceback in the log."""
     url = canonical_video_url(video_id)
     try:
         kind, payload = in_bounded_child(
-            _read_in_child, (video_id,), payload_path=None, url=url, timeout=timeout
+            _read_in_child, (video_id, max_chars), payload_path=None, url=url, timeout=timeout
         )
     except ExtractionTimeoutError:
         raise ExtractionTimeoutError(

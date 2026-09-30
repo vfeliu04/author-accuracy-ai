@@ -511,6 +511,63 @@ def test_stopping_a_reader_stops_what_it_started(tmp_path, then):
             os.kill(sleeper, signal.SIGKILL)
 
 
+def _reader_that_exits_without_reporting(sender, _payload_path, cpu_seconds):
+    web_mod.end_with_parent(cpu_seconds)
+    os._exit(0)
+
+
+def _present(pid: int) -> bool:
+    """Whether the process table still holds `pid`, running or a zombie."""
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return state.returncode == 0 and state.stdout.strip() != ""
+
+
+@pytest.mark.parametrize("how", ["report", "hold", "exit"])
+def test_a_readers_group_is_killed_before_the_reader_is_reaped(tmp_path, monkeypatch, how):
+    """While the reader is unreaped (running, or a zombie), its pid — and so its
+    group's id — cannot be given to another process: the group kill must come
+    first, or it could reach an unrelated group that took the freed number."""
+    seen = []
+    real = web_mod._kill_group
+
+    def watching(pid):
+        seen.append(_present(pid))
+        real(pid)
+
+    monkeypatch.setattr(web_mod, "_kill_group", watching)
+    pid_file = tmp_path / "sleeper.pid"
+    if how == "exit":
+        with pytest.raises(web_mod.ReaderExitedError):
+            web_mod.in_bounded_child(
+                _reader_that_exits_without_reporting,
+                (),
+                payload_path=None,
+                url="https://example.org/e",
+                timeout=30,
+            )
+    elif how == "report":
+        web_mod.in_bounded_child(
+            _reader_that_starts_a_sleeper,
+            (str(pid_file), "report"),
+            payload_path=None,
+            url="https://example.org/r",
+            timeout=30,
+        )
+    else:
+        with pytest.raises(ExtractionTimeoutError):
+            web_mod.in_bounded_child(
+                _reader_that_starts_a_sleeper,
+                (str(pid_file), "hold"),
+                payload_path=None,
+                url="https://example.org/h",
+                timeout=8,
+            )
+    if pid_file.exists():
+        sleeper = int(pid_file.read_text())
+        assert _gone_within(sleeper, 5)
+    assert seen == [True]
+
+
 _DYING_SERVER_WITH_A_PROGRAM = textwrap.dedent(
     """
     import os, signal, sys, threading, time
