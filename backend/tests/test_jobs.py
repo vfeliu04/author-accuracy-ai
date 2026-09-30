@@ -1806,6 +1806,32 @@ def test_a_long_videos_captions_are_capped_with_the_span_they_cover(conn, tmp_pa
     }
 
 
+def test_a_window_cut_by_the_cap_is_not_counted_as_read_to_its_end(conn, tmp_path, monkeypatch):
+    """With a cap below one window, the cap cuts the first window's text: the
+    span recorded must not claim the whole window was read."""
+    from authorai import jobs as jobsmod
+    from authorai.ingest import ParsedSection, load_snapshot
+
+    run_id = dbmod.create_run(conn)
+    report = _completed_report(conn, tmp_path, run_id)
+    upload_id, planned = _link_upload(conn, tmp_path, VIDEO_URL, source_type="youtube")
+    windows = [
+        ParsedSection(
+            title="w0", page=None, text="word " * 400, start_seconds=0.5, end_seconds=74.0
+        ),
+        ParsedSection(
+            title="w1", page=None, text="word " * 400, start_seconds=75.0, end_seconds=149.0
+        ),
+    ]
+    monkeypatch.setattr(jobsmod, "read_video_bounded", _read_video(windows))
+    monkeypatch.setattr(jobsmod, "ingest_snapshot", lambda *a, **k: "doc")
+    settings = Settings(anthropic_api_key="x", openai_api_key="x", web_max_chars=500)
+    payload = {"report_upload_id": report, "source_upload_ids": [upload_id]}
+    step_ingest(PipelineContext(conn, settings), run_id, payload)
+    _, provenance = load_snapshot(planned)
+    assert provenance["truncated"]["kept_until_seconds"] == 0.5
+
+
 def test_a_refused_video_fails_the_ingest_before_any_document_naming_it(
     conn, tmp_path, monkeypatch
 ):

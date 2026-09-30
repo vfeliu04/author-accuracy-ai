@@ -264,6 +264,8 @@ def test_context_says_which_pages_were_read_only_in_part(conn):
     assert context.splitlines()[-1] == "- 'Water report': not scored"
     assert "READ IN PART" not in context.split("- 'Drinking-water'")[0]
     assert "READ IN PART" in chatmod.CHAT_SYSTEM  # the model is told what it means
+    # ...for a video too: a capped video is marked the same way.
+    assert "READ IN PART is a web page or a video" in " ".join(chatmod.CHAT_SYSTEM.split())
 
 
 def test_context_says_what_a_video_was_read_from_and_how_much(conn):

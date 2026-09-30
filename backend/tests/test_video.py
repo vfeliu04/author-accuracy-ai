@@ -728,6 +728,13 @@ def test_a_reader_process_holds_no_keys_and_resolves_nothing_but_youtube(monkeyp
             RuntimeError,
             f"{CANONICAL} could not be read: KeyError: 'boom'",
         ),
+        # The reader's own failure already names the video and yt-dlp's version:
+        # passed on as it is, not wrapped in a second "could not be read".
+        (
+            ("failed", ("VideoReaderError", "The YouTube video x could not be read: y", "tb")),
+            videomod.VideoReaderError,
+            "The YouTube video x could not be read: y",
+        ),
     ],
 )
 def test_the_readers_failures_come_back_as_their_own_kind(monkeypatch, outcome, error, message):
@@ -736,6 +743,15 @@ def test_the_readers_failures_come_back_as_their_own_kind(monkeypatch, outcome, 
         videomod.read_video_bounded("HBtdbaSKexU", timeout=5)
     assert type(info.value) is error
     assert str(info.value) == message
+
+
+def test_the_readers_own_failures_are_told_apart_from_unexpected_ones(deno_found):
+    ydl = FakeYDL(_nasa(_type="playlist"))
+    with pytest.raises(videomod.VideoReaderError) as info:
+        videomod.read_video("HBtdbaSKexU", ydl_class=ydl)
+    assert isinstance(info.value, RuntimeError)
+    assert videomod._failure_kind(info.value) == "failed"
+    assert videomod._failure_kind(KeyError("x")) == "other"
 
 
 def test_the_bounded_reader_returns_what_the_reader_read(monkeypatch):

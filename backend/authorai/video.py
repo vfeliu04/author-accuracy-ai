@@ -103,6 +103,12 @@ class VideoRefusedError(ValueError):
     captions — and the message says why, naming the video."""
 
 
+class VideoReaderError(RuntimeError):
+    """The reader failed, not the video: no JavaScript runtime, an answer
+    that is not the video asked for, a download that broke. The message
+    names the video and yt-dlp's version, and is passed on as it is."""
+
+
 @dataclass(frozen=True)
 class CaptionTrack:
     kind: str  # "manual" (written for the video) or "automatic" (speech recognition)
@@ -382,8 +388,8 @@ def _deno_path() -> str:
     try:
         return deno.find_deno_bin()
     except FileNotFoundError as exc:
-        raise RuntimeError(
-            "The video reader's JavaScript runtime (deno) is not installed: reinstall the "
+        raise VideoReaderError(
+            "the video reader's JavaScript runtime (deno) is not installed — reinstall the "
             "backend's pinned dependencies (pip install -e .)"
         ) from exc
 
@@ -425,17 +431,21 @@ def read_video(video_id: str, *, ydl_class: Callable | None = None) -> tuple[Par
     if ydl_class is None:
         from yt_dlp import YoutubeDL as ydl_class
     log = _YtDlpLog()
-    with ydl_class(video_options(log)) as ydl:
+    try:
+        options = video_options(log)
+    except VideoReaderError as exc:
+        raise VideoReaderError(_could_not(url, str(exc))) from None
+    with ydl_class(options) as ydl:
         try:
             info = ydl.extract_info(url, download=False, process=False)
         except DownloadError as exc:
             raise _extraction_failure(exc, video_id, url) from None
         if any("No supported JavaScript runtime" in warning for warning in log.warnings):
-            raise RuntimeError(
+            raise VideoReaderError(
                 _could_not(url, "yt-dlp could not use its JavaScript runtime (deno)")
             )
         if info.get("_type") not in (None, "video") or info.get("id") != video_id:
-            raise RuntimeError(
+            raise VideoReaderError(
                 _could_not(url, "YouTube answered with something that is not the video asked for")
             )
         if info.get("live_status") in _UNFINISHED:
@@ -480,13 +490,13 @@ def _extraction_failure(exc: Exception, video_id: str, url: str) -> Exception:
     reason = reason_from_ytdlp(str(exc), video_id)
     if getattr(cause, "expected", False) or reason == _BOT_CHECK:
         return VideoRefusedError(_cannot(url, reason))
-    return RuntimeError(_could_not(url, reason))
+    return VideoReaderError(_could_not(url, reason))
 
 
 def _read_captions(ydl, track: CaptionTrack, url: str) -> bytes:
     parts = urlsplit(track.url)
     if (parts.scheme, parts.hostname, parts.path) != _CAPTION_SERVICE:
-        raise RuntimeError(
+        raise VideoReaderError(
             _could_not(url, "its caption track is not served by YouTube's caption service")
         )
     try:
@@ -561,14 +571,17 @@ def _read_in_child(sender, _payload_path, video_id: str, cpu_seconds: int) -> No
 def _failure_kind(exc: Exception) -> str:
     if isinstance(exc, VideoRefusedError):
         return "refused"
+    if isinstance(exc, VideoReaderError):
+        return "failed"
     return "value" if isinstance(exc, ValueError) else "other"
 
 
 def read_video_bounded(video_id: str, *, timeout: float) -> tuple[ParsedDocument, dict]:
     """read_video in a bounded child process (web.in_bounded_child), stopped
     after `timeout` seconds of wall clock. The child's refusal and ValueError
-    come back as the same type with the same message; anything else is a
-    RuntimeError naming the video, with the child's traceback in the log."""
+    come back as the same type with the same message, and so does its own
+    failure (VideoReaderError, which already names the video); anything else
+    is a RuntimeError naming the video, with the child's traceback in the log."""
     url = canonical_video_url(video_id)
     try:
         kind, payload = in_bounded_child(
@@ -592,6 +605,8 @@ def read_video_bounded(video_id: str, *, timeout: float) -> tuple[ParsedDocument
     if kind == "refused":
         raise VideoRefusedError(message)
     logger.warning("reading %s failed in the reader process:\n%s", url, child_traceback)
+    if kind == "failed":
+        raise VideoReaderError(message)
     if kind == "value":
         raise ValueError(message)
     raise RuntimeError(f"{url} could not be read: {name}: {message}")

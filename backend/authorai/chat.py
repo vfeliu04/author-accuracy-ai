@@ -24,9 +24,9 @@ pipeline extracted the report's claims, verified each against ingested source
 documents, and scored the report. Everything you know about this run is in the
 ANALYSIS block below. Answer ONLY from it — do not invent claims, verdicts, or
 sources, and when the analysis does not cover something, say so plainly.
-A source marked READ IN PART is a web page the pipeline read only the
-beginning of — treat the rest of that page as never seen, and say so rather
-than implying the whole page was checked.
+A source marked READ IN PART is a web page or a video the pipeline read only
+the beginning of — treat the rest of it as never seen, and say so rather than
+implying the whole source was checked.
 Verdicts mean: SUPPORTED / CONTRADICTED / UNVERIFIABLE *relative to the
 ingested sources only*. A claim marked "disavowed by the report" is one the
 report ITSELF calls false — a CONTRADICTED verdict there means the report was

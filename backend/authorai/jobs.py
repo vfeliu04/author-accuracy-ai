@@ -425,10 +425,14 @@ def _read_video(context: PipelineContext, upload: sqlite3.Row) -> None:
         raise ValueError(f"Source {upload['url']!r} is recorded as a YouTube video but names none")
     parsed, declared = read_video_bounded(video_id, timeout=context.settings.video_timeout_seconds)
     capped = cap_sections(parsed.sections, limit=context.settings.web_max_chars, url=upload["url"])
+    last = capped.sections[-1]
+    # The cap keeps whole windows, except a first window over the cap alone,
+    # which it cuts: that one was read from its start, not to its end.
+    whole = last.text == parsed.sections[len(capped.sections) - 1].text
     parsed.sections = capped.sections
     truncated = capped.truncated and {
         **capped.truncated,
-        "kept_until_seconds": capped.sections[-1].end_seconds,
+        "kept_until_seconds": last.end_seconds if whole else last.start_seconds,
     }
     provenance = {
         **declared,
