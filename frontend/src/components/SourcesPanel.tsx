@@ -1,5 +1,6 @@
 import type { JobProgressStep, Report, ReportSource, RunUpload, SourceType } from "../api/types";
 import { humanizeError, linksNamedIn } from "../lib/errors";
+import { formatTimestamp } from "../lib/format";
 import { linkHostPath, sourceName } from "../lib/links";
 import { scoreBand } from "../lib/score";
 
@@ -90,11 +91,22 @@ export function standing(source: ReportSource): string {
   return tierLabel(source.tier);
 }
 
-// A page the reader cap cut: the run was scored against its head only, so the
-// row says so in plain words and keeps the numbers for the hover. Without this
-// a partly-read page looks exactly like a whole one.
+// A page or video the reader cap cut: the run was scored against the head (or
+// the first span of captions) only, so the row says so in plain words. A
+// video shows the span itself; a page keeps the character counts for the
+// hover. Without this a partly-read source looks exactly like a whole one.
 function PartialNote({ truncated }: { truncated: ReportSource["truncated"] }) {
   if (!truncated) return null;
+  if (truncated.kept_until_seconds !== undefined) {
+    return (
+      <div
+        className="src-row__sub src-row__sub--partial"
+        title="The rest of this video's captions were not analysed."
+      >
+        Read in part: the first {formatTimestamp(truncated.kept_until_seconds)} of captions
+      </div>
+    );
+  }
   const whole = truncated.kept_chars + truncated.dropped_chars;
   return (
     <div

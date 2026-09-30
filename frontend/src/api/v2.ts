@@ -11,8 +11,10 @@ import type {
   ReferenceScan,
   Report,
   RunDetail,
-  RunListItem
+  RunListItem,
+  VideoProvenance
 } from "./types";
+import { VIDEO_ID } from "../lib/links";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
 const API_KEY = import.meta.env.VITE_API_KEY;
@@ -170,6 +172,32 @@ function textOrNull(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+// A video's own declarations, or undefined for anything that isn't a well
+// formed one (a web page's provenance has no `video` key at all, and this
+// must not invent one from a malformed block). The id goes into the player's
+// address, so it must be a video id and nothing more.
+function parseVideo(raw: unknown): VideoProvenance | undefined {
+  if (
+    !isRecord(raw) ||
+    typeof raw.id !== "string" ||
+    !VIDEO_ID.test(raw.id) ||
+    !isRecord(raw.captions)
+  ) {
+    return undefined;
+  }
+  return {
+    id: raw.id,
+    channel_id: textOrNull(raw.channel_id),
+    channel_verified: raw.channel_verified === true,
+    duration_seconds: typeof raw.duration_seconds === "number" ? raw.duration_seconds : null,
+    embeddable: raw.embeddable === true,
+    captions: {
+      kind: raw.captions.kind === "automatic" ? "automatic" : "manual",
+      language: textOrNull(raw.captions.language) ?? ""
+    }
+  };
+}
+
 // Checks a stored page before any of it is rendered: a file in another format
 // is refused loudly rather than misread, and display fields of the wrong kind
 // are dropped so they can never reach the screen.
@@ -199,6 +227,7 @@ export function parsePageSnapshot(payload: unknown): PageSnapshot {
     if (typeof raw.end_seconds === "number") section.end_seconds = raw.end_seconds;
     return section;
   });
+  const video = parseVideo(origin.video);
   const provenance: PageProvenance = {
     url: textOrNull(origin.url) ?? "",
     final_url: textOrNull(origin.final_url) ?? "",
@@ -211,7 +240,8 @@ export function parsePageSnapshot(payload: unknown): PageSnapshot {
     publisher: textOrNull(origin.publisher),
     publication_date: textOrNull(origin.publication_date),
     doi: textOrNull(origin.doi),
-    scholarly: origin.scholarly === true
+    scholarly: origin.scholarly === true,
+    ...(video ? { video } : {})
   };
   return {
     schema: PAGE_FORMAT,

@@ -95,6 +95,20 @@ export type SourceBiblio = {
   isbn?: string | null;
 };
 
+// What a video declares about itself (video.py's video_provenance): its
+// channel, whether YouTube verified that channel (the one thing that lets
+// its name earn list authority — an unverified channel still counts as a
+// named publisher), whether it may be embedded elsewhere, and which
+// captions were read.
+export type VideoProvenance = {
+  id: string;
+  channel_id: string | null;
+  channel_verified: boolean;
+  duration_seconds: number | null;
+  embeddable: boolean;
+  captions: { kind: "manual" | "automatic"; language: string };
+};
+
 // Every source document of a run, scored or not. An image is listed but never
 // scorable; a scorable source whose total is null has no score in this run.
 export type ReportSource = {
@@ -107,10 +121,17 @@ export type ReportSource = {
   tier: string | null;
   components: Record<string, number> | null;
   metadata: SourceBiblio | null;
-  // Set only for a web page the page cap read in part: how much of its text the
-  // run was scored against, and how much it never saw. Null for a page read
-  // whole, and for every PDF and image.
-  truncated: { kept_chars: number; dropped_chars: number } | null;
+  // Set only for a web page or video the page/caption cap read in part: how
+  // much was scored against, and how much never was. Null for a source read
+  // whole, and for every PDF and image. kept_until_seconds is set only for a
+  // video (the caption span kept); web pages count kept_chars/dropped_chars.
+  truncated: {
+    kept_chars: number;
+    dropped_chars: number;
+    kept_until_seconds?: number;
+  } | null;
+  // What a video declared about itself; null for every other source type.
+  video: VideoProvenance | null;
 };
 
 // All 0–1 fractions, or null before the run is scored. Credibility stays null
@@ -196,13 +217,16 @@ export type PageProvenance = {
   url: string;
   final_url: string;
   fetched_at: string;
-  content_type: string;
+  // Absent for a video snapshot (a caption file, not a fetched content type).
+  content_type?: string;
   title: string | null;
   authors: string[];
   publisher: string | null;
   publication_date: string | null;
   doi: string | null;
   scholarly: boolean;
+  // Present only for a video snapshot; absent (never null) for a web page.
+  video?: VideoProvenance;
 };
 
 export type PageSnapshot = {

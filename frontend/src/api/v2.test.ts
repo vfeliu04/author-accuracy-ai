@@ -275,4 +275,79 @@ describe("parsePageSnapshot", () => {
       end_seconds: 30
     });
   });
+
+  it("keeps a video's own declarations, and omits the field for a page that has none", () => {
+    const parsed = parsePageSnapshot({
+      ...page,
+      provenance: {
+        ...page.provenance,
+        video: {
+          id: "dQw4w9WgXcQ",
+          channel_id: "UCabc",
+          channel_verified: true,
+          duration_seconds: 754.2,
+          embeddable: true,
+          captions: { kind: "automatic", language: "en" }
+        }
+      }
+    });
+    expect(parsed.provenance.video).toEqual({
+      id: "dQw4w9WgXcQ",
+      channel_id: "UCabc",
+      channel_verified: true,
+      duration_seconds: 754.2,
+      embeddable: true,
+      captions: { kind: "automatic", language: "en" }
+    });
+    // A web page's provenance carries no `video` key at all — never `null`.
+    expect(parsePageSnapshot(page).provenance.video).toBeUndefined();
+    expect(Object.keys(parsePageSnapshot(page).provenance)).not.toContain("video");
+  });
+
+  it.each(["../../evil", "dQw4w9WgXc", "dQw4w9WgXcQ?autoplay=1", "dQw4w9WgXcQ/x", ""])(
+    "never takes %j for a video id: it is put into the player's address",
+    (id) => {
+      const parsed = parsePageSnapshot({
+        ...page,
+        provenance: {
+          ...page.provenance,
+          video: { id, captions: { kind: "manual", language: "en" }, embeddable: true }
+        }
+      });
+      expect(parsed.provenance.video).toBeUndefined();
+    }
+  );
+
+  it("never fabricates a video's declarations from a malformed block", () => {
+    const parsed = parsePageSnapshot({
+      ...page,
+      provenance: { ...page.provenance, video: { id: 42 } }
+    });
+    expect(parsed.provenance.video).toBeUndefined();
+  });
+
+  it("reads an unverified channel and a null duration, id and language as given", () => {
+    const parsed = parsePageSnapshot({
+      ...page,
+      provenance: {
+        ...page.provenance,
+        video: {
+          id: "dQw4w9WgXcQ",
+          channel_id: null,
+          channel_verified: false,
+          duration_seconds: null,
+          embeddable: false,
+          captions: { kind: "manual", language: 7 }
+        }
+      }
+    });
+    expect(parsed.provenance.video).toEqual({
+      id: "dQw4w9WgXcQ",
+      channel_id: null,
+      channel_verified: false,
+      duration_seconds: null,
+      embeddable: false,
+      captions: { kind: "manual", language: "" }
+    });
+  });
 });

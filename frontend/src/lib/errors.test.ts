@@ -377,6 +377,107 @@ describe("humanizeError explains every way a link can fail to open", () => {
   });
 });
 
+// Each message below is exactly what video.py or fetch.py stores for the
+// failure (video.py's _cannot/_could_not/ExtractionTimeoutError always name
+// the video's own canonical link; fetch.py's redirect refusal names the web
+// link that redirected).
+describe("humanizeError explains a YouTube video source's ways of failing", () => {
+  const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const cases: [string, string, string][] = [
+    [
+      "no usable captions",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it has no usable captions (neither captions written for it nor YouTube's automatic captions of the language it is spoken in)`,
+      `${video} — That video has no usable captions — neither ones written for it nor YouTube's automatic captions in its spoken language — so it can't be checked.`
+    ],
+    [
+      "a bot check",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: YouTube asked to confirm the reader is not a bot (it asks this of live streams, and when it limits requests from this network) — try again later`,
+      `${video} — YouTube asked to confirm the reader isn't a bot (it does this for live streams, and when it limits requests from this network). Try again later.`
+    ],
+    [
+      "a live stream",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it is live now, and YouTube writes a stream's captions only after it ends — try again later`,
+      `${video} — That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later.`
+    ],
+    [
+      "an upcoming stream",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it has not started yet — try again later, once it has been recorded`,
+      `${video} — That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later.`
+    ],
+    [
+      "a stream that just ended",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: it has just ended, and YouTube is still processing the recording — try again later`,
+      `${video} — That video isn't finished yet (it's live, hasn't started, or just ended), so YouTube hasn't written its captions. Try again later.`
+    ],
+    [
+      "captions YouTube withheld",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: YouTube withheld this video's captions from the reader (it asked for a proof-of-origin token) — try again later`,
+      `${video} — YouTube withheld this video's captions from the reader. Try again later.`
+    ],
+    [
+      "a private video",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: Private video. Sign in if you've been granted access to this video`,
+      `${video} — YouTube says that video is private or has been removed, so it can't be read.`
+    ],
+    [
+      "a removed video",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: Video unavailable. This video has been removed by the uploader`,
+      `${video} — YouTube says that video is private or has been removed, so it can't be read.`
+    ],
+    [
+      "a slow answer",
+      `ExtractionTimeoutError: The YouTube video ${video} took longer than 60 seconds to read — YouTube may be slow to answer; try again later`,
+      `${video} — Reading that video took too long — YouTube may be slow to answer. Try again later.`
+    ],
+    [
+      "captions over the reader's byte cap",
+      `VideoRefusedError: The YouTube video ${video} cannot be read: its captions are larger than 16,777,216 bytes`,
+      `${video} — That video's captions are larger than the reader can handle.`
+    ],
+    [
+      "a broken JavaScript runtime, while reading one video",
+      `RuntimeError: The YouTube video ${video} could not be read: yt-dlp could not use its JavaScript runtime (deno) (yt-dlp 2025.09.05)`,
+      `${video} — The verification server's video reader couldn't start its JavaScript runtime. This is a server problem, not the link — let the operator know.`
+    ]
+  ];
+
+  for (const [name, error, expected] of cases) {
+    it(`explains ${name}`, () => {
+      expect(humanizeError(error)).toBe(expected);
+    });
+  }
+
+  it("explains an uninstalled JavaScript runtime without naming any link", () => {
+    expect(
+      humanizeError(
+        "RuntimeError: The video reader's JavaScript runtime (deno) is not installed: reinstall the backend's pinned dependencies (pip install -e .)"
+      )
+    ).toBe(
+      "The verification server's video reader isn't fully installed. This is a server problem, not the link — let the operator know."
+    );
+  });
+
+  it("explains a web link that redirects into a YouTube video, and names the web link, not the video", () => {
+    const web = "https://example.org/blog";
+    expect(
+      humanizeError(
+        `FetchError: Fetching '${web}' failed: it redirects to the YouTube video ${video} — add that link as a source instead`
+      )
+    ).toBe(`${web} — That link redirects to a YouTube video — add the video's own link as a source instead of the web page.`);
+  });
+
+  it("explains a web link that redirects into a YouTube channel or playlist page", () => {
+    const web = "https://example.org/blog";
+    expect(
+      humanizeError(
+        `FetchError: Fetching '${web}' failed: it redirects to a YouTube page ('https://www.youtube.com/channel/UCabc'), which is not read as a web page`
+      )
+    ).toBe(
+      `${web} — That link redirects to a YouTube page (a channel, playlist or search page), which can't be read as a source.`
+    );
+  });
+});
+
 // The server quotes a site's Content-Type or Content-Encoding value in full, and
 // a site may send about 100 KiB of headers. "https://" then a long run of
 // closing brackets is a link whose every bracket the trimming looks at; the page

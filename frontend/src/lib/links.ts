@@ -4,9 +4,19 @@
 
 export const MAX_LINK_LENGTH = 2048;
 
-// youtube.com, youtu.be and youtube-nocookie.com — bare or on the www., m. and
-// music. subdomains; any trailing root dots name the same host.
-const YOUTUBE_HOST = /^(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be|youtube-nocookie\.com)\.*$/;
+// youtube.com, youtube-nocookie.com, youtubekids.com and youtu.be — bare or
+// under any subdomain (www., m., music., gaming., consent., ...); trailing
+// root dots name the same host. Mirrors fetch.is_youtube_url exactly.
+const YOUTUBE_DOMAINS = ["youtube.com", "youtube-nocookie.com", "youtubekids.com", "youtu.be"];
+
+// Eleven characters, as a video id is, but YouTube's names for its playlist
+// player (/embed/videoseries) and a channel's live page (/embed/live_stream).
+export const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+const NOT_VIDEO_IDS = new Set(["videoseries", "live_stream"]);
+// The paths whose one segment after the prefix is a video id, each with at
+// most a trailing slash after the id.
+const VIDEO_PATH = /^\/(?:shorts|live|embed|v|e)\/([A-Za-z0-9_-]{11})\/?$/;
+const SHORT_LINK_PATH = /^\/([A-Za-z0-9_-]{11})\/?$/;
 
 // The characters the server allows in a site name. A parsed link spells an
 // international name in its encoded ASCII form, so this holds for those too.
@@ -31,6 +41,66 @@ function canonical(url: URL): string {
   return copy.href;
 }
 
+function stripTrailingDots(host: string): string {
+  return host.replace(/\.+$/, "");
+}
+
+// True for a host that is one of YouTube's domains or any host under one
+// (www., m., music., gaming., consent., ...). A link there is read as a
+// single video or refused; it is never added as a web page.
+function isYoutubeHost(hostname: string): boolean {
+  const host = stripTrailingDots(hostname.toLowerCase());
+  return YOUTUBE_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+// The id of the one video a YouTube link names, or null when the link isn't
+// YouTube's or names no single video (a channel, a playlist, a search).
+// Mirrors the server's fetch.youtube_video_id: the forms are watch?v= (one
+// id, however often repeated), youtu.be/ID, and /shorts|live|embed|v|e/ID.
+// `url.pathname` is already percent-encoded, so an escaped character in a
+// path id fails the pattern instead of being decoded; `searchParams` decodes
+// a query value the way the server's parse_qs does.
+export function youtubeVideoId(raw: string): string | null {
+  const url = parse(raw);
+  if (url === null || !isYoutubeHost(url.hostname)) return null;
+  const host = stripTrailingDots(url.hostname.toLowerCase());
+  let candidate: string | null;
+  if (host === "youtu.be" || host.endsWith(".youtu.be")) {
+    candidate = SHORT_LINK_PATH.exec(url.pathname)?.[1] ?? null;
+  } else if (url.pathname === "/watch" || url.pathname === "/watch/") {
+    const values = new Set(url.searchParams.getAll("v"));
+    candidate = values.size === 1 ? [...values][0] : null;
+  } else {
+    candidate = VIDEO_PATH.exec(url.pathname)?.[1] ?? null;
+  }
+  if (candidate === null || !VIDEO_ID.test(candidate) || NOT_VIDEO_IDS.has(candidate)) {
+    return null;
+  }
+  return candidate;
+}
+
+// The one link a video is stored, compared and read by — every accepted
+// spelling becomes this, so the same video twice is a duplicate however it
+// was written.
+export function canonicalVideoUrl(id: string): string {
+  return `https://www.youtube.com/watch?v=${id}`;
+}
+
+// A link's comparable identity: its canonical video link when it names one,
+// its canonical form otherwise, or an error when it is YouTube's but names
+// no single video. `existing` links are always ones checkLink already
+// accepted, so they resolve the same way — a duplicate is caught however
+// either spelling was written.
+function identity(url: URL): LinkCheck {
+  if (isYoutubeHost(url.hostname)) {
+    const id = youtubeVideoId(url.href);
+    return id === null
+      ? { error: "That YouTube link isn't a single video. Add the link of one video." }
+      : { link: canonicalVideoUrl(id) };
+  }
+  return { link: canonical(url) };
+}
+
 export function checkLink(input: string, existing: readonly string[]): LinkCheck {
   const url = parse(input.trim());
   if (url === null) {
@@ -49,18 +119,21 @@ export function checkLink(input: string, existing: readonly string[]): LinkCheck
   if (!url.hostname.startsWith("[") && !HOST_CHARS.test(url.hostname)) {
     return { error: "That link's site name isn't valid." };
   }
-  if (YOUTUBE_HOST.test(url.hostname)) {
-    return { error: "YouTube links aren't supported yet." };
+  const found = identity(url);
+  if ("error" in found) {
+    return found;
   }
+  const { link } = found;
   // Measured as sent, where one typed character can take several ("é" is
   // "%C3%A9"), so the refusal names no count the typed text might not reach.
-  const link = canonical(url);
   if (link.length > MAX_LINK_LENGTH) {
     return { error: "That link is too long to add." };
   }
   const isDuplicate = existing.some((added) => {
     const parsed = parse(added);
-    return (parsed ? canonical(parsed) : added) === link;
+    if (parsed === null) return added === link;
+    const addedFound = identity(parsed);
+    return "link" in addedFound && addedFound.link === link;
   });
   if (isDuplicate) {
     return { error: "That link is already added." };
@@ -174,9 +247,14 @@ export function linkHost(raw: string): string {
 }
 
 // "example.org/water/report 2024": the host plus a decoded path, for reading.
+// A YouTube video reads by its id instead ("youtube.com · dQw4w9WgXcQ") — its
+// path is the same "/watch" for every video, so showing it would print one
+// indistinguishable row per video.
 export function linkHostPath(raw: string): string {
   const url = parse(raw);
   if (url === null) return raw;
+  const id = youtubeVideoId(raw);
+  if (id !== null) return `${displayHost(url).replace(/^www\./, "")} · ${id}`;
   let path = url.pathname;
   try {
     path = decodeURIComponent(path);

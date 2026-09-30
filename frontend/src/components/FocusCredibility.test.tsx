@@ -20,7 +20,8 @@ const scored: ReportSource = {
     publication_date: "2022",
     doi: "10.1017/9781009325844.005"
   },
-  truncated: null
+  truncated: null,
+  video: null
 };
 
 const unscored: ReportSource = {
@@ -33,7 +34,8 @@ const unscored: ReportSource = {
   tier: null,
   components: null,
   metadata: null,
-  truncated: null
+  truncated: null,
+  video: null
 };
 
 const image: ReportSource = {
@@ -46,7 +48,8 @@ const image: ReportSource = {
   tier: null,
   components: null,
   metadata: null,
-  truncated: null
+  truncated: null,
+  video: null
 };
 
 function reportWith(overrides: Partial<Report>): Report {
@@ -119,6 +122,45 @@ describe("FocusCredibility", () => {
     expect(badges.map((badge) => badge.textContent)).toEqual(["82", "—", "—"]);
     expect(badges[1]).toHaveAttribute("title", "Not scored");
     expect(badges[2]).toHaveAttribute("title", "Not scorable");
+  });
+
+  it("says 'channel', and how its authority was earned, for a YouTube source", () => {
+    const verifiedTier1: ReportSource = {
+      ...scored,
+      doc_id: "v1",
+      title: "Coastal Talk",
+      source_type: "youtube",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      metadata: { ...scored.metadata, publisher: "World Health Organization" },
+      video: {
+        id: "dQw4w9WgXcQ",
+        channel_id: "UCabc",
+        channel_verified: true,
+        duration_seconds: 600,
+        embeddable: true,
+        captions: { kind: "manual", language: "en" }
+      }
+    };
+    renderAt(reportWith({ sources: [verifiedTier1] }), "v1");
+    expect(
+      screen.getByText(
+        "“World Health Organization” is on the tier-1 list of international institutions."
+      )
+    ).toBeInTheDocument();
+
+    const unverified: ReportSource = {
+      ...verifiedTier1,
+      doc_id: "v2",
+      components: { metadata_completeness: 24, authority: 15, recency: 12, verification: 16 },
+      metadata: { ...scored.metadata, publisher: "Some Channel" },
+      video: { ...verifiedTier1.video!, channel_verified: false }
+    };
+    renderAt(reportWith({ sources: [unverified] }), "v2");
+    expect(
+      screen.getByText(
+        "“Some Channel” counts as a named publisher (15 of 30): YouTube has not verified this channel, so its name earns no list authority."
+      )
+    ).toBeInTheDocument();
   });
 
   it("says what a matched registry record did and did not confirm", () => {
