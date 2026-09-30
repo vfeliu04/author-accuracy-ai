@@ -286,6 +286,21 @@ def youtube_video_id(url: str) -> str | None:
     return candidate
 
 
+def video_link(url: str) -> str | None:
+    """A normalized link's canonical video link, None when the link is not
+    YouTube's, and ValueError when it is YouTube's but names no single video —
+    the one rule by which a link offered or added becomes a video source."""
+    if not is_youtube_url(url):
+        return None
+    video_id = youtube_video_id(url)
+    if video_id is None:
+        raise ValueError(
+            f"Source URL {_shown(url)} is not a single YouTube video "
+            "(a channel, playlist or search page cannot be read as a source)"
+        )
+    return canonical_video_url(video_id)
+
+
 def canonical_video_url(video_id: str) -> str:
     """The one link a video is stored, compared and read by: every accepted
     form becomes this, so the same video twice is a duplicate, and nothing the

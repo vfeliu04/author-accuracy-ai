@@ -1370,6 +1370,43 @@ def test_files_and_links_are_recorded_files_first(tmp_path):
     ]
 
 
+def test_a_video_link_is_recorded_as_a_youtube_source_in_its_one_form(tmp_path):
+    settings = _settings(tmp_path)
+    links = [
+        "https://youtu.be/dQw4w9WgXcQ?t=42&si=AbCd",
+        "https://m.youtube.com/shorts/HBtdbaSKexU#__youtubedl_smuggle=x",
+        "https://example.org/a",
+    ]
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(
+            "/api/runs",
+            headers=AUTH,
+            files=_upload_files(source_count=0),
+            data={"source_urls": links},
+        )
+        assert resp.status_code == 202, resp.text
+        uploads = client.get(f"/api/runs/{resp.json()['run_id']}", headers=AUTH).json()["uploads"]
+    assert [(u["source_type"], u["url"], u["file_name"]) for u in uploads[1:]] == [
+        (
+            "youtube",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        ),
+        (
+            "youtube",
+            "https://www.youtube.com/watch?v=HBtdbaSKexU",
+            "https://www.youtube.com/watch?v=HBtdbaSKexU",
+        ),
+        ("web", "https://example.org/a", "https://example.org/a"),
+    ]
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    rows = conn.execute("SELECT path FROM uploads WHERE source_type = 'youtube'").fetchall()
+    conn.close()
+    # Planned like a page's: the ingest step stores the transcript there.
+    assert all(Path(row["path"]).suffix == ".json" for row in rows)
+    assert not any(Path(row["path"]).exists() for row in rows)
+
+
 @pytest.mark.parametrize(
     ("links", "detail"),
     [
@@ -1377,9 +1414,15 @@ def test_files_and_links_are_recorded_files_first(tmp_path):
         (["not a url"], "not a usable link"),
         ([""], "not a usable link"),
         (["https://user:pass@example.org/a"], "not a usable link"),
-        (["https://www.youtube.com/watch?v=abc123def45"], "YouTube links are not supported yet"),
-        (["https://youtu.be/abc123def45"], "YouTube links are not supported yet"),
+        (["https://www.youtube.com/@NASA"], "is not a single YouTube video"),
+        (["https://www.youtube.com/playlist?list=PL0123456789"], "is not a single YouTube video"),
+        (["https://www.youtube.com/@NASA/live"], "is not a single YouTube video"),
         (["https://example.org/a", "https://example.org/a#section"], "added twice"),
+        # One video in two spellings is one source.
+        (
+            ["https://youtu.be/dQw4w9WgXcQ?t=5", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            "'https://www.youtube.com/watch?v=dQw4w9WgXcQ' was added twice",
+        ),
     ],
 )
 def test_bad_links_reject_the_whole_request(tmp_path, links, detail):

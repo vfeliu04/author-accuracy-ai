@@ -28,7 +28,7 @@ from authorai import chat as chatmod
 from authorai import db as dbmod
 from authorai import references as refsmod
 from authorai.config import Settings
-from authorai.fetch import is_youtube_url, validate_source_url
+from authorai.fetch import validate_source_url, video_link
 from authorai.ingest import image_suffix
 from authorai.llm import AnthropicClient
 from authorai.log import setup_logger
@@ -167,28 +167,29 @@ def _validate_source(upload: UploadFile, max_bytes: int) -> tuple[str, str]:
         raise HTTPException(status_code=400, detail=f"{name!r} {exc}") from exc
 
 
-def _validate_links(raw_links: list[str]) -> list[str]:
-    """Normalize and check every source link BEFORE anything is written.
+def _validate_links(raw_links: list[str]) -> list[tuple[str, str]]:
+    """Normalize and check every source link BEFORE anything is written, and
+    return each as (link, source_type).
 
     Syntax only — DNS, the private-address gate, and the content type are the
-    ingest step's fetch. A YouTube link is refused until video sources are
-    supported, and a link repeated in one request (after normalization, so a
-    #fragment does not make it different) is refused rather than merged.
+    ingest step's fetch. A YouTube video is stored in its one canonical form
+    (fetch.canonical_video_url), and any other YouTube page is refused: it is
+    neither a video nor readable as an article. A link repeated in one request
+    (after normalization, so a #fragment or another spelling of one video does
+    not make it different) is refused rather than merged.
     """
-    links: list[str] = []
+    links: list[tuple[str, str]] = []
     for raw in raw_links:
         try:
             link = validate_source_url(raw)
+            video = video_link(link)
         except ValueError as exc:
             # The fetch module's message already quotes the link, credentials cut.
             raise HTTPException(status_code=400, detail=f"not a usable link: {exc}") from exc
-        if is_youtube_url(link):
-            raise HTTPException(
-                status_code=400, detail=f"{link!r}: YouTube links are not supported yet"
-            )
-        if link in links:
-            raise HTTPException(status_code=400, detail=f"{link!r} was added twice")
-        links.append(link)
+        entry = (video, "youtube") if video is not None else (link, "web")
+        if any(added == entry[0] for added, _ in links):
+            raise HTTPException(status_code=400, detail=f"{entry[0]!r} was added twice")
+        links.append(entry)
     return links
 
 
@@ -267,15 +268,16 @@ def create_run(
                     source_type=source_type,
                 )
             )
-        for link in links:
+        for link, source_type in links:
             rows.append(
                 dbmod.UploadSpec(
                     kind="SOURCE",
                     file_name=link,
                     # The PLANNED artifact path: the ingest step fetches the page
-                    # and stores it here (a link serving a PDF lands beside it).
+                    # (or a video's captions) and stores it here; a link serving
+                    # a PDF lands beside it.
                     path=str(settings.uploads_dir / f"{dbmod.new_id()}.json"),
-                    source_type="web",
+                    source_type=source_type,
                     url=link,
                 )
             )
