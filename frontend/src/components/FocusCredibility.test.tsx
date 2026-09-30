@@ -192,6 +192,23 @@ describe("FocusCredibility", () => {
     ).toBeInTheDocument();
   });
 
+  it("says a video's details are what the video declares, not what was extracted", () => {
+    const video: ReportSource = {
+      ...scored,
+      source_type: "youtube",
+      tier: "METADATA_ONLY",
+      components: { metadata_completeness: 18, authority: 15, recency: 6, verification: 5 },
+      video: videoProvenance({ channel_verified: false })
+    };
+    renderAt(reportWith({ sources: [video] }), "a");
+    expect(
+      screen.getByText(
+        "The details are what the video declares about itself (its channel, title and upload date), and no registry record matched them."
+      )
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("extracted from the document");
+  });
+
   it("renders a missing run credibility as a dash with a short reason, never a number", () => {
     renderAt(
       reportWith({

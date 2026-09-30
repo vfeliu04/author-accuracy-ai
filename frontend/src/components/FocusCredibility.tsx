@@ -96,6 +96,11 @@ function explainComponent(
     return `${year !== null ? `Published ${year} — ` : ""}${band} when scored (20 pts under 2 years, 12 under 5, 6 under 10, 3 older).`;
   }
   if (key === "verification") {
+    // A video's details are its own declarations, read by the video reader —
+    // no text was extracted from it the way a PDF's or a bare page's are.
+    if (video && tier === "METADATA_ONLY") {
+      return "The details are what the video declares about itself (its channel, title and upload date), and no registry record matched them.";
+    }
     return TIER_EXPLANATIONS[tier] ?? null;
   }
   return null;
