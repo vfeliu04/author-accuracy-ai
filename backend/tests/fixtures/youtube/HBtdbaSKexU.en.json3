@@ -1,0 +1,265 @@
+{
+  "wireMagic": "pb3",
+  "pens": [ {
+  
+  } ],
+  "wsWinStyles": [ {
+  
+  } ],
+  "wpWinPositions": [ {
+  
+  } ],
+  "events": [ {
+    "tStartMs": 10,
+    "dDurationMs": 4880,
+    "segs": [ {
+      "utf8": "[ MUSIC ]"
+    } ]
+  }, {
+    "tStartMs": 4890,
+    "dDurationMs": 4930,
+    "segs": [ {
+      "utf8": "The Power of Light - presented by Science@NASA"
+    } ]
+  }, {
+    "tStartMs": 9820,
+    "dDurationMs": 8790,
+    "segs": [ {
+      "utf8": "Crewmembers on the International Space Station (ISS) can experience sunrises and sunsets in rapid succession -"
+    } ]
+  }, {
+    "tStartMs": 18610,
+    "dDurationMs": 5010,
+    "segs": [ {
+      "utf8": "about 16 \"sunsets\" per day because the space station circles Earth once every 90 minutes."
+    } ]
+  }, {
+    "tStartMs": 23620,
+    "dDurationMs": 5710,
+    "segs": [ {
+      "utf8": "Most people function regularly on a 24-hour cycle known as a circadian rhythm."
+    } ]
+  }, {
+    "tStartMs": 29330,
+    "dDurationMs": 7100,
+    "segs": [ {
+      "utf8": "However the space station environment creates a departure from the cycle of light and dark astronauts are used to at home."
+    } ]
+  }, {
+    "tStartMs": 36430,
+    "dDurationMs": 7260,
+    "segs": [ {
+      "utf8": "A high workload, the need to work 'nightshifts', the excitement of spaceflight, plus the unusual environment"
+    } ]
+  }, {
+    "tStartMs": 43690,
+    "dDurationMs": 8050,
+    "segs": [ {
+      "utf8": "can disrupt astronauts' circadian clocks. These factors can combine to disrupt sleep, which can in turn effect performance."
+    } ]
+  }, {
+    "tStartMs": 51740,
+    "dDurationMs": 6640,
+    "segs": [ {
+      "utf8": "Being wide awake when they should be sleeping is in fact a long-standing challenge among ISS crewmembers."
+    } ]
+  }, {
+    "tStartMs": 58380,
+    "dDurationMs": 8720,
+    "segs": [ {
+      "utf8": "Studies of astronauts who flew between 2001-2011 on the space shuttle and 2006-2011 on the station"
+    } ]
+  }, {
+    "tStartMs": 67100,
+    "dDurationMs": 4970,
+    "segs": [ {
+      "utf8": "showed that astronauts slept considerably less in space than they did on Earth."
+    } ]
+  }, {
+    "tStartMs": 72070,
+    "dDurationMs": 6180,
+    "segs": [ {
+      "utf8": "About 3/4 of them reported using sleep promoting pills during their 6-month missions."
+    } ]
+  }, {
+    "tStartMs": 78250,
+    "dDurationMs": 4650,
+    "segs": [ {
+      "utf8": "Use of caffeine is also commonplace among ISS astronauts to fight off the daytime drowsies."
+    } ]
+  }, {
+    "tStartMs": 82900,
+    "dDurationMs": 6030,
+    "segs": [ {
+      "utf8": "But NASA is seeking a better way to solve the problem. The secret lies in light itself."
+    } ]
+  }, {
+    "tStartMs": 88930,
+    "dDurationMs": 4660,
+    "segs": [ {
+      "utf8": "It's known that the blue-enriched light emitted by our laptops can keep us awake at night."
+    } ]
+  }, {
+    "tStartMs": 93590,
+    "dDurationMs": 8000,
+    "segs": [ {
+      "utf8": "A new NASA study will investigate how to use that for the benefit of humankind, and not just on the ISS."
+    } ]
+  }, {
+    "tStartMs": 101590,
+    "dDurationMs": 7070,
+    "segs": [ {
+      "utf8": "This light study -- known as the Lighting Effects study -- coincides with a lighting 'makeover' on the space station."
+    } ]
+  }, {
+    "tStartMs": 108660,
+    "dDurationMs": 6680,
+    "segs": [ {
+      "utf8": "The fluorescent lights on the station are being replaced with a new system of solid-state light-emitting diodes (LEDs)."
+    } ]
+  }, {
+    "tStartMs": 115340,
+    "dDurationMs": 6890,
+    "segs": [ {
+      "utf8": "Not only are the LEDs more energy-efficient and safer, they can literally shed all sorts of light on the study topic."
+    } ]
+  }, {
+    "tStartMs": 122230,
+    "dDurationMs": 6690,
+    "segs": [ {
+      "utf8": "Brigham and Women's Hospital's Dr. Steven Lockley and Thomas Jefferson University's Dr. George Brainard"
+    } ]
+  }, {
+    "tStartMs": 128920,
+    "dDurationMs": 3480,
+    "segs": [ {
+      "utf8": "are the co-principal investigators of the Lighting Effects study."
+    } ]
+  }, {
+    "tStartMs": 132400,
+    "dDurationMs": 4410,
+    "segs": [ {
+      "utf8": "Lockley explains: \"Light has a number of effects on our sleep and circadian rhythms;"
+    } ]
+  }, {
+    "tStartMs": 136810,
+    "dDurationMs": 7280,
+    "segs": [ {
+      "utf8": "is a natural stimulant and can improve alertness and performance, and also help reset the 24-hour clock when it gets out of sync."
+    } ]
+  }, {
+    "tStartMs": 144090,
+    "dDurationMs": 7230,
+    "segs": [ {
+      "utf8": "The human eye contains a light-sensitive protein called melanopsin, different from the rods and cones that we use to see,"
+    } ]
+  }, {
+    "tStartMs": 151320,
+    "dDurationMs": 7600,
+    "segs": [ {
+      "utf8": "which detects light in the eye and mediates these effect. Melanopsin is most sensitive to short-wavelength blue light"
+    } ]
+  }, {
+    "tStartMs": 158920,
+    "dDurationMs": 5030,
+    "segs": [ {
+      "utf8": "and so by increasing or decreasing the proportion of these blue wavelengths in white light,"
+    } ]
+  }, {
+    "tStartMs": 163950,
+    "dDurationMs": 4330,
+    "segs": [ {
+      "utf8": "we can enhance alertness, or promote sleep, respectively.\""
+    } ]
+  }, {
+    "tStartMs": 168280,
+    "dDurationMs": 6260,
+    "segs": [ {
+      "utf8": "Lockley says, \"NASA has developed a multi-LED lighting system to take advantage of these light effects."
+    } ]
+  }, {
+    "tStartMs": 174540,
+    "dDurationMs": 6360,
+    "segs": [ {
+      "utf8": "The system can provide millions of different light spectra. We're not making the ISS into a disco,"
+    } ]
+  }, {
+    "tStartMs": 180900,
+    "dDurationMs": 5520,
+    "segs": [ {
+      "utf8": "but we are going to use three different light settings. We'll use a general light setting"
+    } ]
+  }, {
+    "tStartMs": 186420,
+    "dDurationMs": 4780,
+    "segs": [ {
+      "utf8": "that provides a good light to see by during normal work, a higher-intensity blue light enriched setting"
+    } ]
+  }, {
+    "tStartMs": 191200,
+    "dDurationMs": 5150,
+    "segs": [ {
+      "utf8": "that elevates alertness and can better shift the circadian clock when needed,"
+    } ]
+  }, {
+    "tStartMs": 196350,
+    "dDurationMs": 6780,
+    "segs": [ {
+      "utf8": "and a lower-intensity blue wavelength-depleted 'pre-sleep' setting to calm the brain and promote sleep."
+    } ]
+  }, {
+    "tStartMs": 203130,
+    "dDurationMs": 4090,
+    "segs": [ {
+      "utf8": "We will be studying the impact of these lights in future missions.\""
+    } ]
+  }, {
+    "tStartMs": 207220,
+    "dDurationMs": 8480,
+    "segs": [ {
+      "utf8": "\"Oh you guys it is so fancy, it is really awesome! I think the technical term is, light functional checkout was successful"
+    } ]
+  }, {
+    "tStartMs": 215700,
+    "dDurationMs": 2800,
+    "segs": [ {
+      "utf8": "so congratulations to the light team.\""
+    } ]
+  }, {
+    "tStartMs": 218500,
+    "dDurationMs": 7240,
+    "segs": [ {
+      "utf8": "Results of this study are expected to help define guidelines for lighting protocols during future ISS and human space missions."
+    } ]
+  }, {
+    "tStartMs": 225740,
+    "dDurationMs": 6630,
+    "segs": [ {
+      "utf8": "Study results should make it clear exactly when and how to use these various settings of light intensity and spectrum."
+    } ]
+  }, {
+    "tStartMs": 232370,
+    "dDurationMs": 6470,
+    "segs": [ {
+      "utf8": "These results could also lead to Earth-based benefits such as helping manage sleep patterns for shift workers,"
+    } ]
+  }, {
+    "tStartMs": 238840,
+    "dDurationMs": 4090,
+    "segs": [ {
+      "utf8": "or even developing treatments for sleep disorders or jet lag."
+    } ]
+  }, {
+    "tStartMs": 242930,
+    "dDurationMs": 6300,
+    "segs": [ {
+      "utf8": "For more from the International Space Station, visit www.nasa.gov/station"
+    } ]
+  }, {
+    "tStartMs": 249230,
+    "dDurationMs": 5788,
+    "segs": [ {
+      "utf8": "For more news about the power of light, stay tuned to science.nasa.gov."
+    } ]
+  } ]
+}
