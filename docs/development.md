@@ -12,7 +12,7 @@ cd backend
 pip install -e ".[dev]"        # after any dependency change (deps are pinned in pyproject.toml)
 ```
 
-Python ≥ 3.11 (CI uses 3.11). Notable pins in `pyproject.toml`: `torch`/`torchvision` are declared explicitly because Docling's default layout engine needs them at runtime but does not declare them; `python-multipart` is required by FastAPI for the upload endpoint; `trafilatura==2.2.0` extracts the main content of web pages. Docling's HTML backend was rejected for web pages because it keeps `<footer>` as content and treats `<nav>`/`<aside>` only as paragraph breaks, so site chrome would reach chunks and the credibility imprint scan. The trafilatura pin is exact on purpose: `web.py` also imports trafilatura's Markdown writer from an internal module (`trafilatura.xml.xmltotxt`), so a version bump means re-running the `tests/test_web*.py` suites before trusting it. `lxml==6.1.1` is declared although trafilatura already installs it, because `web.py` imports `lxml.etree` directly to apply its tree edits in one linear pass. `pypdf==3.17.4` reads the closing pages of a report for the upload dialog's reference scan: Docling's layout pipeline is seconds per page, far too slow for a dialog, and pypdf is not a Docling dependency (Docling reads PDFs through pypdfium2), so it is declared. The dev extra pins `cryptography` for tests only: it makes a throwaway loopback TLS certificate at test time, so the fetch watchdog's HTTPS path is tested without committing a private key.
+Python ≥ 3.11 (CI uses 3.11). Notable pins in `pyproject.toml`: `torch`/`torchvision` are declared explicitly because Docling's default layout engine needs them at runtime but does not declare them; `python-multipart` is required by FastAPI for the upload endpoint; `trafilatura==2.2.0` extracts the main content of web pages. Docling's HTML backend was rejected for web pages because it keeps `<footer>` as content and treats `<nav>`/`<aside>` only as paragraph breaks, so site chrome would reach chunks and the credibility imprint scan. The trafilatura pin is exact on purpose: `web.py` also imports trafilatura's Markdown writer from an internal module (`trafilatura.xml.xmltotxt`), so a version bump means re-running the `tests/test_web*.py` suites before trusting it. `lxml==6.1.1` is declared although trafilatura already installs it, because `web.py` imports `lxml.etree` directly to apply its tree edits in one linear pass. `pypdf==3.17.4` reads the closing pages of a report for the upload dialog's reference scan: Docling's layout pipeline is seconds per page, far too slow for a dialog, and pypdf is not a Docling dependency (Docling reads PDFs through pypdfium2), so it is declared. The dev extra pins `cryptography` for tests only: it makes a throwaway loopback TLS certificate at test time, so the fetch watchdog's HTTPS path is tested without committing a private key. `yt-dlp[default]==2026.8.19` and `deno==2.9.5` read YouTube videos (`video.py`): yt-dlp finds a video's caption tracks, which means running YouTube's player code in a JavaScript runtime. The `[default]` extra pins `yt-dlp-ejs==0.8.0`, yt-dlp's solver for that code, so the reader never fetches solver code from the network; `deno` is the runtime, installed from its PyPI wheel into the conda env like any other package, and the reader finds its binary with `deno.find_deno_bin()` — nothing is installed outside pip. Both pins are exact, and a bump follows the routine under [Bumping yt-dlp](#bumping-yt-dlp). `video.py` imports `deno` and reads yt-dlp's installed version when it is imported, so an environment without them fails at import, the server and the test suite alike: after pulling, run `pip install -e ".[dev]"` again.
 
 Required environment variables (put them in `backend/.env` — settings are anchored to that file regardless of CWD; prefix is `AUTHORAI_` except the provider keys, which are read unprefixed):
 
@@ -32,8 +32,11 @@ Everything else (models, paths, weights, limits) has defaults in `backend/author
 python -m pytest -q -m "not integration"
 
 # integration tests — local only: Docling layout models + example PDFs (big first
-# download), and one live fetch of https://example.com/
+# download), one live fetch of https://example.com/, and three live YouTube video reads
 python -m pytest -q -m integration
+
+# the video reader alone, against YouTube itself (network; three videos)
+python -m pytest -m integration tests/test_youtube_integration.py
 
 # lint + format
 ruff check . && ruff format .
@@ -42,9 +45,21 @@ ruff check . && ruff format .
 uvicorn authorai.main:app
 ```
 
-CI (`.github/workflows/ci.yml`, push/PR on `main` and `v2`) runs exactly: `ruff check .` and `pytest -q -m "not integration"` on Python 3.11, then `npm ci` / `npm run build` / `npm run test` on Node 22. Integration tests never run in CI — they need Docling's GB-class layout models and, for the fetch test, the network.
+CI (`.github/workflows/ci.yml`, push/PR on `main` and `v2`) runs exactly: `ruff check .` and `pytest -q -m "not integration"` on Python 3.11, then `npm ci` / `npm run build` / `npm run test` on Node 22. Integration tests never run in CI — they need Docling's GB-class layout models and, for the fetch and video tests, the network.
 
 The link fetcher and the web extractor have their own offline suites. `tests/test_fetch.py` injects a resolver into every fetch and mocks the **pinned-IP** URL with respx, so a request sent to the hostname — an unpinned request — reaches nothing mocked and fails. Its time-budget tests serve real sockets on 127.0.0.1 instead of respx mocks, over plain HTTP and over HTTPS with a throwaway certificate made at test time, with the address gate relaxed for loopback. `tests/test_web.py` extracts saved pages in `tests/fixtures/web/`, and `tests/test_web_decoding.py` checks which declaration decides a page's encoding. `tests/test_web_reader.py` starts real reader processes: the time limit, a reader that dies starting up or killed mid-read, a Ctrl-C reaching the reader, a server killed under it, and the CPU-time limit; each is bounded by construction, so a regression fails instead of hanging the suite. The one live test, `test_real_fetch_pins_the_ip_and_verifies_the_certificate_against_the_hostname` (marked `integration`), fetches `https://example.com/` and inspects the TLS socket: the request went to an IP literal, and the handshake ran with `server_hostname` set to `example.com` under certificate and hostname verification.
+
+The video reader has its own offline suite too. `tests/test_video.py` drives `read_video` through a fake `YoutubeDL` over real captures in `tests/fixtures/youtube/` — two json3 caption files licensed CC BY by their uploaders, and the caption-track keys, audio-track languages and metadata of eight real videos in `tracks.json`, with no caption addresses (see its README) — and starts a real reader process to check its scrubbed environment and guarded DNS; `tests/test_web_reader.py` checks that a reader leads its own process group and that stopping it, or killing the server under it, stops the program it started. `tests/test_youtube_integration.py` (marked `integration`) reads three videos from YouTube itself, in the bounded reader process: one with written captions (`HBtdbaSKexU`), one YouTube has dubbed, which must be read from the speech recognition of its original English (`BVVzkThVMg4`), and one with no captions, which must be refused (`C1wFmXGPbUg`).
+
+### Bumping yt-dlp
+
+YouTube changes under yt-dlp every few months, so a yt-dlp release that can no longer read videos is expected, and the pin is exact. To bump it:
+
+1. Raise `yt-dlp[default]==` in `pyproject.toml` (the extra's `yt-dlp-ejs` pin moves with it), and `deno==` too if the new yt-dlp asks for a newer runtime.
+2. `pip install -e ".[dev]"`.
+3. Run the offline suite, then `python -m pytest -m integration tests/test_youtube_integration.py`.
+
+The reader's DNS answers only `www.youtube.com` and `youtube.com` on port 443 (`READER_HOSTS` in `video.py`), the one host a read was measured to use plus the bare domain. If a new yt-dlp, or YouTube, starts using another host, the read fails loudly: the guard refuses the lookup naming the host (`the video reader may reach only YouTube, not '<host>' port 443`), and the run's error carries yt-dlp's `Failed to resolve '<host>'`. Widening `READER_HOSTS` is then a deliberate decision, not a fix to apply on sight: the guard is what keeps the reader on YouTube. If the new version changes how caption tracks are keyed or which audio track it marks original, re-check the track choice against the measured facts in `PR_D_SPIKE.md` in the project folder — the dubbed video whose every audio track has an `-orig` speech track above all — and against the tracks in `tracks.json`.
 
 ## Frontend
 
@@ -78,7 +93,7 @@ python -m authorai.cli search <run_id> some query terms [-k N]
 Notes:
 
 - `ingest` describes figures with an LLM by default (`--no-describe-figures` to skip); one bad PDF reports and continues, and the run id is printed first so it is never lost.
-- `ingest` takes PDF paths only. Web-page sources come in through `POST /api/runs` (the upload dialog's link field), and the ingest step fetches them.
+- `ingest` takes PDF paths only. Web-page and YouTube video sources come in through `POST /api/runs` (the upload dialog's link field), and the ingest step fetches or reads them.
 - `verify --sync` makes per-claim sync calls (full price, immediate) — the debug path; batch is half price at minutes-scale latency.
 - **`--allow-stale`**: claims and verdicts are stamped with a hash of the prompt that produced them. `eval-extract`, `eval-verdict`, and `score` refuse rows whose stamp differs from the current prompt — a score over stale rows says nothing about the code you are tuning (this exact mistake produced a wrong conclusion once). `--allow-stale` downgrades the refusal to a loud warning.
 
@@ -117,7 +132,7 @@ Also: the server is **single-process by design** — startup recovery re-queues 
 
 Sample PDFs live in `example_sources/`, one folder per test set. From `example source one/`, upload `World_Hunger_Fake.pdf` as the report and the real PDFs (`2025_world_hunger.pdf`, `disruptions_in_the_food_supply_chain.pdf`, …) as sources — via the UI at `:5173`, or `POST /api/runs` directly. `example source two/` holds a second set (six real water/drought sources for `Water_Stress_Fake_Report.pdf`, which sits at the `example_sources/` root next to its answer key). The pipeline runs as one background job; the dashboard polls the progress feed and flips to the full report on DONE. A real run makes paid Anthropic + OpenAI calls proportional to document size.
 
-A source can also be a link to a public web page: paste it into the dialog's **Add a link** field, or send it as a `source_urls` part. The ingest step fetches the links before it processes any document and stops at the first one that can't be read, so a bad link fails the run within seconds; the error names the link as added and, when the link redirected, the address it ended up at. Reading a fetched page is capped at `AUTHORAI_EXTRACT_TIMEOUT_SECONDS` (60 s).
+A source can also be a link to a public web page: paste it into the dialog's **Add a link** field, or send it as a `source_urls` part. The ingest step fetches the links before it processes any document and stops at the first one that can't be read, so a bad link fails the run within seconds; the error names the link as added and, when the link redirected, the address it ended up at. Reading a fetched page is capped at `AUTHORAI_EXTRACT_TIMEOUT_SECONDS` (60 s). A link to one YouTube video (a `watch?v=` link, `youtu.be/<id>`, a Short) is read from its captions instead, capped at `AUTHORAI_VIDEO_TIMEOUT_SECONDS` (120 s); a video with no usable captions fails the run naming it.
 
 Picking the report in the dialog also runs the reference scan (`POST /api/references/scan`): the dialog lists the works the report cites that are not among your sources and offers the free copies as links. The scan stores nothing; the free-copy lookup needs `AUTHORAI_CROSSREF_MAILTO`, and without it every cited work is listed as unknown.
 
