@@ -272,7 +272,7 @@ def extract_web_bounded(
 
 
 def in_bounded_child(
-    target, args: tuple, *, payload_path: str, url: str, timeout: float
+    target, args: tuple, *, payload_path: str | None, url: str, timeout: float
 ) -> tuple[str, Any]:
     """Run `target(sender, payload_path, *args, cpu_seconds)` in a spawned
     child under a wall-clock budget and return the (kind, payload) pair it
@@ -285,7 +285,10 @@ def in_bounded_child(
 
     The payload reaches the child through the file at `payload_path`
     (handover_file), which is removed on every path — by the child once read,
-    here for a child that never read it. Raises ExtractionTimeoutError at the
+    here for a child that never read it; a reader whose whole input fits in
+    `args` (the video reader's id) passes None. The child leads its own
+    process group (end_with_parent), so stopping it also stops any program
+    it started (yt-dlp's deno). Raises ExtractionTimeoutError at the
     deadline, with the child stopped, and ReaderExitedError (a RuntimeError)
     naming `url` when the child exits without a result (killed, out of
     memory, a frame cut short, a failed start-up), carrying its exit status,
@@ -347,7 +350,8 @@ def in_bounded_child(
             if child.pid is not None:
                 exitcode = _stop(child)
     finally:
-        Path(payload_path).unlink(missing_ok=True)  # the child removes it once read
+        if payload_path is not None:
+            Path(payload_path).unlink(missing_ok=True)  # the child removes it once read
     if outcome is None:
         logger.warning(
             "the reader process for %s exited without a result (%s)", url, _exit_status(exitcode)
@@ -460,10 +464,18 @@ def end_with_parent(cpu_seconds: int) -> None:
     as the page takes, and startup recovery would start another beside it. A
     watcher exits the moment the parent is gone (its sentinel reads EOF), and
     the kernel's CPU limit ends a reader the watcher cannot reach — one inside
-    a long C call holding the GIL — with neither the parent nor the GIL."""
+    a long C call holding the GIL — with neither the parent nor the GIL.
+
+    The reader first makes itself the leader of a process group of its own,
+    so a program it starts (yt-dlp starts deno) is in that group: _stop kills
+    the group once the reader is stopped, and the watcher kills it, the reader
+    included, when the parent is gone. A terminal's Ctrl-C, sent to the
+    server's group, no longer reaches it either."""
+    os.setpgid(0, 0)
     parent = multiprocessing.parent_process()
     threading.Thread(
-        target=lambda: (connection.wait([parent.sentinel]), os._exit(1)), daemon=True
+        target=lambda: (connection.wait([parent.sentinel]), os.killpg(0, signal.SIGKILL)),
+        daemon=True,
     ).start()
     _limit_cpu(cpu_seconds)
 
@@ -484,17 +496,32 @@ def _orphan_cpu_seconds(timeout: float) -> int:
 
 
 def _stop(child) -> int | None:
-    """Reap the reader process: one still running is terminated, then killed.
-    Returns its exit status (negative: the signal that ended it)."""
+    """Reap the reader process: one still running is terminated, then killed;
+    then whatever it started and left running is killed with its process
+    group. Returns its exit status (negative: the signal that ended it)."""
     if child.is_alive():
         child.terminate()
         child.join(1.0)
         if child.is_alive():
             child.kill()
     child.join()
+    _kill_group(child.pid)
     exitcode = child.exitcode
     child.close()
     return exitcode
+
+
+def _kill_group(pid: int) -> None:
+    """Kill what is left of a stopped reader's process group, whose id is the
+    reader's pid (end_with_parent). While any program of the reader's is still
+    in the group, the id cannot name another process or group, so the signal
+    reaches only what the reader started; with the group empty there is
+    nothing to signal, and the lookup fails — the reader was stopped before
+    it made the group, or everything in it had already ended."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _exit_status(exitcode: int | None) -> str:
