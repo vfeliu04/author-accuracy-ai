@@ -95,7 +95,13 @@ export function standing(source: ReportSource): string {
 // the first span of captions) only, so the row says so in plain words. A
 // video shows the span itself; a page keeps the character counts for the
 // hover. Without this a partly-read source looks exactly like a whole one.
-function PartialNote({ truncated }: { truncated: ReportSource["truncated"] }) {
+function PartialNote({
+  truncated,
+  video
+}: {
+  truncated: ReportSource["truncated"];
+  video: boolean;
+}) {
   if (!truncated) return null;
   if (truncated.kept_until_seconds !== undefined) {
     return (
@@ -113,7 +119,9 @@ function PartialNote({ truncated }: { truncated: ReportSource["truncated"] }) {
       className="src-row__sub src-row__sub--partial"
       title={
         `Read ${truncated.kept_chars.toLocaleString()} of ${whole.toLocaleString()} characters. ` +
-        "The rest of this page was not analysed."
+        (video
+          ? "The rest of this video's captions were not analysed."
+          : "The rest of this page was not analysed.")
       }
     >
       Read in part
@@ -197,7 +205,7 @@ export default function SourcesPanel({
                     </div>
                   ) : null}
                   <div className="src-row__sub">{standing(source)}</div>
-                  <PartialNote truncated={source.truncated} />
+                  <PartialNote truncated={source.truncated} video={source.source_type === "youtube"} />
                 </div>
                 {isScored(source) ? (
                   <span className={`cred-badge cred-badge--${scoreBand(source.total)}`}>

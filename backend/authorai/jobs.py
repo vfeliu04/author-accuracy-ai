@@ -416,9 +416,9 @@ def _fetch_link(context: PipelineContext, upload: sqlite3.Row) -> None:
 def _read_video(context: PipelineContext, upload: sqlite3.Row) -> None:
     """Read one video's captions and store them as the link's snapshot, like a
     page: capped at web_max_chars by the reader itself — the cut recorded in
-    the provenance with the span of video it kept, since "read in part" alone
-    cannot say which minutes were checked — and never hashed, since videos do
-    not dedup. The reader is given the id
+    the provenance, with the span of video it kept whenever that is known,
+    since "read in part" alone cannot say which minutes were checked — and
+    never hashed, since videos do not dedup. The reader is given the id
     alone (video.read_video_bounded); its refusal, timeout or failure
     propagates naming the video, and the retry reads it again."""
     video_id = youtube_video_id(upload["url"])

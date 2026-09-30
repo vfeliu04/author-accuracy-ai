@@ -456,7 +456,8 @@ def read_video(
             from yt_dlp import YoutubeDL as ydl_class
     except ImportError:
         raise VideoReaderError(
-            _could_not(url, "yt-dlp is not installed — reinstall the backend's pinned dependencies")
+            f"The YouTube video {url} could not be read: yt-dlp is not installed — reinstall "
+            "the backend's pinned dependencies (pip install -e .)"
         ) from None
     log = _YtDlpLog()
     try:

@@ -398,6 +398,24 @@ describe("SourcesPanel", () => {
     expect(note).toHaveAttribute("title", "The rest of this video's captions were not analysed.");
   });
 
+  it("counts characters for a video cut mid-window, and still calls it captions", () => {
+    const partial: ReportSource = {
+      ...sources[3],
+      truncated: { kept_chars: 200000, dropped_chars: 50000 }
+    };
+    render(
+      <SourcesPanel
+        uploads={uploads}
+        report={{ ...doneReport, sources: [sources[0], partial] }}
+        ingestStatus="done"
+      />
+    );
+    expect(screen.getByText("Read in part")).toHaveAttribute(
+      "title",
+      `Read ${(200000).toLocaleString()} of ${(250000).toLocaleString()} characters. The rest of this video's captions were not analysed.`
+    );
+  });
+
   it("opens any source, including one that can't be scored", () => {
     const onOpenSource = vi.fn();
     render(<SourcesPanel uploads={uploads} report={doneReport} onOpenSource={onOpenSource} />);

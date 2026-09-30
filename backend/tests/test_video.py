@@ -437,6 +437,19 @@ def test_a_missing_runtime_package_is_the_same_loud_failure(monkeypatch):
         video_options(logger=object())
 
 
+def test_a_missing_yt_dlp_is_the_readers_failure_naming_the_video(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", None)
+    monkeypatch.setitem(sys.modules, "yt_dlp.utils", None)
+    with pytest.raises(videomod.VideoReaderError) as info:
+        videomod.read_video("HBtdbaSKexU")
+    assert str(info.value) == (
+        f"The YouTube video {CANONICAL} could not be read: yt-dlp is not installed — reinstall "
+        "the backend's pinned dependencies (pip install -e .)"
+    )
+
+
 def test_the_server_imports_neither_yt_dlp_nor_deno():
     """Both load only in the reader process: a server whose environment lacks
     them still starts and reads PDFs, and a video read fails naming the video."""
