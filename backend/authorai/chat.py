@@ -153,7 +153,7 @@ def _video_note(source: dict) -> str:
     read_from = (
         "YouTube's automatic captions (speech recognition, which can mishear words)"
         if captions.get("kind") == "automatic"
-        else "its captions"
+        else "captions written for it"
     )
     verified = "verified" if channel_verified(video) else "not verified"
     return f" — a YouTube video, read from {read_from}; its channel is {verified} by YouTube"

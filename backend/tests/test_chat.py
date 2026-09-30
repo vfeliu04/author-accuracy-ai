@@ -316,7 +316,7 @@ def test_context_says_what_a_video_was_read_from_and_how_much(conn):
     )
     context = chatmod.build_context(conn, run_id)
     assert (
-        "- 'Cut talk': not scored — a YouTube video, read from its captions; its channel is "
+        "- 'Cut talk': not scored — a YouTube video, read from captions written for it; its channel is "
         "verified by YouTube — READ IN PART: only the first 200,000 of 250,000 characters of "
         "this video's captions were analysed, so nothing later in it is covered"
     ) in context
@@ -327,7 +327,7 @@ def test_context_says_what_a_video_was_read_from_and_how_much(conn):
         "nothing later in it is covered"
     ) in context
     assert (
-        "- 'Lecture': not scored — a YouTube video, read from its captions; its channel is "
+        "- 'Lecture': not scored — a YouTube video, read from captions written for it; its channel is "
         "verified by YouTube"
     ) in context.splitlines()
 
