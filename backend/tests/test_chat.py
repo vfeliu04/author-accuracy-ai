@@ -266,6 +266,58 @@ def test_context_says_which_pages_were_read_only_in_part(conn):
     assert "READ IN PART" in chatmod.CHAT_SYSTEM  # the model is told what it means
 
 
+def test_context_says_what_a_video_was_read_from_and_how_much(conn):
+    """A video is its captions: the model is told so, which captions (YouTube's
+    speech recognition can mishear a word a quote then carries), whether YouTube
+    verified the channel, and — when the cap cut it — which minutes were read."""
+    import json
+
+    run_id = _scored_run(conn)
+
+    def video(title, url, *, kind, verified, truncated=None):
+        upload = dbmod.add_upload(
+            conn, "SOURCE", url, f"/tmp/{title}.json", source_type="youtube", url=url
+        )
+        provenance = {
+            "url": url,
+            "video": {
+                "id": url[-11:],
+                "channel_verified": verified,
+                "embeddable": True,
+                "captions": {"kind": kind, "language": "en"},
+            },
+            **({"truncated": truncated} if truncated else {}),
+        }
+        dbmod.add_document(
+            conn,
+            run_id,
+            "SOURCE",
+            upload_id=upload,
+            title=title,
+            metadata=json.dumps({"sections": [], "provenance": provenance}),
+        )
+
+    video(
+        "Water talk",
+        "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+        kind="automatic",
+        verified=False,
+        truncated={"kept_chars": 200_000, "dropped_chars": 9_000, "kept_until_seconds": 13_330.5},
+    )
+    video("Lecture", "https://www.youtube.com/watch?v=bbbbbbbbbbb", kind="manual", verified=True)
+    context = chatmod.build_context(conn, run_id)
+    assert (
+        "- 'Water talk': not scored — a YouTube video, read from YouTube's automatic captions "
+        "(speech recognition, which can mishear words); its channel is not verified by YouTube"
+        " — READ IN PART: only the first 3:42:10 of this video's captions were analysed, so "
+        "nothing later in it is covered"
+    ) in context
+    assert (
+        "- 'Lecture': not scored — a YouTube video, read from its captions; its channel is "
+        "verified by YouTube"
+    ) in context.splitlines()
+
+
 @pytest.mark.parametrize(
     "truncated",
     [

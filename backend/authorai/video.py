@@ -43,6 +43,7 @@ import socket
 from collections.abc import Callable, MutableMapping
 from dataclasses import asdict, dataclass
 from datetime import date
+from typing import TypeGuard
 from urllib.parse import urlsplit
 
 import deno
@@ -255,7 +256,7 @@ def transcript_windows(
     return sections
 
 
-def _milliseconds(value: object) -> bool:
+def _milliseconds(value: object) -> TypeGuard[int | float]:
     return (
         isinstance(value, int | float)
         and not isinstance(value, bool)

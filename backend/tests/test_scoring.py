@@ -522,6 +522,95 @@ def test_web_source_is_scored_from_page_provenance_without_a_metadata_call(conn,
     assert rows[scored_run["source"]]["tier"] == "VERIFIED_TITLE"
 
 
+def _video_provenance(*, verified, publisher="World Health Organization"):
+    return {
+        "url": "https://www.youtube.com/watch?v=HBtdbaSKexU",
+        "final_url": "https://www.youtube.com/watch?v=HBtdbaSKexU",
+        "title": "Drinking-water explained",
+        "authors": [],
+        "publisher": publisher,
+        "publication_date": "2025-06-01",
+        "doi": None,
+        "scholarly": False,
+        "video": {
+            "id": "HBtdbaSKexU",
+            "channel_id": "UC07-dOwgza1IguKA86jqxNA",
+            "channel_verified": verified,
+            "duration_seconds": 255,
+            "embeddable": True,
+            "captions": {"kind": "manual", "language": "en"},
+        },
+    }
+
+
+@pytest.mark.parametrize(("verified", "authority"), [(True, 30.0), (False, 15.0)])
+def test_a_channel_name_earns_list_authority_only_when_youtube_verified_the_channel(
+    conn, scored_run, verified, authority
+):
+    """Any channel can call itself "World Health Organization"; YouTube's
+    verification badge is its check that the channel is that organisation. An
+    unverified channel still names its publisher (15 of 30), whatever the name."""
+    run_id = scored_run["run"]
+    provenance = _video_provenance(verified=verified)
+    video_doc, video_chunk = _add_source(
+        conn,
+        run_id,
+        source_type="youtube",
+        title="Drinking-water explained",
+        metadata={"sections": [], "provenance": provenance},
+        text="Two billion people lack safely managed drinking water.",
+        url=provenance["url"],
+    )
+    _cite(conn, run_id, video_chunk, "Two billion people lack safe water.")
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A", publisher="FAO"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    crossref = _RecordingCrossref()
+    score_run(
+        conn, llm, run_id, Settings(anthropic_api_key="x", openai_api_key="x"), crossref=crossref
+    )
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[video_doc]
+    assert row["metadata"]["publisher"] == "World Health Organization"
+    assert row["components"]["authority"] == authority
+    # Scored from what the video declared, never from a model's reading of its captions.
+    assert len(_metadata_calls(llm)) == 1
+    assert "Drinking-water explained" not in crossref.titles
+
+
+def test_the_verification_rule_is_the_videos_alone(conn, scored_run):
+    """A web page's self-declared publisher keeps the list authority it always
+    had: the channel rule reads a video's own verification, and a page has none."""
+    run_id = scored_run["run"]
+    web_doc, web_chunk = _add_source(
+        conn,
+        run_id,
+        source_type="web",
+        title="Drinking-water",
+        metadata={"sections": [], "provenance": WHO_PROVENANCE},
+        text="Safely managed drinking water reached 73 percent.",
+        url=WHO_PROVENANCE["url"],
+    )
+    _cite(conn, run_id, web_chunk, "Safely managed water reached 73 percent.")
+    llm = FakeLLM(
+        parse_results={
+            SourceMetadata: SourceMetadata(title="Source A", publisher="FAO"),
+            ValidityAssessment: _assessment(quote="Hunger rose in 2023."),
+        }
+    )
+    score_run(
+        conn,
+        llm,
+        run_id,
+        Settings(anthropic_api_key="x", openai_api_key="x"),
+        crossref=_RecordingCrossref(),
+    )
+    row = {r["doc_id"]: r for r in dbmod.list_source_credibility(conn, run_id)}[web_doc]
+    assert row["components"]["authority"] == 30.0
+
+
 def test_scholarly_web_page_keeps_crossref_title_search(conn, scored_run):
     run_id = scored_run["run"]
     provenance = {**WHO_PROVENANCE, "title": "A Scholarly Landing Page", "scholarly": True}

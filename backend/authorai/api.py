@@ -726,6 +726,9 @@ def get_report(run_id: str, conn: Conn) -> dict:
             # web page, else null: what a run was scored against is the user's
             # to see, not the server log's to keep.
             "truncated": row["truncated"],
+            # A video's own declarations — channel verification, embeddability,
+            # the captions read — for the player and the credibility view.
+            "video": row["video"],
         }
         for row in source_rows
     ]

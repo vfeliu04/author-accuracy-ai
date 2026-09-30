@@ -1435,8 +1435,11 @@ def list_run_sources(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     order. Documents with no upload row (CLI and hand-seeded runs) are PDFs.
 
     `truncated` is the page cap's record from the stored page's provenance
-    ({kept_chars, dropped_chars}, or None for a page read whole and for every
-    PDF), read with json_extract rather than by loading documents.metadata: that
+    ({kept_chars, dropped_chars}, plus kept_until_seconds for a video; None
+    for a source read whole and for every PDF), and `video` what a video
+    declared about itself (its channel's verification, whether it may be
+    embedded, which captions were read; None for every other source), both
+    read with json_extract rather than by loading documents.metadata: that
     column holds the document's whole section text, which this listing has no
     use for and a capped page keeps 200,000 characters of.
     """
@@ -1444,6 +1447,7 @@ def list_run_sources(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         """
         SELECT d.id AS doc_id, d.title AS doc_title, u.source_type, u.url,
                json_extract(d.metadata, '$.provenance.truncated') AS truncated,
+               json_extract(d.metadata, '$.provenance.video') AS video,
                s.metadata, s.components, s.total, s.tier
         FROM documents d
         LEFT JOIN source_credibility s ON s.doc_id = d.id
@@ -1457,7 +1461,7 @@ def list_run_sources(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     for row in rows:
         record = dict(row)
         record["source_type"] = record["source_type"] or "pdf"
-        for key in ("metadata", "components", "truncated"):
+        for key in ("metadata", "components", "truncated", "video"):
             record[key] = None if record[key] is None else json.loads(record[key])
         out.append(record)
     return out

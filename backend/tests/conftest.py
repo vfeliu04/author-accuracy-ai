@@ -185,6 +185,7 @@ def poison_providers(monkeypatch):
         jobsmod, "ingest_snapshot", lambda *a, **k: pytest.fail("re-ingested a stored page")
     )
     monkeypatch.setattr(jobsmod, "fetch_url", lambda *a, **k: pytest.fail("fetched a link"))
+    monkeypatch.setattr(jobsmod, "read_video_bounded", lambda *a, **k: pytest.fail("read a video"))
     monkeypatch.setattr(
         jobsmod, "OpenAIEmbedder", lambda *a, **k: pytest.fail("constructed an embedder")
     )

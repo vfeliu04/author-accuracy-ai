@@ -140,8 +140,29 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
                 f"tier {source['tier']}{_TIER_GLOSS.get(source['tier'], '')}, "
                 f"credibility {source['total']}/100"
             )
-        lines.append(f"- {source['doc_title']!r}: {standing}{_partial_note(source)}")
+        lines.append(
+            f"- {source['doc_title']!r}: {standing}{_video_note(source)}{_partial_note(source)}"
+        )
     return "\n".join(lines)
+
+
+def _video_note(source: dict) -> str:
+    """What a video source was read from: its captions — and when they are
+    YouTube's speech recognition, that they can mishear a word a quote then
+    carries — and whether YouTube verified its channel, which is why its name
+    may or may not have earned a publisher's authority. Empty for every other
+    source, and for a video whose record is not the shape the reader writes."""
+    video = source.get("video")
+    if source.get("source_type") != "youtube" or not isinstance(video, dict):
+        return ""
+    captions = video.get("captions") if isinstance(video.get("captions"), dict) else {}
+    read_from = (
+        "YouTube's automatic captions (speech recognition, which can mishear words)"
+        if captions.get("kind") == "automatic"
+        else "its captions"
+    )
+    verified = "verified" if video.get("channel_verified") is True else "not verified"
+    return f" — a YouTube video, read from {read_from}; its channel is {verified} by YouTube"
 
 
 def _partial_note(source: dict) -> str:
@@ -171,6 +192,12 @@ def _partial_note(source: dict) -> str:
             type(truncated).__name__,
         )
         return ""
+    until = truncated.get("kept_until_seconds")
+    if source.get("source_type") == "youtube" and isinstance(until, int | float):
+        return (
+            f" — READ IN PART: only the first {format_timestamp(until)} of this video's captions "
+            "were analysed, so nothing later in it is covered"
+        )
     return (
         f" — READ IN PART: only the first {kept:,} of {kept + dropped:,} characters of this "
         "page were analysed, so nothing later in it is covered"

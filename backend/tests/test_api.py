@@ -1118,6 +1118,7 @@ def test_report_sources_list_every_source_document_with_type_and_scorability(tmp
         "components": None,
         "metadata": None,
         "truncated": None,
+        "video": None,  # what a video declares about itself; nothing for an image
     }
     web = by_id[web_doc]
     assert (web["source_type"], web["url"], web["scorable"], web["total"]) == (
