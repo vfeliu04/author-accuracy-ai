@@ -10,6 +10,7 @@ that pinning to an IP while sending SNI still passes certificate verification.
 import datetime
 import gzip
 import ipaddress
+import re
 import socket
 import ssl
 import threading
@@ -31,12 +32,14 @@ from authorai.fetch import (
     BlockedAddressError,
     FetchedResponse,
     FetchError,
+    canonical_video_url,
     fetch_url,
     is_public_address,
     is_youtube_url,
     url_address,
     url_host,
     validate_source_url,
+    youtube_video_id,
 )
 
 PUBLIC_V4 = "93.184.216.34"
@@ -210,14 +213,122 @@ def test_an_overlong_url_is_quoted_truncated_not_whole():
         ("https://notyoutube.com/", False),
         ("https://evil.example/youtube.com", False),
         ("https://evil.example/?u=https://youtube.com", False),
-        ("https://gaming.youtube.com/", False),
-        ("https://www.m.youtube.com/", False),
+        # Every host under YouTube's domains is YouTube: a link there is either
+        # a single video or refused, never fetched as a web page.
+        ("https://gaming.youtube.com/", True),
+        ("https://www.m.youtube.com/", True),
+        ("https://www.youtubekids.com/watch?v=x", True),
+        ("https://youtube-nocookie.com/embed/x", True),
+        ("https://youtube.com-evil.example/", False),
+        ("https://xyoutube.com/", False),
+        ("https://youtube.co/", False),
         ("not a url", False),
         ("", False),
     ],
 )
 def test_is_youtube_url(url, expected):
     assert is_youtube_url(url) is expected
+
+
+VIDEO = "dQw4w9WgXcQ"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://www.youtube.com/watch?v={VIDEO}",
+        f"http://youtube.com/watch?v={VIDEO}",
+        f"https://m.youtube.com/watch?v={VIDEO}&feature=share",
+        f"https://music.youtube.com/watch?v={VIDEO}&list=RDAMVM{VIDEO}",
+        f"https://gaming.youtube.com/watch?v={VIDEO}",
+        f"https://www.youtube.com/watch/?v={VIDEO}",
+        f"https://www.youtube.com/watch?feature=youtu.be&v={VIDEO}&t=42s",
+        f"https://www.youtube.com/watch?v={VIDEO}&list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG&index=3",
+        f"https://www.youtube.com/watch?v={VIDEO}&v={VIDEO}",  # repeated, but one video
+        "https://www.youtube.com/watch?v=dQw4w9WgXc%51",  # an escaped letter is that letter
+        f"HTTPS://WWW.YOUTUBE.COM/watch?v={VIDEO}",
+        f"https://youtu.be/{VIDEO}",
+        f"https://youtu.be/{VIDEO}/",
+        f"https://youtu.be/{VIDEO}?t=42&si=AbCdEfGh",
+        f"https://www.youtube.com/shorts/{VIDEO}",
+        f"https://www.youtube.com/shorts/{VIDEO}/",
+        f"https://youtube.com/live/{VIDEO}?feature=share",
+        f"https://www.youtube.com/embed/{VIDEO}?start=30",
+        f"https://www.youtube-nocookie.com/embed/{VIDEO}",
+        f"https://www.youtube.com/v/{VIDEO}",
+        f"https://www.youtube.com/e/{VIDEO}",
+        f"https://www.youtubekids.com/watch?v={VIDEO}",
+    ],
+)
+def test_youtube_video_id_reads_every_single_video_form(url):
+    assert youtube_video_id(validate_source_url(url)) == VIDEO
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # YouTube pages that are not one video.
+        "https://www.youtube.com/",
+        "https://www.youtube.com/@NASA",
+        "https://www.youtube.com/@NASA/live",
+        "https://www.youtube.com/@NASA/videos",
+        "https://www.youtube.com/channel/UCLA_DiR1FfKNvjuUpBHmylQ",
+        "https://www.youtube.com/c/NASA",
+        "https://www.youtube.com/user/NASAtelevision",
+        "https://www.youtube.com/playlist?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG",
+        "https://www.youtube.com/results?search_query=nasa",
+        "https://www.youtube.com/feed/trending",
+        # Eleven characters, but YouTube's names for a playlist player and a
+        # channel's live page, not video ids.
+        "https://www.youtube.com/embed/videoseries?list=PLx0sYbCqOb8TBPRdmBHs5Iftvv9TPboYG",
+        "https://www.youtube.com/embed/live_stream?channel=UCLA_DiR1FfKNvjuUpBHmylQ",
+        # Not a well-formed id.
+        "https://www.youtube.com/watch",
+        "https://www.youtube.com/watch?v=",
+        "https://www.youtube.com/watch?v=dQw4w9WgXc",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQQ",
+        "https://www.youtube.com/watch?v=dQw4w9WgX.Q",
+        f"https://www.youtube.com/watch?v={VIDEO}&v=aaaaaaaaaaa",  # two videos: ambiguous
+        f"https://www.youtube.com/shorts/{VIDEO}/extra",
+        "https://www.youtube.com/shorts/%64Qw4w9WgXcQ",
+        "https://youtu.be/",
+        f"https://youtu.be/{VIDEO}/extra",
+        f"https://youtu.be/watch?v={VIDEO}",
+        # Where the id sits in a path YouTube does not serve videos from.
+        f"https://www.youtube.com/attribution_link?u=/watch%3Fv%3D{VIDEO}",
+        f"https://www.youtube.com/{VIDEO}",
+        # A fragment is not the query: validation drops it before the id is read.
+        f"https://www.youtube.com/watch#v={VIDEO}",
+        f"https://www.youtube.com/#/watch?v={VIDEO}",
+        # Not YouTube at all.
+        f"https://example.org/watch?v={VIDEO}",
+        f"https://youtube.com.evil.example/watch?v={VIDEO}",
+        f"https://invidious.example/watch?v={VIDEO}",
+    ],
+)
+def test_youtube_video_id_is_none_for_anything_but_one_video(url):
+    assert youtube_video_id(validate_source_url(url)) is None
+
+
+def test_a_smuggled_fragment_never_reaches_the_canonical_link():
+    # yt-dlp reads data smuggled in a "#__youtubedl_smuggle" fragment; the link
+    # the reader is given is rebuilt from the id alone.
+    raw = f"https://www.youtube.com/watch?v={VIDEO}#__youtubedl_smuggle=%7B%22a%22%3A1%7D"
+    assert canonical_video_url(youtube_video_id(validate_source_url(raw))) == (
+        f"https://www.youtube.com/watch?v={VIDEO}"
+    )
+
+
+def test_youtube_video_id_is_none_for_a_value_that_is_not_a_url():
+    assert youtube_video_id("not a url") is None
+    assert youtube_video_id("") is None
+
+
+def test_canonical_video_url_is_one_form_and_refuses_a_malformed_id():
+    assert canonical_video_url(VIDEO) == f"https://www.youtube.com/watch?v={VIDEO}"
+    for bad in ("", "dQw4w9WgXc", "dQw4w9WgXcQQ", "dQw4w9WgX/Q", "../../etc/p", "videoseries"):
+        with pytest.raises(ValueError, match="video id"):
+            canonical_video_url(bad)
 
 
 @pytest.mark.parametrize(
@@ -651,6 +762,41 @@ def test_redirect_to_a_non_http_scheme_is_refused(location, message):
     assert not isinstance(info.value, BlockedAddressError)
     assert resolver.calls == [("example.org", 443)]
     assert "https://example.org/go" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("location", "message"),
+    [
+        (
+            f"https://youtu.be/{VIDEO}",
+            f"redirects to the YouTube video https://www.youtube.com/watch?v={VIDEO}",
+        ),
+        (
+            f"https://www.youtube.com/watch?v={VIDEO}&t=10",
+            f"redirects to the YouTube video https://www.youtube.com/watch?v={VIDEO}",
+        ),
+        ("https://www.youtube.com/@NASA", "redirects to a YouTube page"),
+        ("https://consent.youtube.com/m?continue=x", "redirects to a YouTube page"),
+    ],
+)
+def test_a_redirect_into_youtube_is_refused_before_youtube_is_asked(location, message):
+    resolver = _example()
+    with respx.mock:
+        respx.get(f"https://{PUBLIC_V4}/go").mock(
+            return_value=httpx.Response(302, headers={"Location": location})
+        )
+        with pytest.raises(FetchError, match=re.escape(message)) as info:
+            fetch_url("https://example.org/go", _settings(), resolve=resolver)
+    # Refused on the Location alone: YouTube's host was never even resolved.
+    assert resolver.calls == [("example.org", 443)]
+    assert "https://example.org/go" in str(info.value)
+
+
+def test_a_youtube_link_is_never_fetched_as_a_page():
+    resolver = _example()
+    with pytest.raises(FetchError, match="read as a video, not fetched as a page"):
+        fetch_url(f"https://www.youtube.com/watch?v={VIDEO}", _settings(), resolve=resolver)
+    assert resolver.calls == []
 
 
 @respx.mock

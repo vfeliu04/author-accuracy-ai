@@ -36,6 +36,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -60,11 +61,15 @@ ACCEPT_ENCODING = "gzip, deflate"
 DECODABLE_ENCODINGS = frozenset({"identity", "gzip", "deflate"})
 _SHOWN_CODINGS = 4  # stacked coding layers quoted in the refusal before "..."
 
-_YOUTUBE_HOSTS = frozenset(
-    f"{prefix}{domain}"
-    for prefix in ("", "www.", "m.", "music.")
-    for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com")
-)
+# YouTube's domains: a host that is one of these or under one is YouTube.
+_YOUTUBE_DOMAINS = ("youtube.com", "youtube-nocookie.com", "youtubekids.com", "youtu.be")
+_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
+# The paths whose one segment after the prefix is a video id.
+_VIDEO_PATH = re.compile(r"/(?:shorts|live|embed|v|e)/([A-Za-z0-9_-]{11})/?")
+_SHORT_LINK_PATH = re.compile(r"/([A-Za-z0-9_-]{11})/?")
+# Eleven characters each, as an id is, but YouTube's names for its playlist
+# player (/embed/videoseries) and a channel's live page (/embed/live_stream).
+_NOT_VIDEO_IDS = frozenset({"videoseries", "live_stream"})
 # Applied to httpx's raw_host, which is already IDNA-encoded to ASCII.
 _HOSTNAME = re.compile(r"[A-Za-z0-9._-]+")
 _URL_CREDENTIALS = re.compile(r"^([^:/?#]*:)?//[^/?#]*@")
@@ -241,8 +246,54 @@ def url_address(url: str) -> tuple[str, str] | None:
 
 
 def is_youtube_url(url: str) -> bool:
-    """True when the URL's host is YouTube, including www./m./music. hosts."""
-    return url_host(url) in _YOUTUBE_HOSTS
+    """True when the URL's host is YouTube's: one of its domains or any host
+    under one (www., m., music., gaming., consent., ...). A link there is read
+    as a single video or refused; it is never fetched as a web page."""
+    host = url_host(url)
+    return host is not None and any(
+        host == domain or host.endswith(f".{domain}") for domain in _YOUTUBE_DOMAINS
+    )
+
+
+def youtube_video_id(url: str) -> str | None:
+    """The id of the one video a YouTube link names, or None when the link is
+    not YouTube's or names no single video (a channel, a playlist, a search).
+
+    Read from a normalized link (validate_source_url), so a fragment is already
+    gone: yt-dlp reads data smuggled in one, and the reader is only ever given
+    the id, from which canonical_video_url builds the link. The forms are
+    watch?v= (one id, however often repeated), youtu.be/ID, and
+    /shorts|live|embed|v|e/ID, each with at most a trailing slash after the id.
+    """
+    if not is_youtube_url(url):
+        return None
+    parsed = httpx.URL(url.strip())
+    host = url_host(url) or ""
+    # raw_path is ASCII (httpx percent-encodes the rest), so an escaped
+    # character in a path id fails the pattern instead of being decoded.
+    path = parsed.raw_path.split(b"?", 1)[0].decode()
+    if host == "youtu.be" or host.endswith(".youtu.be"):
+        match = _SHORT_LINK_PATH.fullmatch(path)
+        candidate = match[1] if match else None
+    elif path in ("/watch", "/watch/"):
+        values = set(parse_qs(parsed.query.decode(), keep_blank_values=True).get("v", []))
+        candidate = values.pop() if len(values) == 1 else None
+    else:
+        match = _VIDEO_PATH.fullmatch(path)
+        candidate = match[1] if match else None
+    if candidate is None or not _VIDEO_ID.fullmatch(candidate) or candidate in _NOT_VIDEO_IDS:
+        return None
+    return candidate
+
+
+def canonical_video_url(video_id: str) -> str:
+    """The one link a video is stored, compared and read by: every accepted
+    form becomes this, so the same video twice is a duplicate, and nothing the
+    user typed beyond the id reaches the reader. Raises ValueError for a value
+    that is not a video id."""
+    if not _VIDEO_ID.fullmatch(video_id) or video_id in _NOT_VIDEO_IDS:
+        raise ValueError(f"{shown_text(video_id)!r} is not a YouTube video id")
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def is_public_address(ip: str | IPAddress) -> bool:
@@ -366,6 +417,11 @@ def fetch_url(
         requested = validate_source_url(url)
     except ValueError as exc:
         raise FetchError(f"Cannot fetch source URL: {exc}") from exc
+    if is_youtube_url(requested):
+        raise FetchError(
+            f"Cannot fetch {_shown(requested)}: a YouTube link is read as a video, "
+            "not fetched as a page"
+        )
     resolver = resolve or _default_resolve
     if client is not None:
         return _fetch(requested, settings, client, resolver)
@@ -508,9 +564,24 @@ def _redirect_target(response: httpx.Response, current: str, where: str) -> str:
             f"Fetching {where} failed: redirected to an invalid URL {_shown(location)}"
         ) from exc
     try:
-        return validate_source_url(joined)
+        target = validate_source_url(joined)
     except ValueError as exc:
         raise FetchError(f"Fetching {where} failed: refused redirect. {exc}") from exc
+    if is_youtube_url(target):
+        # Refused on the Location alone, before YouTube is asked for anything:
+        # its pages are not articles, and a video is read by the video reader
+        # only from a link the user added as one.
+        video_id = youtube_video_id(target)
+        if video_id is None:
+            raise FetchError(
+                f"Fetching {where} failed: it redirects to a YouTube page "
+                f"({_shown(target)}), which is not read as a web page"
+            )
+        raise FetchError(
+            f"Fetching {where} failed: it redirects to the YouTube video "
+            f"{canonical_video_url(video_id)} — add that link as a source instead"
+        )
+    return target
 
 
 def _read(
