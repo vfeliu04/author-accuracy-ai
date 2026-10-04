@@ -14,8 +14,21 @@ from authorai import db as dbmod
 from authorai.claims import EXTRACTION_PROMPT_HASH, claims_as_rows, extract_claims
 from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
-from authorai.evals import load_golden, score_extraction, score_stance, score_verdicts
-from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, ingest_pdf
+from authorai.evals import (
+    load_golden,
+    score_extraction,
+    score_injection,
+    score_stance,
+    score_verdicts,
+    verdict_pairs,
+)
+from authorai.ingest import (
+    FIGURE_DESCRIPTION_PROMPT,
+    IMAGE_DESCRIPTION_MAX_TOKENS,
+    IMAGE_SOURCE_PROMPT,
+    ingest_image,
+    ingest_pdf,
+)
 from authorai.llm import AnthropicClient
 from authorai.scoring import score_run
 from authorai.search import hybrid_search
@@ -24,6 +37,9 @@ from authorai.verification import EVIDENCE_K, verdict_stamp, verify_run
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
 VERDICT_BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "verdict_baseline.json"
+INJECTION_GOLDEN_PATH = (
+    Path(__file__).resolve().parent.parent / "evals" / "injection" / "injection.jsonl"
+)
 
 
 def _setup() -> tuple[Settings, sqlite3.Connection]:
@@ -53,12 +69,16 @@ def run_ingest(
     run: str | None,
     kind: str,
     describe=None,
+    image: bool = False,
 ) -> tuple[str, int]:
-    """Ingest PDFs into a run; returns (run_id, failure_count).
+    """Ingest PDFs (or, with `image`, PNG/JPEG/WebP image sources) into a run;
+    returns (run_id, failure_count).
 
     The run id is printed FIRST so a failure partway through a batch never
     loses the id of the partially-populated run, and one bad PDF does not
-    abort the rest of the batch.
+    abort the rest of the batch. An image is ingested the way the jobs worker
+    ingests an uploaded one: an `image` upload row, then its reading by
+    `describe` as the document's only text.
     """
     if run:
         if dbmod.get_run(conn, run) is None:
@@ -71,9 +91,33 @@ def run_ingest(
     failures = 0
     for pdf in pdfs:
         try:
-            doc_id = ingest_pdf(
-                conn, embedder, run_id, pdf, kind=kind, figures_dir=figures_dir, describe=describe
-            )
+            if image:
+                # Like an API upload, the row exists before the reading: a
+                # failed reading leaves it, with no document, as one would.
+                upload_id = dbmod.add_upload(
+                    conn, kind, pdf.name, str(pdf.resolve()), source_type="image"
+                )
+                doc_id = ingest_image(
+                    conn,
+                    embedder,
+                    run_id,
+                    pdf,
+                    name=pdf.name,
+                    kind=kind,
+                    figures_dir=figures_dir,
+                    upload_id=upload_id,
+                    describe=describe,
+                )
+            else:
+                doc_id = ingest_pdf(
+                    conn,
+                    embedder,
+                    run_id,
+                    pdf,
+                    kind=kind,
+                    figures_dir=figures_dir,
+                    describe=describe,
+                )
         except Exception as exc:  # noqa: BLE001 - report and continue the batch
             failures += 1
             print(f"FAILED {pdf.name}: {exc}")
@@ -89,10 +133,26 @@ def run_ingest(
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
+    if args.image and args.no_describe_figures:
+        raise SystemExit(
+            "An image source's reading is its only text; --no-describe-figures cannot apply"
+        )
     settings, conn = _setup()
     embedder = _embedder(settings)
     describe = None
-    if not args.no_describe_figures:
+    if args.image:
+        llm = AnthropicClient(settings.anthropic_api_key)
+        model = settings.caption_model
+
+        def describe(image):
+            # The same reading the jobs worker asks of an uploaded image.
+            return llm.describe_image(
+                model=model,
+                image=image,
+                prompt=IMAGE_SOURCE_PROMPT,
+                max_tokens=IMAGE_DESCRIPTION_MAX_TOKENS,
+            )
+    elif not args.no_describe_figures:
         llm = AnthropicClient(settings.anthropic_api_key)
         model = settings.caption_model
 
@@ -100,7 +160,14 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             return llm.describe_image(model=model, image=image, prompt=FIGURE_DESCRIPTION_PROMPT)
 
     _, failures = run_ingest(
-        conn, embedder, settings.figures_dir, args.pdfs, args.run, args.kind, describe=describe
+        conn,
+        embedder,
+        settings.figures_dir,
+        args.pdfs,
+        args.run,
+        args.kind,
+        describe=describe,
+        image=args.image,
     )
     if failures:
         raise SystemExit(f"{failures} PDF(s) failed to ingest")
@@ -244,6 +311,8 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
+    if args.sync and args.resume_batch:
+        raise SystemExit("--resume-batch resumes a Batch API run; it cannot apply with --sync")
     settings, conn = _setup()
     embedder = _embedder(settings)
     llm = AnthropicClient(settings.anthropic_api_key)
@@ -255,6 +324,10 @@ def cmd_verify(args: argparse.Namespace) -> None:
         model=settings.verdict_model,
         k=args.k,
         batch=not args.sync,
+        resume_batch_id=args.resume_batch,
+        # Printed the moment it exists: a queue that outlasts the client's wait
+        # is resumed with --resume-batch instead of paid for twice.
+        on_batch_created=lambda batch_id: print(f"batch: {batch_id}", flush=True),
     )
     for verdict, count in summary["counts"].items():
         print(f"{verdict}: {count}")
@@ -300,12 +373,65 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
         wrong = {p: n for p, n in predicted_counts.items() if n and p != expected}
         if wrong:
             print(f"confused {expected} -> {wrong}")
+    if args.save:
+        _save_json(
+            args.save,
+            {
+                "run_id": args.run_id,
+                "models": models,
+                "prompt_hash": verdict_stamp(),
+                "accuracy": score.accuracy,
+                "correct": score.correct,
+                "matched": score.matched,
+                "coverage": score.coverage,
+                "downgraded": score.downgraded,
+                "claims": verdict_pairs(verdict_rows, golden),
+            },
+        )
     _print_baseline_delta(
         _resolve_baseline(args, VERDICT_BASELINE_PATH),
         lambda b: (
             f"baseline: accuracy {b['accuracy']:.2f} (delta: {score.accuracy - b['accuracy']:+.2f})"
         ),
     )
+
+
+def _save_json(path: Path, record: dict) -> None:
+    path.write_text(json.dumps(record, indent=2) + "\n")
+    print(f"saved {path}")
+
+
+def cmd_eval_injection(args: argparse.Namespace) -> None:
+    _, conn = _setup()
+    golden = _load_golden_or_exit(args.golden)
+    verdict_rows = dbmod.list_verdicts(conn, args.run_id)
+    if not verdict_rows:
+        raise SystemExit(f"Run {args.run_id!r} has no verdicts — run `verify` first")
+    _assert_claims_fresh(verdict_rows, args.allow_stale)
+    _assert_verdicts_fresh(verdict_rows, args.allow_stale)
+    chunk_text_by_id = dict(
+        conn.execute("SELECT id, text FROM chunks WHERE run_id = ?", (args.run_id,)).fetchall()
+    )
+    score = score_injection(verdict_rows, golden, chunk_text_by_id)
+    models = sorted({r["model"] for r in verdict_rows})
+    print(f"judge model(s): {', '.join(models)}")
+    for outcome in [*score.attacks, *score.controls]:
+        raw = f" (raw {outcome['raw']})" if outcome["raw"] != outcome["final"] else ""
+        print(
+            f"{outcome['id']:>4} {outcome['status']:<10} expected {outcome['expected']}, "
+            f"final {outcome['final']}{raw} — {outcome['claim'][:70]}"
+        )
+    print(score.summary())
+    if args.save:
+        _save_json(
+            args.save,
+            {
+                "run_id": args.run_id,
+                "models": models,
+                "prompt_hash": verdict_stamp(),
+                **score.as_dict(),
+            },
+        )
 
 
 def cmd_score(args: argparse.Namespace) -> None:
@@ -383,6 +509,11 @@ def main() -> None:
         action="store_true",
         help="Skip LLM figure descriptions (default: on, requires ANTHROPIC_API_KEY)",
     )
+    ingest.add_argument(
+        "--image",
+        action="store_true",
+        help="The files are PNG/JPEG/WebP image sources, read by the caption model",
+    )
     ingest.set_defaults(func=cmd_ingest)
 
     extract = subparsers.add_parser("extract", help="Extract claims from a run's report")
@@ -404,13 +535,41 @@ def main() -> None:
         help="Per-claim sync calls instead of the Batch API (full price, immediate)",
     )
     verify.add_argument("-k", type=int, default=EVIDENCE_K, help="Evidence chunks per claim")
+    verify.add_argument(
+        "--resume-batch",
+        metavar="BATCH_ID",
+        help="Poll this already-submitted batch (the id `verify` printed) instead of a new one",
+    )
     verify.set_defaults(func=cmd_verify)
 
     eval_verdict = subparsers.add_parser(
         "eval-verdict", help="Score stored verdicts against the golden set"
     )
     _add_eval_args(eval_verdict)
+    eval_verdict.add_argument(
+        "--save", type=Path, help="Also write the score and the per-claim pairing to this JSON file"
+    )
     eval_verdict.set_defaults(func=cmd_eval_verdict)
+
+    eval_injection = subparsers.add_parser(
+        "eval-injection", help="Score stored verdicts against the prompt-injection set"
+    )
+    eval_injection.add_argument("run_id")
+    eval_injection.add_argument(
+        "--golden",
+        type=Path,
+        default=INJECTION_GOLDEN_PATH,
+        help="Injection-set JSONL (default: evals/injection/injection.jsonl)",
+    )
+    eval_injection.add_argument(
+        "--save", type=Path, help="Also write the per-attack outcomes to this JSON file"
+    )
+    eval_injection.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="Score rows even if they were produced by an older prompt",
+    )
+    eval_injection.set_defaults(func=cmd_eval_injection)
 
     score = subparsers.add_parser("score", help="Compute accuracy/credibility/validity for a run")
     score.add_argument("run_id")
