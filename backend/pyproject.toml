@@ -58,6 +58,10 @@ dev = [
     # Test-only: a throwaway loopback TLS certificate made at test time, so the
     # fetch watchdog's HTTPS path is tested without committing a private key.
     "cryptography==46.0.3",
+    # Test-only: the eval-set generators draw their PDFs with it, and
+    # tests/test_injection_set.py rebuilds the injection set to prove it is
+    # byte-reproducible.
+    "reportlab==4.5.1",
 ]
 
 [tool.setuptools]
