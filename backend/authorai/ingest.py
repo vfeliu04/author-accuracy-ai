@@ -33,6 +33,8 @@ from authorai.log import setup_logger
 if TYPE_CHECKING:
     from PIL.Image import Image
 
+    from authorai.llm import LLM
+
 logger = setup_logger(__name__)
 
 TABLE_TEXT_CAP = 4000
@@ -583,6 +585,32 @@ def ingest_pdf(
         describe=describe,
         fallback_title=fallback_title,
     )
+
+
+def image_source_reader(llm: "LLM", model: str) -> "Callable[[Image], str]":
+    """The caption model's reading of an image SOURCE (a transcription, not a
+    gist): the one definition the jobs worker and the CLI both use, so an
+    eval's ingest reads an image exactly as the app does."""
+
+    def read(image: "Image") -> str:
+        return llm.describe_image(
+            model=model,
+            image=image,
+            prompt=IMAGE_SOURCE_PROMPT,
+            max_tokens=IMAGE_DESCRIPTION_MAX_TOKENS,
+        )
+
+    return read
+
+
+def figure_describer(llm: "LLM", model: str) -> "Callable[[Image], str]":
+    """The caption model's description of a figure inside a PDF, for the jobs
+    worker and the CLI alike."""
+
+    def describe(image: "Image") -> str:
+        return llm.describe_image(model=model, image=image, prompt=FIGURE_DESCRIPTION_PROMPT)
+
+    return describe
 
 
 def ingest_image(

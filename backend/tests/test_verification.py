@@ -564,8 +564,6 @@ def test_figure_evidence_attaches_image(conn, tmp_path):
 def test_batch_resume_required_refuses_to_submit_anew():
     """An explicit resume (the CLI's --resume-batch) of a batch that cannot be
     resumed must fail, not quietly pay for a second batch."""
-    import pytest
-
     from authorai.llm import AnthropicClient
 
     client = AnthropicClient(api_key="test-key")

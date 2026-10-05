@@ -35,9 +35,8 @@ from authorai.config import Settings
 from authorai.embeddings import OpenAIEmbedder
 from authorai.fetch import FetchedResponse, _where, fetch_url, youtube_video_id
 from authorai.ingest import (
-    FIGURE_DESCRIPTION_PROMPT,
-    IMAGE_DESCRIPTION_MAX_TOKENS,
-    IMAGE_SOURCE_PROMPT,
+    figure_describer,
+    image_source_reader,
     ingest_image,
     ingest_pdf,
     ingest_snapshot,
@@ -267,19 +266,9 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
             kind=upload["kind"],
             figures_dir=settings.figures_dir,
             upload_id=upload_id,
-            describe=lambda image: llm.describe_image(
-                model=caption_model,
-                image=image,
-                prompt=IMAGE_SOURCE_PROMPT,
-                max_tokens=IMAGE_DESCRIPTION_MAX_TOKENS,
-            ),
+            describe=image_source_reader(llm, caption_model),
         )
         return False
-
-    def describe(image):
-        return llm.describe_image(
-            model=caption_model, image=image, prompt=FIGURE_DESCRIPTION_PROMPT
-        )
 
     ingest_pdf(
         conn,
@@ -289,7 +278,7 @@ def _reconcile_upload(context: PipelineContext, run_id: str, upload_id: str) -> 
         kind=upload["kind"],
         figures_dir=settings.figures_dir,
         upload_id=upload_id,
-        describe=describe,
+        describe=figure_describer(llm, caption_model),
         # Stem, not the raw name — so an API upload titles the same as the CLI
         # path (path.stem), not "report.pdf" vs "report".
         fallback_title=Path(upload["file_name"]).stem,
@@ -550,7 +539,12 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
     # A verify batch is paid work: its id is persisted on the job the moment
     # it is submitted, so a retry after a timeout resumes the SAME batch
     # instead of paying for a duplicate (the id survives in the payload; a
-    # stale or mismatched batch falls back to a fresh submission loudly).
+    # batch that cannot be resumed, or whose requests do not match these
+    # claims, falls back to a fresh submission loudly). Nothing checks that
+    # the resumed batch was asked by the CURRENT judge prompt and model: a
+    # deploy between a timeout and a retry would store the old judge's
+    # answers under the new stamp. The CLI records that per batch (cli.py
+    # _batch_record); the jobs path carries it as a known gap.
     job = dbmod.get_run_job(context.conn, run_id)
 
     def remember_batch(batch_id: str) -> None:
