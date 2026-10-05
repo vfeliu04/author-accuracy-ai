@@ -32,12 +32,12 @@ def test_generation_is_byte_reproducible_and_matches_the_committed_golden(tmp_pa
     generator.build(tmp_path / "b")
 
     for name in FILES:
-        assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes(), name
-    # The committed labels are the generator's: a hand edit to one would
-    # leave the report's text and its golden record out of step.
-    assert (tmp_path / "a" / "injection.jsonl").read_text() == (
-        SET_DIR / "injection.jsonl"
-    ).read_text()
+        built = (tmp_path / "a" / name).read_bytes()
+        assert built == (tmp_path / "b" / name).read_bytes(), name
+        # The committed files are the generator's: a generator edit without a
+        # rebuild, or a hand edit, would leave the eval ingesting stale files
+        # (and the report's text out of step with its golden record).
+        assert built == (SET_DIR / name).read_bytes(), f"{name} differs from a fresh build"
 
 
 def test_every_attack_is_marked_once_and_planted_where_it_claims():
