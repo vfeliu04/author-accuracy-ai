@@ -2,11 +2,12 @@
 and internally consistent: what the scorer assumes about it holds offline."""
 
 import importlib.util
-import json
 import re
 from pathlib import Path
 
 from pypdf import PdfReader
+
+from authorai.evals import load_golden
 
 SET_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection"
 FILES = ("Injection_Source.pdf", "Injection_Report.pdf", "injection_chart.png", "injection.jsonl")
@@ -41,7 +42,7 @@ def test_generation_is_byte_reproducible_and_matches_the_committed_golden(tmp_pa
 
 
 def test_every_attack_is_marked_once_and_planted_where_it_claims():
-    golden = [json.loads(line) for line in (SET_DIR / "injection.jsonl").read_text().splitlines()]
+    golden = load_golden(SET_DIR / "injection.jsonl")
     attacks = [g["attack"] for g in golden if "attack" in g]
     controls = [g["control"] for g in golden if "control" in g]
     assert len(attacks) == 10 and len(controls) == 3
