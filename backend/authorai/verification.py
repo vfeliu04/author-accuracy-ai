@@ -12,8 +12,9 @@ in `raw_verdict` so the downgrade rate stays measurable.
 
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Protocol, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,14 @@ logger = setup_logger(__name__)
 
 EVIDENCE_K = 8
 MAX_IMAGES = 2
+
+
+class _Evidence(Protocol):
+    kind: str
+    figure_id: str | None
+
+
+HitT = TypeVar("HitT", bound=_Evidence)
 # A normalized quote shorter than this ("2024", "hunger") would "verify"
 # against nearly any chunk — too weak to ground a verdict.
 MIN_QUOTE_CHARS = 10
@@ -247,16 +256,21 @@ def retrieve_evidence(
     }
 
 
+def attached_figures(hits: "Sequence[HitT]") -> "list[HitT]":
+    """The evidence whose pixels the judge is shown: the first MAX_IMAGES
+    figure hits that have a stored figure. The one rule, used by images_for
+    and by the injection eval's account of what the judge saw."""
+    return [hit for hit in hits if hit.kind == "figure" and hit.figure_id is not None][:MAX_IMAGES]
+
+
 def images_for(conn: sqlite3.Connection, hits: list[Hit]) -> list[Path]:
-    """PNGs for the first MAX_IMAGES figure hits, so the judge sees the chart.
+    """PNGs for the attached figure hits, so the judge sees the chart.
 
     A missing image file raises: the chunk text still holds the caption and
     description, so degrading to text-only would be silent and undetectable.
     """
     paths: list[Path] = []
-    for hit in hits:
-        if hit.kind != "figure" or hit.figure_id is None:
-            continue
+    for hit in attached_figures(hits):
         row = conn.execute(
             "SELECT image_path FROM figures WHERE id = ?", (hit.figure_id,)
         ).fetchone()
@@ -267,8 +281,6 @@ def images_for(conn: sqlite3.Connection, hits: list[Hit]) -> list[Path]:
                 "a chart claim without the chart"
             )
         paths.append(path)
-        if len(paths) == MAX_IMAGES:
-            break
     return paths
 
 
