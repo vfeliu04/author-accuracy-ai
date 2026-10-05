@@ -106,6 +106,7 @@ class LLM(Protocol):
         max_tokens: int = BATCH_MAX_TOKENS,
         resume_batch_id: "str | None" = None,
         on_batch_created: "Callable[[str], None] | None" = None,
+        require_resume: bool = False,
     ) -> dict[str, BaseModel]: ...
 
     def describe_image(
@@ -285,6 +286,7 @@ class AnthropicClient:
         max_tokens: int = BATCH_MAX_TOKENS,
         resume_batch_id: str | None = None,
         on_batch_created: Callable[[str], None] | None = None,
+        require_resume: bool = False,
     ) -> dict[str, BaseModel]:
         """Run all items through the Batch API; returns results keyed by custom_id.
 
@@ -298,9 +300,16 @@ class AnthropicClient:
         with the id the moment it exists (callers persist it), and passing that
         id back as `resume_batch_id` polls the SAME batch instead of paying for
         a duplicate — a server-side queue delay that outlives our timeout costs
-        a retry, not a second batch.
+        a retry, not a second batch. A stored id that cannot be resumed falls
+        back to a fresh batch (a retry must complete) unless `require_resume`:
+        an id a person passed in fails instead of quietly paying twice.
         """
         batch_id = self._resumable_batch(resume_batch_id, len(items)) if resume_batch_id else None
+        if resume_batch_id and batch_id is None and require_resume:
+            raise RuntimeError(
+                f"batch {resume_batch_id} cannot be resumed (see the warning above) — refusing "
+                "to submit a new paid batch in its place"
+            )
         if batch_id is None:
             requests = [build_batch_request(item, model, max_tokens) for item in items]
             batch = self._client.messages.batches.create(requests=requests)

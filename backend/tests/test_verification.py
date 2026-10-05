@@ -480,6 +480,17 @@ def test_verify_run_stamps_the_actual_k(conn, verified_run):
         assert row["prompt_hash"] != verdict_stamp()
 
 
+def test_verify_run_passes_a_required_resume_through(conn, verified_run):
+    run_id, embedder = verified_run["run"], verified_run["embedder"]
+    llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
+    verify_run(conn, embedder, llm, run_id, model="m", resume_batch_id="b-1", require_resume=True)
+    assert llm.resume_batch_ids == ["b-1"] and llm.require_resumes == [True]
+    # The jobs worker's retries keep the fallback: a stale stored id resubmits.
+    llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
+    verify_run(conn, embedder, llm, run_id, model="m", resume_batch_id="b-2")
+    assert llm.require_resumes == [False]
+
+
 def test_verify_run_batch_matches_sync(conn, verified_run):
     for batch in (False, True):
         llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
@@ -548,3 +559,20 @@ def test_figure_evidence_attaches_image(conn, tmp_path):
     image.unlink()
     with pytest.raises(FileNotFoundError, match="refusing to judge"):
         verify_run(conn, embedder, llm, run_id, model="m", batch=False)
+
+
+def test_batch_resume_required_refuses_to_submit_anew():
+    """An explicit resume (the CLI's --resume-batch) of a batch that cannot be
+    resumed must fail, not quietly pay for a second batch."""
+    import pytest
+
+    from authorai.llm import AnthropicClient
+
+    client = AnthropicClient(api_key="test-key")
+    stub, created = _stub_batch_client_with_create([], existing=None)
+    client._client = stub
+    with pytest.raises(RuntimeError, match="cannot be resumed"):
+        client.parse_batch(
+            model="m", items=_items(), resume_batch_id="batch-typo", require_resume=True
+        )
+    assert created == []

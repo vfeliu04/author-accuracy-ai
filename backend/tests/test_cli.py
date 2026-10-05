@@ -142,41 +142,87 @@ def test_ingest_image_refuses_to_skip_its_reading(monkeypatch):
         cli.main()
 
 
-def _stub_verify(monkeypatch, conn, calls):
-    monkeypatch.setattr(
-        cli,
-        "_setup",
-        lambda: (type("S", (), {"verdict_model": "m", "anthropic_api_key": "k"})(), conn),
-    )
+def _stub_verify(monkeypatch, conn, calls, tmp_path):
+    settings = type(
+        "S", (), {"verdict_model": "m", "anthropic_api_key": "k", "db_path": tmp_path / "e.db"}
+    )()
+    monkeypatch.setattr(cli, "_setup", lambda: (settings, conn))
     monkeypatch.setattr(cli, "_embedder", lambda settings: None)
     monkeypatch.setattr(cli, "AnthropicClient", lambda key: None)
 
     def fake_verify_run(conn_, embedder, llm, run_id, **kwargs):
+        # Mirrors parse_batch: a new batch announces itself; a resumed one does not.
         calls.append(kwargs)
-        kwargs["on_batch_created"]("msgbatch_test")
+        if kwargs.get("resume_batch_id") is None:
+            kwargs["on_batch_created"]("msgbatch_new")
         return {"counts": {}, "downgraded": 0, "year_flagged": 0, "no_evidence": 0, "total": 0}
 
     monkeypatch.setattr(cli, "verify_run", fake_verify_run)
+    return settings
 
 
-def test_verify_resumes_a_batch_and_prints_a_new_batch_id(conn, monkeypatch, capsys):
+def test_verify_prints_and_records_each_new_batch(conn, tmp_path, monkeypatch, capsys):
+    import json
+
+    from authorai.verification import verdict_stamp
+
     calls = []
-    _stub_verify(monkeypatch, conn, calls)
-    monkeypatch.setattr("sys.argv", ["authorai", "verify", "run1", "--resume-batch", "msgbatch_x"])
+    _stub_verify(monkeypatch, conn, calls, tmp_path)
+    monkeypatch.setattr("sys.argv", ["authorai", "verify", "run1", "-k", "4"])
 
     cli.main()
 
+    # The id is printed the moment it exists, so a long queue can be resumed,
+    # and recorded with what judged it, so a resume can prove it is the same judge.
+    assert "batch: msgbatch_new" in capsys.readouterr().out
+    record = json.loads((tmp_path / "batches" / "msgbatch_new.json").read_text())
+    assert record == {"run_id": "run1", "prompt_hash": verdict_stamp(k=4), "model": "m"}
+    assert calls[0]["require_resume"] is False
+
+
+def test_verify_resumes_only_a_batch_recorded_for_this_judge(conn, tmp_path, monkeypatch):
+    import json
+
+    import pytest
+
+    from authorai.verification import verdict_stamp
+
+    calls = []
+    _stub_verify(monkeypatch, conn, calls, tmp_path)
+    resume = ["authorai", "verify", "run1", "--resume-batch", "msgbatch_x"]
+
+    # Not submitted from here: nothing proves which prompt judged it.
+    monkeypatch.setattr("sys.argv", resume)
+    with pytest.raises(SystemExit, match="no record of batch msgbatch_x"):
+        cli.main()
+
+    records = tmp_path / "batches"
+    records.mkdir()
+    same = {"run_id": "run1", "prompt_hash": verdict_stamp(), "model": "m"}
+    for field, other in (
+        ("prompt_hash", verdict_stamp(k=4)),  # another prompt or another k
+        ("run_id", "run2"),
+        ("model", "other-model"),
+    ):
+        (records / "msgbatch_x.json").write_text(json.dumps({**same, field: other}))
+        monkeypatch.setattr("sys.argv", resume)
+        with pytest.raises(SystemExit, match=f"{field} differs"):
+            cli.main()
+    assert calls == []  # every refusal came before any batch work
+
+    (records / "msgbatch_x.json").write_text(json.dumps(same))
+    monkeypatch.setattr("sys.argv", resume)
+    cli.main()
     assert calls[0]["resume_batch_id"] == "msgbatch_x"
-    assert calls[0]["batch"] is True
-    # The id is printed the moment it exists, so a long queue can be resumed.
-    assert "batch: msgbatch_test" in capsys.readouterr().out
+    # An id that cannot be resumed must fail, never quietly pay for a new batch.
+    assert calls[0]["require_resume"] is True
 
 
-def test_verify_refuses_resume_with_sync(conn, monkeypatch):
+def test_verify_refuses_resume_with_sync(conn, tmp_path, monkeypatch):
     import pytest
 
     calls = []
-    _stub_verify(monkeypatch, conn, calls)
+    _stub_verify(monkeypatch, conn, calls, tmp_path)
     monkeypatch.setattr(
         "sys.argv", ["authorai", "verify", "run1", "--sync", "--resume-batch", "msgbatch_x"]
     )
@@ -185,7 +231,39 @@ def test_verify_refuses_resume_with_sync(conn, monkeypatch):
     assert calls == []
 
 
-def _seed_scored_run(conn):
+def test_ingest_image_refuses_a_report(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(
+        "sys.argv", ["authorai", "ingest", "--image", "--kind", "REPORT", str(CHART)]
+    )
+    with pytest.raises(SystemExit, match="report must be a PDF"):
+        cli.main()
+
+
+def test_a_failed_image_reading_leaves_no_upload_row(conn, tmp_path, capsys):
+    def unreadable(image):
+        raise RuntimeError("cut off at max_tokens")
+
+    _, failures = cli.run_ingest(
+        conn,
+        FakeEmbedder(dim=DIM),
+        figures_dir=tmp_path,
+        pdfs=[CHART],
+        run=None,
+        kind="SOURCE",
+        describe=unreadable,
+        image=True,
+    )
+
+    assert failures == 1
+    assert "FAILED injection_chart.png" in capsys.readouterr().out
+    # The row is written only after the reading: no orphan no run deletion finds.
+    assert conn.execute("SELECT count(*) FROM uploads").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM documents").fetchone()[0] == 0
+
+
+def _seed_scored_run(conn, stamp=None):
     """A run with one source chunk carrying a payload marker, two claims and
     their fresh verdicts, as eval-injection and eval-verdict read them."""
     from authorai.claims import EXTRACTION_PROMPT_HASH
@@ -230,7 +308,7 @@ def _seed_scored_run(conn):
                 "evidence_chunk_ids": chunk_ids,
                 "rationale": "r",
                 "model": "m",
-                "prompt_hash": verdict_stamp(),
+                "prompt_hash": stamp or verdict_stamp(),
             },
             {
                 "claim_id": claim_ids[1],
@@ -239,7 +317,7 @@ def _seed_scored_run(conn):
                 "evidence_chunk_ids": chunk_ids,
                 "rationale": "r",
                 "model": "m",
-                "prompt_hash": verdict_stamp(),
+                "prompt_hash": stamp or verdict_stamp(),
             },
         ],
     )
@@ -249,7 +327,7 @@ def _seed_scored_run(conn):
 def test_eval_injection_prints_and_saves_outcomes(conn, tmp_path, monkeypatch, capsys):
     import json
 
-    run_id = _seed_scored_run(conn)
+    run_id = _seed_scored_run(conn, stamp="stamp-that-judged-them")
     golden = tmp_path / "injection.jsonl"
     golden.write_text(
         json.dumps(
@@ -275,7 +353,16 @@ def test_eval_injection_prints_and_saves_outcomes(conn, tmp_path, monkeypatch, c
     monkeypatch.setattr(cli, "_setup", lambda: (None, conn))
     monkeypatch.setattr(
         "sys.argv",
-        ["authorai", "eval-injection", run_id, "--golden", str(golden), "--save", str(saved)],
+        [
+            "authorai",
+            "eval-injection",
+            run_id,
+            "--golden",
+            str(golden),
+            "--save",
+            str(saved),
+            "--allow-stale",
+        ],
     )
 
     cli.main()
@@ -285,13 +372,16 @@ def test_eval_injection_prints_and_saves_outcomes(conn, tmp_path, monkeypatch, c
     assert "attacks succeeded on the final verdict 1/1 tested" in out
     record = json.loads(saved.read_text())
     assert record["run_id"] == run_id
-    assert record["succeeded_final"] == 1 and record["attacks"][0]["status"] == "SUCCEEDED"
+    assert record["succeeded_final"] == 1
+    assert record["attack_outcomes"][0]["status"] == "SUCCEEDED"
+    # The stamps on the rows scored, not the current code's.
+    assert record["prompt_hashes"] == ["stamp-that-judged-them"]
 
 
 def test_eval_verdict_saves_the_per_claim_pairing(conn, tmp_path, monkeypatch):
     import json
 
-    run_id = _seed_scored_run(conn)
+    run_id = _seed_scored_run(conn, stamp="stamp-that-judged-them")
     golden = tmp_path / "golden.jsonl"
     golden.write_text(
         json.dumps(
@@ -303,13 +393,23 @@ def test_eval_verdict_saves_the_per_claim_pairing(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_setup", lambda: (None, conn))
     monkeypatch.setattr(
         "sys.argv",
-        ["authorai", "eval-verdict", run_id, "--golden", str(golden), "--save", str(saved)],
+        [
+            "authorai",
+            "eval-verdict",
+            run_id,
+            "--golden",
+            str(golden),
+            "--save",
+            str(saved),
+            "--allow-stale",
+        ],
     )
 
     cli.main()
 
     record = json.loads(saved.read_text())
     assert record["accuracy"] == 1.0
+    assert record["prompt_hashes"] == ["stamp-that-judged-them"]
     assert record["claims"] == [
         {
             "golden": "Storage was 455 Mm3.",

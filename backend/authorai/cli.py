@@ -7,6 +7,7 @@ Usage (inside the conda env, from backend/):
 
 import argparse
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -76,9 +77,8 @@ def run_ingest(
 
     The run id is printed FIRST so a failure partway through a batch never
     loses the id of the partially-populated run, and one bad PDF does not
-    abort the rest of the batch. An image is ingested the way the jobs worker
-    ingests an uploaded one: an `image` upload row, then its reading by
-    `describe` as the document's only text.
+    abort the rest of the batch. An image is read by `describe` as the jobs
+    worker reads an uploaded one, its reading the document's only text.
     """
     if run:
         if dbmod.get_run(conn, run) is None:
@@ -92,11 +92,8 @@ def run_ingest(
     for pdf in pdfs:
         try:
             if image:
-                # Like an API upload, the row exists before the reading: a
-                # failed reading leaves it, with no document, as one would.
-                upload_id = dbmod.add_upload(
-                    conn, kind, pdf.name, str(pdf.resolve()), source_type="image"
-                )
+                # Its image upload row is written after the reading, so a
+                # failed one leaves nothing behind.
                 doc_id = ingest_image(
                     conn,
                     embedder,
@@ -105,7 +102,6 @@ def run_ingest(
                     name=pdf.name,
                     kind=kind,
                     figures_dir=figures_dir,
-                    upload_id=upload_id,
                     describe=describe,
                 )
             else:
@@ -133,6 +129,8 @@ def run_ingest(
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
+    if args.image and args.kind == "REPORT":
+        raise SystemExit("A report must be a PDF; --image ingests image sources only")
     if args.image and args.no_describe_figures:
         raise SystemExit(
             "An image source's reading is its only text; --no-describe-figures cannot apply"
@@ -310,10 +308,58 @@ def cmd_eval_extract(args: argparse.Namespace) -> None:
     )
 
 
+def _batch_record(settings: Settings, batch_id: str) -> Path:
+    """Where `verify` records what judged a batch it submitted: beside the
+    database, so a resume is checked against the database it writes to."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id):
+        raise SystemExit(f"{batch_id!r} is not a batch id")
+    return Path(settings.db_path).parent / "batches" / f"{batch_id}.json"
+
+
+def _check_batch_record(settings: Settings, batch_id: str, judge: dict) -> None:
+    """Refuse to resume a batch this judge configuration did not submit.
+
+    A resumed batch's answers are stored under the CURRENT code's stamp, and
+    the freshness guards then trust them: a batch submitted before a prompt
+    change, with another -k, for another run or on another model would be
+    scored as if the current judge had given it.
+    """
+    path = _batch_record(settings, batch_id)
+    if not path.exists():
+        raise SystemExit(
+            f"There is no record of batch {batch_id} under {path.parent}: `verify` did not "
+            "submit it against this database, so nothing proves which judge answered it."
+        )
+    record = json.loads(path.read_text())
+    for field in ("prompt_hash", "run_id", "model"):
+        if record.get(field) != judge[field]:
+            raise SystemExit(
+                f"Batch {batch_id} cannot be resumed here: its {field} differs (submitted "
+                f"with {record.get(field)!r}, now {judge[field]!r})."
+            )
+
+
 def cmd_verify(args: argparse.Namespace) -> None:
     if args.sync and args.resume_batch:
         raise SystemExit("--resume-batch resumes a Batch API run; it cannot apply with --sync")
     settings, conn = _setup()
+    judge = {
+        "run_id": args.run_id,
+        "prompt_hash": verdict_stamp(args.k),
+        "model": settings.verdict_model,
+    }
+    if args.resume_batch:
+        _check_batch_record(settings, args.resume_batch, judge)
+
+    def announce(batch_id: str) -> None:
+        # Printed the moment it exists, so a queue that outlasts the client's
+        # wait is resumed with --resume-batch instead of paid for twice; then
+        # recorded, so that resume can prove it is the same judge.
+        print(f"batch: {batch_id}", flush=True)
+        path = _batch_record(settings, batch_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(judge))
+
     embedder = _embedder(settings)
     llm = AnthropicClient(settings.anthropic_api_key)
     summary = verify_run(
@@ -325,9 +371,8 @@ def cmd_verify(args: argparse.Namespace) -> None:
         k=args.k,
         batch=not args.sync,
         resume_batch_id=args.resume_batch,
-        # Printed the moment it exists: a queue that outlasts the client's wait
-        # is resumed with --resume-batch instead of paid for twice.
-        on_batch_created=lambda batch_id: print(f"batch: {batch_id}", flush=True),
+        require_resume=args.resume_batch is not None,
+        on_batch_created=announce,
     )
     for verdict, count in summary["counts"].items():
         print(f"{verdict}: {count}")
@@ -379,7 +424,7 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
             {
                 "run_id": args.run_id,
                 "models": models,
-                "prompt_hash": verdict_stamp(),
+                "prompt_hashes": _stamps(verdict_rows),
                 "accuracy": score.accuracy,
                 "correct": score.correct,
                 "matched": score.matched,
@@ -396,6 +441,11 @@ def cmd_eval_verdict(args: argparse.Namespace) -> None:
     )
 
 
+def _stamps(verdict_rows: list[dict]) -> list:
+    """The stamps on the rows scored — under --allow-stale, not the current code's."""
+    return sorted({row["prompt_hash"] for row in verdict_rows}, key=str)
+
+
 def _save_json(path: Path, record: dict) -> None:
     path.write_text(json.dumps(record, indent=2) + "\n")
     print(f"saved {path}")
@@ -409,18 +459,23 @@ def cmd_eval_injection(args: argparse.Namespace) -> None:
         raise SystemExit(f"Run {args.run_id!r} has no verdicts — run `verify` first")
     _assert_claims_fresh(verdict_rows, args.allow_stale)
     _assert_verdicts_fresh(verdict_rows, args.allow_stale)
-    chunk_text_by_id = dict(
-        conn.execute("SELECT id, text FROM chunks WHERE run_id = ?", (args.run_id,)).fetchall()
-    )
-    score = score_injection(verdict_rows, golden, chunk_text_by_id)
+    chunks_by_id = {
+        row["id"]: {"text": row["text"], "kind": row["kind"]}
+        for row in conn.execute(
+            "SELECT id, text, kind FROM chunks WHERE run_id = ?", (args.run_id,)
+        )
+    }
+    score = score_injection(verdict_rows, golden, chunks_by_id)
     models = sorted({r["model"] for r in verdict_rows})
     print(f"judge model(s): {', '.join(models)}")
     for outcome in [*score.attacks, *score.controls]:
         raw = f" (raw {outcome['raw']})" if outcome["raw"] != outcome["final"] else ""
         print(
-            f"{outcome['id']:>4} {outcome['status']:<10} expected {outcome['expected']}, "
+            f"{outcome['id']:>4} {outcome['status']:<12} expected {outcome['expected']}, "
             f"final {outcome['final']}{raw} — {outcome['claim'][:70]}"
         )
+        if outcome["status"] == "CROSS-PAIRED":
+            print(f"       paired with: {outcome['row_claim'][:70]}")
     print(score.summary())
     if args.save:
         _save_json(
@@ -428,7 +483,7 @@ def cmd_eval_injection(args: argparse.Namespace) -> None:
             {
                 "run_id": args.run_id,
                 "models": models,
-                "prompt_hash": verdict_stamp(),
+                "prompt_hashes": _stamps(verdict_rows),
                 **score.as_dict(),
             },
         )
@@ -475,25 +530,34 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"[{hit.score:.4f} {channels}{page} {hit.kind}] {hit.text[:160]}")
 
 
-def _add_eval_args(parser: argparse.ArgumentParser) -> None:
+def _add_eval_args(
+    parser: argparse.ArgumentParser,
+    golden: Path = GOLDEN_PATH,
+    golden_help: str = "the dev set",
+    baseline: bool = True,
+    save_help: str | None = None,
+) -> None:
     parser.add_argument("run_id")
     parser.add_argument(
         "--golden",
         type=Path,
-        default=GOLDEN_PATH,
-        help="Golden JSONL to score against (default: the dev set)",
+        default=golden,
+        help=f"Golden JSONL to score against (default: {golden_help})",
     )
-    parser.add_argument(
-        "--baseline",
-        type=Path,
-        default=None,
-        help="Baseline JSON for the delta line (default: the dev baseline, dev golden only)",
-    )
+    if baseline:
+        parser.add_argument(
+            "--baseline",
+            type=Path,
+            default=None,
+            help="Baseline JSON for the delta line (default: the dev baseline, dev golden only)",
+        )
     parser.add_argument(
         "--allow-stale",
         action="store_true",
         help="Score rows even if they were produced by an older prompt",
     )
+    if save_help:
+        parser.add_argument("--save", type=Path, help=save_help)
 
 
 def main() -> None:
@@ -545,29 +609,20 @@ def main() -> None:
     eval_verdict = subparsers.add_parser(
         "eval-verdict", help="Score stored verdicts against the golden set"
     )
-    _add_eval_args(eval_verdict)
-    eval_verdict.add_argument(
-        "--save", type=Path, help="Also write the score and the per-claim pairing to this JSON file"
+    _add_eval_args(
+        eval_verdict, save_help="Also write the score and the per-claim pairing to this JSON file"
     )
     eval_verdict.set_defaults(func=cmd_eval_verdict)
 
     eval_injection = subparsers.add_parser(
         "eval-injection", help="Score stored verdicts against the prompt-injection set"
     )
-    eval_injection.add_argument("run_id")
-    eval_injection.add_argument(
-        "--golden",
-        type=Path,
-        default=INJECTION_GOLDEN_PATH,
-        help="Injection-set JSONL (default: evals/injection/injection.jsonl)",
-    )
-    eval_injection.add_argument(
-        "--save", type=Path, help="Also write the per-attack outcomes to this JSON file"
-    )
-    eval_injection.add_argument(
-        "--allow-stale",
-        action="store_true",
-        help="Score rows even if they were produced by an older prompt",
+    _add_eval_args(
+        eval_injection,
+        golden=INJECTION_GOLDEN_PATH,
+        golden_help="evals/injection/injection.jsonl",
+        baseline=False,
+        save_help="Also write the per-attack outcomes to this JSON file",
     )
     eval_injection.set_defaults(func=cmd_eval_injection)
 

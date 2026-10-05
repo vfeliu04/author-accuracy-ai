@@ -283,12 +283,13 @@ def verify_run(
     batch: bool = True,
     resume_batch_id: str | None = None,
     on_batch_created: "Callable[[str], None] | None" = None,
+    require_resume: bool = False,
 ) -> dict:
     """Verify every claim in a run; stores verdicts (replacing) and returns a summary.
 
-    `resume_batch_id`/`on_batch_created` thread through to parse_batch so a
-    caller (the jobs worker) can persist a submitted batch's id and resume it
-    on retry instead of paying for a duplicate.
+    `resume_batch_id`/`on_batch_created`/`require_resume` thread through to
+    parse_batch so a caller (the jobs worker, the CLI) can persist a submitted
+    batch's id and resume it on retry instead of paying for a duplicate.
     """
     if k < 1:
         raise ValueError(
@@ -345,6 +346,7 @@ def verify_run(
                 items=items,
                 resume_batch_id=resume_batch_id,
                 on_batch_created=on_batch_created,
+                require_resume=require_resume,
             )
         else:
             # Deliberate divergence: sync is the debug path and stays at the

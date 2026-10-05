@@ -594,15 +594,16 @@ def ingest_image(
     name: str,
     kind: str,
     figures_dir: Path | str,
-    upload_id: str,
     describe: "Callable[[Image], str]",
+    upload_id: str | None = None,
 ) -> str:
     """Ingest one uploaded image: a single figure chunk whose text is the
     caption model's reading of it (IMAGE_SOURCE_PROMPT), titled with the file's
     stem. The original file is never rewritten; the judge is shown the bounded
     copy stored beside the run's other figures. A failed reading names the
     file: with several images in a run, "cut off at max_tokens" alone does not
-    say which one to crop or replace."""
+    say which one to crop or replace. Without `upload_id` (the CLI) the image
+    upload row is recorded after the reading, like a PDF's."""
     path = Path(path)
 
     def read(image):
@@ -624,6 +625,7 @@ def ingest_image(
         upload_id=upload_id,
         describe=read,
         fallback_title=Path(name).stem,
+        source_type="image",
     )
 
 
@@ -670,6 +672,7 @@ def ingest_parsed(
     describe: "Callable[[Image], str] | None" = None,
     fallback_title: str | None = None,
     extra_metadata: dict | None = None,
+    source_type: str = "pdf",
 ) -> str:
     """Ingest one parsed document into a run: upload + document rows, chunks, figures.
 
@@ -677,8 +680,9 @@ def ingest_parsed(
     embedding network call) happens BEFORE anything is written, so an
     ingestion failure cannot leave a half-ingested document behind; what
     remains after that point is a short sequence of local SQLite writes.
-    When `upload_id` is not supplied (CLI path), an uploads row is recorded
-    from the file itself so every document stays traceable to its source PDF.
+    When `upload_id` is not supplied (CLI path), an uploads row of
+    `source_type` is recorded from the file itself, after the failure-prone
+    work, so every document stays traceable to its source file.
     When `describe` is supplied, each figure's chunk text gains an LLM-written
     description — this must happen here, before embedding, because chunk text
     is immutable once written.
@@ -741,7 +745,9 @@ def ingest_parsed(
     if upload_id is None:
         if path is None:
             raise ValueError("ingest_parsed needs an upload_id or the source path to record one")
-        upload_id = dbmod.add_upload(conn, kind, path.name, str(path.resolve()))
+        upload_id = dbmod.add_upload(
+            conn, kind, path.name, str(path.resolve()), source_type=source_type
+        )
     dbmod.add_document(
         conn,
         run_id,

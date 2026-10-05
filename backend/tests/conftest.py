@@ -258,9 +258,11 @@ class FakeLLM:
         max_tokens=BATCH_MAX_TOKENS,
         resume_batch_id=None,
         on_batch_created=None,
+        require_resume=False,
     ):
         # Mirrors AnthropicClient.parse_batch's contract: dict keyed by custom_id.
         self.resume_batch_ids = [*getattr(self, "resume_batch_ids", []), resume_batch_id]
+        self.require_resumes = [*getattr(self, "require_resumes", []), require_resume]
         if on_batch_created is not None and resume_batch_id is None:
             on_batch_created("fake-batch-1")
         return {
