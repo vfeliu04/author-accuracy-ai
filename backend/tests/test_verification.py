@@ -144,8 +144,19 @@ def test_batch_request_uses_output_config_with_transformed_schema(tmp_path):
 
     image = tmp_path / "fig.png"
     image.write_bytes(b"\x89PNG fake")
+    from authorai.llm import TextDocument
+
+    documents = [
+        TextDocument("Evidence [1]", "ctx 1", "one"),
+        TextDocument("Evidence [2]", "ctx 2", "two"),
+    ]
     item = ParseItem(
-        custom_id="claim-1", system="sys", prompt="judge this", output_type=Verdict, images=[image]
+        custom_id="claim-1",
+        system="sys",
+        prompt="judge this",
+        output_type=Verdict,
+        images=[image],
+        documents=documents,
     )
     request = build_batch_request(item, model="claude-opus-5", max_tokens=123)
 
@@ -158,10 +169,11 @@ def test_batch_request_uses_output_config_with_transformed_schema(tmp_path):
     fmt = params["output_config"]["format"]
     assert fmt["type"] == "json_schema"
     assert "verdict" in fmt["schema"]["properties"]
-    # Images precede the text block, same as the sync path.
+    # Images, then the evidence documents, then the text — the sync path's shape.
     content = params["messages"][0]["content"]
-    assert content[0]["type"] == "image"
+    assert [block["type"] for block in content] == ["image", "document", "document", "text"]
     assert content[0]["source"]["media_type"] == "image/png"
+    assert [block["source"]["data"] for block in content[1:3]] == ["one", "two"]
     assert content[-1] == {"type": "text", "text": "judge this"}
 
 
@@ -181,6 +193,29 @@ def test_a_png_block_is_exactly_the_one_sent_before_images_were_sources():
             "data": base64.standard_b64encode(data).decode("ascii"),
         },
     }
+
+
+def test_document_block_is_the_shape_verified_live():
+    """The shape M0 sent live with structured outputs on sync and batch: a
+    plain-text source, a title and a context, and no `citations` key — with
+    structured outputs, citations are a 400."""
+    from authorai.llm import TextDocument, _document_block
+
+    assert _document_block(TextDocument("Evidence [1]", "Text, page 3, from a PDF.", "a b")) == {
+        "type": "document",
+        "source": {"type": "text", "media_type": "text/plain", "data": "a b"},
+        "title": "Evidence [1]",
+        "context": "Text, page 3, from a PDF.",
+    }
+
+
+def test_content_without_images_or_documents_is_the_plain_prompt():
+    """Every other structured call (claims, credibility, validity, references)
+    still sends its prompt as the plain string it always sent."""
+    from authorai.llm import user_content
+
+    assert user_content("p") == "p"
+    assert user_content("p", [], []) == "p"
 
 
 def test_a_jpeg_figure_reaches_the_judge_labelled_as_jpeg(tmp_path):
@@ -241,11 +276,17 @@ def _errored(custom_id):
 
 
 def _items():
-    from authorai.llm import ParseItem
+    from authorai.llm import ParseItem, TextDocument
 
     return [
         ParseItem(custom_id="ok", system="s", prompt="p1", output_type=Verdict),
-        ParseItem(custom_id="bad", system="s", prompt="p2", output_type=Verdict),
+        ParseItem(
+            custom_id="bad",
+            system="s",
+            prompt="p2",
+            output_type=Verdict,
+            documents=[TextDocument("Evidence [1]", "ctx", "evidence two")],
+        ),
     ]
 
 
@@ -378,8 +419,12 @@ def test_batch_failed_item_is_retried_sync_once(monkeypatch):
     )
     retried = []
 
-    def fake_parse(*, model, system, prompt, output_type, max_tokens, images=None, timeout=None):
-        retried.append({"prompt": prompt, "max_tokens": max_tokens, "timeout": timeout})
+    def fake_parse(
+        *, model, system, prompt, output_type, max_tokens, images=None, documents=None, timeout=None
+    ):
+        retried.append(
+            {"prompt": prompt, "documents": documents, "max_tokens": max_tokens, "timeout": timeout}
+        )
         return _verdict(verdict="UNVERIFIABLE", quote=None, evidence_index=None)
 
     monkeypatch.setattr(client, "parse", fake_parse)
@@ -389,6 +434,8 @@ def test_batch_failed_item_is_retried_sync_once(monkeypatch):
     assert results["bad"].verdict == "UNVERIFIABLE"
     [retry] = retried
     assert retry["prompt"] == "p2"
+    # The retry asks the same question: the evidence documents travel with it.
+    assert retry["documents"] == _items()[1].documents
     # Full batch headroom — a capped retry would re-truncate the exact
     # thinking-heavy items the retry exists for. The explicit timeout lifts
     # the SDK's non-streaming guard.

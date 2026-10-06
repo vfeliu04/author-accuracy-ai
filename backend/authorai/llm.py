@@ -73,16 +73,29 @@ BATCH_TIMEOUT_SECONDS = 3600
 CHAT_MAX_TOKENS = 2048
 
 
+@dataclass(frozen=True)
+class TextDocument:
+    """A plain-text document block's payload. `data` goes out byte for byte
+    (the verdict quote check matches against it); `title` and `context` are
+    the pipeline's own labels and never carry source-controlled strings."""
+
+    title: str
+    context: str
+    data: str
+
+
 @dataclass
 class ParseItem:
     """One structured call in a batch. Carries the same payload the sync path
-    takes — including images — so the two paths stay interchangeable."""
+    takes — images and documents included — so the two paths stay
+    interchangeable."""
 
     custom_id: str
     system: str
     prompt: str
     output_type: type[BaseModel]
     images: "list[Path] | None" = None
+    documents: "list[TextDocument] | None" = None
 
 
 class LLM(Protocol):
@@ -95,6 +108,7 @@ class LLM(Protocol):
         output_type: type[ModelT],
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
+        documents: "list[TextDocument] | None" = None,
         temperature: float | None = None,
     ) -> ModelT: ...
 
@@ -145,11 +159,30 @@ def _image_block(data: bytes) -> dict:
     }
 
 
-def _content(prompt: str, images: "list[Path] | None"):
-    """User-message content: the plain string, or image blocks before the text."""
-    if not images:
+def _document_block(document: TextDocument) -> dict:
+    """THE plain-text document block — the shape verified live with
+    structured outputs (sync and batch). Citations are deliberately absent:
+    with structured outputs they are a 400."""
+    return {
+        "type": "document",
+        "source": {"type": "text", "media_type": "text/plain", "data": document.data},
+        "title": document.title,
+        "context": document.context,
+    }
+
+
+def user_content(
+    prompt: str,
+    images: "list[Path] | None" = None,
+    documents: "list[TextDocument] | None" = None,
+):
+    """User-message content: the plain string, or [images…, documents…, text].
+    The one renderer for the sync call, the batch request and the batch's
+    sync retry, so the three send identical content."""
+    if not images and not documents:
         return prompt
-    blocks = [_image_block(Path(path).read_bytes()) for path in images]
+    blocks = [_image_block(Path(path).read_bytes()) for path in images or ()]
+    blocks.extend(_document_block(document) for document in documents or ())
     blocks.append({"type": "text", "text": prompt})
     return blocks
 
@@ -178,7 +211,9 @@ def build_batch_request(item: ParseItem, model: str, max_tokens: int = BATCH_MAX
             model=model,
             max_tokens=max_tokens,
             system=item.system,
-            messages=[{"role": "user", "content": _content(item.prompt, item.images)}],
+            messages=[
+                {"role": "user", "content": user_content(item.prompt, item.images, item.documents)}
+            ],
             output_config={
                 "format": {"type": "json_schema", "schema": transform_schema(item.output_type)}
             },
@@ -206,6 +241,7 @@ class AnthropicClient:
         output_type: type[ModelT],
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
+        documents: "list[TextDocument] | None" = None,
         timeout: float | None = None,
         temperature: float | None = None,
     ) -> ModelT:
@@ -223,7 +259,7 @@ class AnthropicClient:
             model=model,
             max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": _content(prompt, images)}],
+            messages=[{"role": "user", "content": user_content(prompt, images, documents)}],
             output_format=output_type,
             **sampling,
         )
@@ -387,6 +423,7 @@ class AnthropicClient:
                         # lifts the SDK's non-streaming guard.
                         max_tokens=max_tokens,
                         images=item.images,
+                        documents=item.documents,
                         timeout=600.0,
                     )
                 except Exception as exc:  # noqa: BLE001 - aggregated below
