@@ -135,6 +135,7 @@ def test_provenance_comes_from_a_closed_vocabulary():
         _source_hit(4, "d", doc_id="image-doc", page=None, kind="figure"),
         _source_hit(5, "e", doc_id="legacy-doc", page=2),
         _source_hit(6, "f", doc_id="odd-doc", page=None),
+        _source_hit(7, "g", doc_id="pdf-doc", page=4, kind="figure"),
     ]
     source_types = {
         "pdf-doc": "pdf",
@@ -152,6 +153,8 @@ def test_provenance_comes_from_a_closed_vocabulary():
         "Figure, from an image, as a model transcribed it.",
         "Text, page 2, from a source document.",
         "Text, from a source document.",
+        # A PDF figure's text is not the PDF's words: its caption plus a model's description.
+        "Figure, page 4, from a PDF. Its text is the figure's caption and a model's description.",
     ]
 
 
@@ -688,6 +691,26 @@ def test_verify_run_never_shows_report_chunks_to_the_judge(conn, verified_run, b
         assert "must never be evidence" not in wire
 
 
+def test_verify_run_labels_each_source_by_its_upload(conn):
+    """The document labels come from the run's upload rows, through verify_run
+    itself — not only from a hand-made mapping."""
+    run_id = dbmod.create_run(conn)
+    page = dbmod.add_upload(
+        conn, "SOURCE", "page.json", "/tmp/page.json", source_type="web", url="https://x.org/a"
+    )
+    source = dbmod.add_document(conn, run_id, "SOURCE", upload_id=page)
+    report = dbmod.add_document(conn, run_id, "REPORT")
+    text = "In 2023, hunger affected 735 million people worldwide."
+    embedder = FakeEmbedder(dim=DIM)
+    dbmod.add_chunks(conn, run_id, source, [{"text": text}], embedder.embed([text]))
+    dbmod.add_claims(conn, run_id, report, [{"text": "Hunger affected 735 million in 2023."}])
+
+    llm = FakeLLM(parse_results={Verdict: _verdict(quote="hunger affected 735 million people")})
+    verify_run(conn, embedder, llm, run_id, model="m", batch=False)
+    [document] = llm.parse_calls[0]["documents"]
+    assert document.context == "Text, from a web page."
+
+
 def test_source_text_never_reaches_the_system_prompt(conn, verified_run):
     llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
     verify_run(conn, verified_run["embedder"], llm, verified_run["run"], model="m", batch=True)
@@ -844,6 +867,7 @@ def test_the_verdict_hash_covers_the_rendered_documents(monkeypatch):
     import authorai.verification as verification
 
     assert verification._verdict_prompt_hash() == verification.VERDICT_PROMPT_HASH
+    hash_now = verification.VERDICT_PROMPT_HASH
 
     real_block = llm._document_block
     monkeypatch.setattr(
@@ -860,6 +884,22 @@ def test_the_verdict_hash_covers_the_rendered_documents(monkeypatch):
 
     monkeypatch.setattr(verification, "build_verdict_content", relabelled)
     assert verification._verdict_prompt_hash() != verification.VERDICT_PROMPT_HASH
+    monkeypatch.setattr(verification, "build_verdict_content", real_build)
+
+    # The pictures are part of what the judge sees: their block and how many go.
+    real_image_block = llm._image_block
+    monkeypatch.setattr(
+        llm, "_image_block", lambda data: {**real_image_block(data), "cache_control": None}
+    )
+    assert verification._verdict_prompt_hash() != verification.VERDICT_PROMPT_HASH
+    monkeypatch.setattr(llm, "_image_block", real_image_block)
+    # The cap itself is hashed, not only through the labels it changes: with
+    # the three frozen figures, caps of 3 and 4 render the same labels.
+    hashes = []
+    for cap in (3, 4):
+        monkeypatch.setattr(verification, "MAX_IMAGES", cap)
+        hashes.append(verification._verdict_prompt_hash())
+    assert hashes[0] != hashes[1] and hash_now not in hashes
 
 
 def test_the_fence_moved_the_judge_stamp(capsys):
@@ -890,7 +930,8 @@ def test_the_policy_states_its_rules():
         "has not been stated by the source",
         "attached image",
         "keeps its full weight",
-        "mention briefly in the rationale",
+        "say in the rationale that some text was set aside, without repeating it",
+        '"Evidence [n]" title',
         "from the text of a single evidence document",
         "never from its title or context",
     ):
