@@ -47,7 +47,7 @@ from authorai.ingest import (
 from authorai.llm import AnthropicClient, StaleBatchError
 from authorai.log import setup_logger
 from authorai.scoring import score_run
-from authorai.verification import verify_run
+from authorai.verification import verdict_stamp, verify_run
 from authorai.video import read_video_bounded
 from authorai.web import (
     ExtractionTimeoutError,
@@ -540,16 +540,31 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
     # it is submitted, so a retry after a timeout resumes the SAME batch
     # instead of paying for a duplicate (the id survives in the payload; a
     # batch that cannot be resumed, or whose requests do not match these
-    # claims, falls back to a fresh submission loudly). Nothing checks that
-    # the resumed batch was asked by the CURRENT judge prompt and model: a
-    # deploy between a timeout and a retry would store the old judge's
-    # answers under the new stamp. The CLI records that per batch (cli.py
-    # _batch_record); the jobs path carries it as a known gap.
+    # claims, falls back to a fresh submission loudly). The id is stored with
+    # the judge that asked it (prompt stamp and model): a resumed batch's
+    # answers are stored under the CURRENT judge's stamp, so one asked by
+    # another judge — a code update between a timeout and a retry — is never
+    # resumed; a fresh batch is submitted instead.
     job = dbmod.get_run_job(context.conn, run_id)
+    judge = {"prompt_hash": verdict_stamp(), "model": context.settings.verdict_model}
+    resume_batch_id = payload.get("verify_batch_id")
+    if resume_batch_id and payload.get("verify_judge") != judge:
+        logger.warning(
+            "verify batch %s was asked by another judge (%s) — submitting a fresh one",
+            resume_batch_id,
+            payload.get("verify_judge"),
+        )
+        resume_batch_id = None
+        if job is not None:
+            dbmod.update_job_payload(
+                context.conn, job["id"], {"verify_batch_id": None, "verify_judge": None}
+            )
 
     def remember_batch(batch_id: str) -> None:
         if job is not None:
-            dbmod.update_job_payload(context.conn, job["id"], {"verify_batch_id": batch_id})
+            dbmod.update_job_payload(
+                context.conn, job["id"], {"verify_batch_id": batch_id, "verify_judge": judge}
+            )
 
     try:
         summary = verify_run(
@@ -559,7 +574,7 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
             run_id,
             model=context.settings.verdict_model,
             batch=True,
-            resume_batch_id=payload.get("verify_batch_id"),
+            resume_batch_id=resume_batch_id,
             on_batch_created=remember_batch,
         )
     except StaleBatchError:
@@ -567,7 +582,9 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
         # every retry re-resolves the same dead batch and fails identically —
         # with the key gone, the next retry submits fresh.
         if job is not None:
-            dbmod.update_job_payload(context.conn, job["id"], {"verify_batch_id": None})
+            dbmod.update_job_payload(
+                context.conn, job["id"], {"verify_batch_id": None, "verify_judge": None}
+            )
         raise
     counts = summary["counts"]
     return (
@@ -594,6 +611,10 @@ REAL_STEPS: dict[str, Callable] = {
 }
 
 
+def _verified_by_another_judge(conn: sqlite3.Connection, run_id: str) -> bool:
+    return any(row["prompt_hash"] != verdict_stamp() for row in dbmod.list_verdicts(conn, run_id))
+
+
 def run_job(
     conn: sqlite3.Connection,
     settings: Settings,
@@ -613,6 +634,11 @@ def run_job(
     run_id = job["run_id"]
     try:
         completed = {p["step"] for p in job["progress"] if p["status"] == "done"}
+        if "verify" in completed and _verified_by_another_judge(conn, run_id):
+            # Score refuses verdicts from another judge prompt, so skipping
+            # verify would fail this retry and every one after it.
+            logger.warning("job %s: verdicts are from another judge — verifying again", job["id"])
+            completed.discard("verify")
         dbmod.set_run_status(conn, run_id, "RUNNING")
         for name in PIPELINE_STEPS:
             if name in completed:
