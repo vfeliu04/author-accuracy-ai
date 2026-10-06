@@ -221,6 +221,10 @@ class FakeLLM:
         self.parse_calls: list[dict] = []
         self.image_requests: list[dict] = []
         self.chat_calls: list[dict] = []
+        self.cancelled_batches: list[str] = []
+
+    def cancel_batch(self, batch_id):
+        self.cancelled_batches.append(batch_id)
 
     def parse(
         self,

@@ -123,6 +123,8 @@ class LLM(Protocol):
         require_resume: bool = False,
     ) -> dict[str, BaseModel]: ...
 
+    def cancel_batch(self, batch_id: str) -> None: ...
+
     def describe_image(
         self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512
     ) -> str: ...
@@ -435,6 +437,10 @@ class AnthropicClient:
                     "semantics): " + "; ".join(still_failing)
                 )
         return parsed
+
+    def cancel_batch(self, batch_id: str) -> None:
+        """Ask the API to stop a batch; requests already processed stay billed."""
+        self._client.messages.batches.cancel(batch_id)
 
     def describe_image(
         self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512

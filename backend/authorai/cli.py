@@ -27,7 +27,12 @@ from authorai.ingest import figure_describer, image_source_reader, ingest_image,
 from authorai.llm import AnthropicClient
 from authorai.scoring import score_run
 from authorai.search import hybrid_search
-from authorai.verification import EVIDENCE_K, verdict_stamp, verify_run
+from authorai.verification import (
+    EVIDENCE_K,
+    judge_identity,
+    stale_verdicts,
+    verify_run,
+)
 
 GOLDEN_PATH = Path(__file__).resolve().parent.parent / "evals" / "golden.jsonl"
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "evals" / "baseline.json"
@@ -312,11 +317,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
     if args.sync and resuming:
         raise SystemExit("--resume-batch resumes a Batch API run; it cannot apply with --sync")
     settings, conn = _setup()
-    judge = {
-        "run_id": args.run_id,
-        "prompt_hash": verdict_stamp(args.k),
-        "model": settings.verdict_model,
-    }
+    judge = {"run_id": args.run_id, **judge_identity(settings.verdict_model, args.k)}
     if resuming:
         _check_batch_record(settings, args.resume_batch, judge)
 
@@ -359,7 +360,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
 def _assert_verdicts_fresh(verdict_rows: list[dict], allow_stale: bool) -> None:
     """Refuse to score verdicts produced by a different judge configuration
     (prompt or evidence-k). NULL (pre-guard rows) counts as stale."""
-    stale = [r for r in verdict_rows if r.get("prompt_hash") != verdict_stamp()]
+    stale = stale_verdicts(verdict_rows)
     if not stale:
         return
     models = sorted({r["model"] for r in stale})
