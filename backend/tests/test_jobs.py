@@ -23,10 +23,21 @@ from authorai.jobs import (
     run_job,
     step_ingest,
 )
+from authorai.verification import verdict_stamp
 from authorai.web import ExtractionTimeoutError, ThinPageError, extract_web
 from tests.conftest import DIM, REAL_CHART, FakeLLM, image_upload, poison_providers
 
 SETTINGS = Settings(anthropic_api_key="x", openai_api_key="x")
+# Hand-written, not judge_identity(): an independent check of what a batch is
+# recorded with, so the identity losing a field is caught here.
+CURRENT_JUDGE = {"prompt_hash": verdict_stamp(), "model": SETTINGS.verdict_model}
+ONE_VERIFIED = {
+    "counts": {"SUPPORTED": 0, "CONTRADICTED": 0, "UNVERIFIABLE": 1},
+    "downgraded": 0,
+    "year_flagged": 0,
+    "no_evidence": 0,
+    "total": 1,
+}
 
 
 def _job(conn, payload=None):
@@ -242,34 +253,6 @@ def test_requeued_failed_job_resumes_without_repeating_done_steps(conn):
     assert record == ["ingest", "extract", "verify", "score"]  # no repeats
 
 
-def test_a_batch_that_cannot_be_cancelled_does_not_stop_the_fresh_one(conn, monkeypatch):
-    from authorai import jobs as jobsmod
-    from authorai.jobs import step_verify
-
-    run_id, job_id = _job(conn)
-    dbmod.update_job_payload(conn, job_id, {"verify_batch_id": "msgbatch_gone"})
-
-    class Uncancellable(FakeLLM):
-        def cancel_batch(self, batch_id):
-            raise RuntimeError("batch already ended")
-
-    def fake_verify_run(conn_, embedder, llm, run_id_, **kwargs):
-        return {
-            "counts": {"SUPPORTED": 0, "CONTRADICTED": 0, "UNVERIFIABLE": 1},
-            "downgraded": 0,
-            "year_flagged": 0,
-            "no_evidence": 0,
-            "total": 1,
-        }
-
-    monkeypatch.setattr(jobsmod, "verify_run", fake_verify_run)
-    context = PipelineContext(conn, SETTINGS)
-    context._llm = Uncancellable()
-    assert "Verified 1 claims" in step_verify(
-        context, run_id, dbmod.get_job(conn, job_id)["payload"]
-    )
-
-
 def _verified_by(conn, run_id, stamp):
     """Store one claim and its verdict for the run, stamped by `stamp`."""
     report = dbmod.add_document(conn, run_id, "REPORT")
@@ -290,30 +273,32 @@ def _verified_by(conn, run_id, stamp):
     )
 
 
-@pytest.mark.parametrize("fresh", [True, False], ids=["same-judge", "older-judge"])
-@pytest.mark.parametrize("scored", [False, True], ids=["unscored", "already-scored"])
-def test_a_retry_reverifies_only_verdicts_another_judge_gave(conn, fresh, scored):
+@pytest.mark.parametrize(
+    "fresh, done, expected",
+    [
+        (True, ("ingest", "extract", "verify"), ["score"]),
+        (True, ("ingest", "extract", "verify", "score"), []),
+        (False, ("ingest", "extract", "verify"), ["verify", "score"]),
+        (False, ("ingest", "extract", "verify", "score"), ["verify", "score"]),
+    ],
+    ids=["same-judge", "same-judge-scored", "older-judge", "older-judge-scored"],
+)
+def test_a_retry_reverifies_only_verdicts_another_judge_gave(conn, fresh, done, expected):
     """A job whose verify finished under an older judge prompt would fail at
     score on every retry (score refuses stale verdicts). Its verify step runs
     again instead — and every step after it, since a score worked out from
     the replaced verdicts would no longer describe them. Verdicts from the
     current judge are never re-paid for."""
-    from authorai.verification import verdict_stamp
-
     run_id, job_id = _job(conn)
     _verified_by(conn, run_id, verdict_stamp() if fresh else "an-older-judge-prompt:k=8")
     dbmod.claim_next_job(conn)
-    done = ("ingest", "extract", "verify", "score") if scored else ("ingest", "extract", "verify")
     for step in done:
         dbmod.push_job_progress(conn, job_id, step, "done earlier", status="done")
     dbmod.requeue_running_jobs(conn)
 
     record: list[str] = []
     run_job(conn, SETTINGS, dbmod.claim_next_job(conn), steps=_fake_steps(record))
-    if fresh:
-        assert record == ([] if scored else ["score"])
-    else:
-        assert record == ["verify", "score"]
+    assert record == expected
     assert dbmod.get_job(conn, job_id)["status"] == "DONE"
 
 
@@ -340,17 +325,11 @@ def test_step_verify_resumes_stored_batch_and_persists_new_ids(conn, monkeypatch
     def fake_verify_run(conn_, embedder, llm, run_id_, **kwargs):
         captured["resume_batch_id"] = kwargs["resume_batch_id"]
         kwargs["on_batch_created"]("msgbatch_new")
-        return {
-            "counts": {"SUPPORTED": 1, "CONTRADICTED": 0, "UNVERIFIABLE": 0},
-            "downgraded": 0,
-            "year_flagged": 0,
-            "no_evidence": 0,
-            "total": 1,
-        }
+        return ONE_VERIFIED
 
     monkeypatch.setattr(jobsmod, "verify_run", fake_verify_run)
     dbmod.update_job_payload(
-        conn, job_id, {"verify_batch_id": "msgbatch_old", "verify_judge": _current_judge()}
+        conn, job_id, {"verify_batch_id": "msgbatch_old", "verify_judge": CURRENT_JUDGE}
     )
     payload = dbmod.get_job(conn, job_id)["payload"]
     step_verify(PipelineContext(conn, SETTINGS), run_id, payload)
@@ -359,25 +338,24 @@ def test_step_verify_resumes_stored_batch_and_persists_new_ids(conn, monkeypatch
     stored = dbmod.get_job(conn, job_id)["payload"]
     assert stored["verify_batch_id"] == "msgbatch_new"
     # Recorded with the judge that asked it, so a later retry can tell.
-    assert stored["verify_judge"] == _current_judge()
-
-
-def _current_judge():
-    from authorai.verification import verdict_stamp
-
-    return {"prompt_hash": verdict_stamp(), "model": SETTINGS.verdict_model}
+    assert stored["verify_judge"] == CURRENT_JUDGE
 
 
 @pytest.mark.parametrize(
     "recorded",
     [
         None,  # a batch stored before judges were recorded
-        {"prompt_hash": "an-older-judge-prompt:k=8", "model": SETTINGS.verdict_model},
-        {"prompt_hash": "current", "model": "another-model"},
+        {**CURRENT_JUDGE, "prompt_hash": "an-older-judge-prompt:k=8"},
+        {**CURRENT_JUDGE, "model": "another-model"},
     ],
     ids=["unrecorded", "older-prompt", "other-model"],
 )
-def test_step_verify_never_resumes_a_batch_another_judge_asked(conn, monkeypatch, recorded):
+@pytest.mark.parametrize(
+    "cancel_error", [None, RuntimeError("batch already ended")], ids=["cancelled", "uncancellable"]
+)
+def test_step_verify_never_resumes_a_batch_another_judge_asked(
+    conn, monkeypatch, recorded, cancel_error
+):
     """A batch's answers are stored under the CURRENT judge's stamp, so one
     asked by another prompt or model must not be resumed: its answers would
     pass every freshness check as the current judge's. A fresh batch is
@@ -385,8 +363,6 @@ def test_step_verify_never_resumes_a_batch_another_judge_asked(conn, monkeypatch
     from authorai import jobs as jobsmod
     from authorai.jobs import step_verify
 
-    if recorded and recorded["prompt_hash"] == "current":
-        recorded = {**recorded, "prompt_hash": _current_judge()["prompt_hash"]}
     run_id, job_id = _job(conn)
     captured: dict = {}
 
@@ -394,20 +370,15 @@ def test_step_verify_never_resumes_a_batch_another_judge_asked(conn, monkeypatch
         captured["resume_batch_id"] = kwargs["resume_batch_id"]
         captured["stored_then"] = dict(dbmod.get_job(conn, job_id)["payload"])
         kwargs["on_batch_created"]("msgbatch_fresh")
-        return {
-            "counts": {"SUPPORTED": 0, "CONTRADICTED": 0, "UNVERIFIABLE": 1},
-            "downgraded": 0,
-            "year_flagged": 0,
-            "no_evidence": 0,
-            "total": 1,
-        }
+        return ONE_VERIFIED
 
     monkeypatch.setattr(jobsmod, "verify_run", fake_verify_run)
     dbmod.update_job_payload(
         conn, job_id, {"verify_batch_id": "msgbatch_other_judge", "verify_judge": recorded}
     )
     context = PipelineContext(conn, SETTINGS)
-    context._llm = FakeLLM()
+    context._llm = FakeLLM(cancel_error=cancel_error)
+    # A batch that cannot be cancelled (ended, expired) never stops the fresh one.
     step_verify(context, run_id, dbmod.get_job(conn, job_id)["payload"])
 
     assert captured["resume_batch_id"] is None
@@ -417,7 +388,7 @@ def test_step_verify_never_resumes_a_batch_another_judge_asked(conn, monkeypatch
     assert "verify_batch_id" not in captured["stored_then"]
     stored = dbmod.get_job(conn, job_id)["payload"]
     assert stored["verify_batch_id"] == "msgbatch_fresh"
-    assert stored["verify_judge"] == _current_judge()
+    assert stored["verify_judge"] == CURRENT_JUDGE
 
 
 def test_step_verify_clears_batch_id_on_stale_batch(conn, monkeypatch):
@@ -433,7 +404,7 @@ def test_step_verify_clears_batch_id_on_stale_batch(conn, monkeypatch):
     # Recorded for the current judge, so the batch reaches verify_run (one
     # recorded for another judge is dropped before it).
     dbmod.update_job_payload(
-        conn, job_id, {"verify_batch_id": "msgbatch_poisoned", "verify_judge": _current_judge()}
+        conn, job_id, {"verify_batch_id": "msgbatch_poisoned", "verify_judge": CURRENT_JUDGE}
     )
     reached = []
 

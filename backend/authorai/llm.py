@@ -11,7 +11,7 @@ import hashlib
 import io
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar
@@ -75,9 +75,7 @@ CHAT_MAX_TOKENS = 2048
 
 @dataclass(frozen=True)
 class TextDocument:
-    """A plain-text document block's payload. `data` goes out byte for byte
-    (the verdict quote check matches against it); `title` and `context` are
-    the pipeline's own labels and never carry source-controlled strings."""
+    """A plain-text document block's payload; `data` goes out byte for byte."""
 
     title: str
     context: str
@@ -173,20 +171,32 @@ def _document_block(document: TextDocument) -> dict:
     }
 
 
+def render_user_content(
+    prompt: str,
+    image_data: "Sequence[bytes]" = (),
+    documents: "Sequence[TextDocument]" = (),
+):
+    """User-message content: the plain string, or [images…, documents…, text]
+    — the one renderer of what a model is shown (pure: images as bytes)."""
+    if not image_data and not documents:
+        return prompt
+    blocks = [_image_block(data) for data in image_data]
+    blocks.extend(_document_block(document) for document in documents)
+    blocks.append({"type": "text", "text": prompt})
+    return blocks
+
+
 def user_content(
     prompt: str,
     images: "list[Path] | None" = None,
     documents: "list[TextDocument] | None" = None,
 ):
-    """User-message content: the plain string, or [images…, documents…, text].
-    The one renderer for the sync call, the batch request and the batch's
-    sync retry, so the three send identical content."""
-    if not images and not documents:
-        return prompt
-    blocks = [_image_block(Path(path).read_bytes()) for path in images or ()]
-    blocks.extend(_document_block(document) for document in documents or ())
-    blocks.append({"type": "text", "text": prompt})
-    return blocks
+    """render_user_content with images read from their files: what the sync
+    call, the batch request and the batch's sync retry all send, so the three
+    send identical content."""
+    return render_user_content(
+        prompt, [Path(path).read_bytes() for path in images or ()], documents or ()
+    )
 
 
 def _first_text(message) -> str | None:
@@ -439,8 +449,10 @@ class AnthropicClient:
         return parsed
 
     def cancel_batch(self, batch_id: str) -> None:
-        """Ask the API to stop a batch; requests already processed stay billed."""
-        self._client.messages.batches.cancel(batch_id)
+        """Ask the API to stop a batch; requests already processed stay billed.
+        Bounded and never retried: callers use it best effort, and it must not
+        hold the one worker thread on a slow API."""
+        self._client.with_options(max_retries=0, timeout=30.0).messages.batches.cancel(batch_id)
 
     def describe_image(
         self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512

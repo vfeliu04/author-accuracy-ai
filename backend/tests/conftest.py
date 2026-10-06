@@ -214,6 +214,7 @@ class FakeLLM:
         | None = None,
         image_description: str = "A fake description.",
         chat_answer: str = "A fake answer.",
+        cancel_error: Exception | None = None,
     ):
         self._parse_results = parse_results or {}
         self._image_description = image_description
@@ -222,9 +223,12 @@ class FakeLLM:
         self.image_requests: list[dict] = []
         self.chat_calls: list[dict] = []
         self.cancelled_batches: list[str] = []
+        self._cancel_error = cancel_error
 
     def cancel_batch(self, batch_id):
         self.cancelled_batches.append(batch_id)
+        if self._cancel_error is not None:
+            raise self._cancel_error
 
     def parse(
         self,

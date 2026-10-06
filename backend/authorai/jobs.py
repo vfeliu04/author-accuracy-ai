@@ -548,6 +548,16 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
     # otherwise be billed too) and a fresh batch is submitted instead.
     job = dbmod.get_run_job(context.conn, run_id)
     judge = judge_identity(context.settings.verdict_model)
+
+    def record_batch(batch_id: str | None) -> None:
+        # The id and the judge that asked it are written (and cleared) together.
+        if job is not None:
+            dbmod.update_job_payload(
+                context.conn,
+                job["id"],
+                {"verify_batch_id": batch_id, "verify_judge": judge if batch_id else None},
+            )
+
     resume_batch_id = payload.get("verify_batch_id")
     if resume_batch_id and payload.get("verify_judge") != judge:
         logger.warning(
@@ -555,21 +565,12 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
             resume_batch_id,
             payload.get("verify_judge"),
         )
-        if job is not None:
-            dbmod.update_job_payload(
-                context.conn, job["id"], {"verify_batch_id": None, "verify_judge": None}
-            )
+        record_batch(None)
         try:
             context.llm.cancel_batch(resume_batch_id)
         except Exception:  # noqa: BLE001 - best effort: ended, expired or unknown batches
             logger.warning("could not cancel batch %s", resume_batch_id, exc_info=True)
         resume_batch_id = None
-
-    def remember_batch(batch_id: str) -> None:
-        if job is not None:
-            dbmod.update_job_payload(
-                context.conn, job["id"], {"verify_batch_id": batch_id, "verify_judge": judge}
-            )
 
     try:
         summary = verify_run(
@@ -580,16 +581,13 @@ def step_verify(context: PipelineContext, run_id: str, payload: dict) -> str:
             model=context.settings.verdict_model,
             batch=True,
             resume_batch_id=resume_batch_id,
-            on_batch_created=remember_batch,
+            on_batch_created=record_batch,
         )
     except StaleBatchError:
         # The stored batch belongs to a different claim set. Clear it, or
         # every retry re-resolves the same dead batch and fails identically —
         # with the key gone, the next retry submits fresh.
-        if job is not None:
-            dbmod.update_job_payload(
-                context.conn, job["id"], {"verify_batch_id": None, "verify_judge": None}
-            )
+        record_batch(None)
         raise
     counts = summary["counts"]
     return (

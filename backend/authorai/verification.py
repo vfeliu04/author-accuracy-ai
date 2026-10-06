@@ -25,10 +25,9 @@ from typing import Protocol, TypeVar
 from pydantic import BaseModel, Field
 
 from authorai import db as dbmod
-from authorai import llm as llm_module
 from authorai.db import VERDICTS, VerdictLiteral
 from authorai.embeddings import Embedder
-from authorai.llm import LLM, ParseItem, TextDocument, prompt_fingerprint, user_content
+from authorai.llm import LLM, ParseItem, TextDocument, prompt_fingerprint, render_user_content
 from authorai.log import setup_logger
 from authorai.search import Hit, hybrid_search
 
@@ -154,31 +153,58 @@ _SOURCE_LABELS = {
 }
 
 
-def _evidence_context(hit: Hit, source_type: str | None, picture: str | None) -> str:
-    where = _KIND_LABELS.get(hit.kind, "Excerpt")
-    if isinstance(hit.page, int):
+def _evidence_context(
+    hit: Hit,
+    source_type: str | None,
+    picture: str | None,
+    figure_text: tuple[bool, bool] | None,
+) -> str:
+    where = _KIND_LABELS[hit.kind]  # chunks.kind is CHECK-constrained to these three
+    if hit.page is not None:
         where += f", page {hit.page}"
-    context = f"{where}, from {_SOURCE_LABELS.get(source_type or '', 'a source document')}."
-    if hit.kind == "figure" and source_type != "image":
-        # A PDF figure's chunk is its caption plus the caption model's
-        # description (ingest), not the document's own words.
-        context += " Its text is the figure's caption and a model's description."
+    context = f"{where}, from {_SOURCE_LABELS.get(source_type, 'a source document')}."
+    if hit.kind == "figure" and source_type != "image" and figure_text is not None:
+        # A PDF figure's chunk is what ingest stored for it — its caption,
+        # the caption model's description, both or neither — never the
+        # document's own running text; say which.
+        has_caption, has_description = figure_text
+        parts = [
+            part
+            for part, present in (
+                ("the figure's caption", has_caption),
+                ("a model's description", has_description),
+            )
+            if present
+        ]
+        context += (
+            f" Its text is {' and '.join(parts)}."
+            if parts
+            else " It has no caption or description."
+        )
     if picture is not None:
         context += f" Its picture is attached image {picture}."
     return context
 
 
 def build_verdict_content(
-    claim: dict, hits: Sequence[Hit], source_types: Mapping[str, str | None]
+    claim: dict,
+    hits: Sequence[Hit],
+    source_types: Mapping[str, str | None],
+    figure_texts: Mapping[str, tuple[bool, bool]] | None = None,
 ) -> tuple[list[TextDocument], str]:
     """The judge's evidence documents and its question.
 
     Each hit becomes a plain-text document titled "Evidence [n]", its data the
-    hit's text byte for byte (the quote check matches against it). Attached
+    hit's text byte for byte (the quote check matches against it); titles and
+    contexts are the pipeline's own labels and never carry a string the
+    source controls. Attached
     figures (attached_figures — the rule images_for uses) say which picture
-    is theirs, since images go out unlabelled. The question comes last: it
-    points at the documents and states the claim.
+    is theirs, since images go out unlabelled; a PDF figure says which of a
+    caption and a model's description its text is (`figure_texts`: figure id
+    -> (has caption, has description), as stored). The question comes last:
+    it points at the documents and states the claim.
     """
+    figure_texts = figure_texts or {}
     pictures = attached_figures(hits)
     picture_of = {
         hit.chunk_id: f"{n} of {len(pictures)}" for n, hit in enumerate(pictures, start=1)
@@ -187,7 +213,10 @@ def build_verdict_content(
         TextDocument(
             title=f"Evidence [{n}]",
             context=_evidence_context(
-                hit, source_types.get(hit.doc_id), picture_of.get(hit.chunk_id)
+                hit,
+                source_types.get(hit.doc_id),
+                picture_of.get(hit.chunk_id),
+                figure_texts.get(hit.figure_id) if hit.figure_id is not None else None,
             ),
             data=hit.text,
         )
@@ -206,13 +235,9 @@ def build_verdict_content(
     return documents, "\n\n".join(parts)
 
 
-# Frozen inputs for the prompt fingerprint, covering every branch of a
-# document's context: each source kind, with and without a page, a PDF figure
-# and an image source, and more figures than MAX_IMAGES (so the cap shows).
-_FROZEN_CLAIM = {"text": "Frozen claim.", "value": 1.0, "unit": "percent", "year": 2020}
-
-
-def _frozen_hit(chunk_id: int, doc_id: str, page: int | None, kind: str, figure_id=None) -> Hit:
+def _frozen_hit(
+    chunk_id: int, doc_id: str, page: int | None, kind: str, figure_id: str | None = None
+) -> Hit:
     return Hit(
         chunk_id=chunk_id,
         doc_id=doc_id,
@@ -226,6 +251,11 @@ def _frozen_hit(chunk_id: int, doc_id: str, page: int | None, kind: str, figure_
     )
 
 
+# Frozen inputs for the prompt fingerprint, covering every branch of a
+# document's context: each source kind, with and without a page, an image
+# source, a PDF figure with each of caption and description present or not,
+# and more figures than MAX_IMAGES (so the cap shows).
+_FROZEN_CLAIM = {"text": "Frozen claim.", "value": 1.0, "unit": "percent", "year": 2020}
 _FROZEN_HITS = [
     _frozen_hit(1, "frozen-pdf", 1, "text"),
     _frozen_hit(2, "frozen-web", None, "table"),
@@ -234,6 +264,8 @@ _FROZEN_HITS = [
     _frozen_hit(5, "frozen-legacy", 2, "text"),
     _frozen_hit(6, "frozen-pdf", 3, "figure", "frozen-fig-2"),
     _frozen_hit(7, "frozen-pdf", 4, "figure", "frozen-fig-3"),
+    _frozen_hit(8, "frozen-pdf", 5, "figure", "frozen-fig-4"),
+    _frozen_hit(9, "frozen-pdf", 6, "figure", "frozen-fig-5"),
 ]
 _FROZEN_SOURCE_TYPES = {
     "frozen-pdf": "pdf",
@@ -242,22 +274,27 @@ _FROZEN_SOURCE_TYPES = {
     "frozen-image": "image",
     "frozen-legacy": None,
 }
+_FROZEN_FIGURE_TEXTS = {
+    "frozen-fig-2": (True, True),
+    "frozen-fig-3": (True, False),
+    "frozen-fig-4": (False, True),
+    "frozen-fig-5": (False, False),
+}
 _FROZEN_PNG = b"\x89PNG\r\n\x1a\n"
 
 
 def _verdict_prompt_hash() -> str:
-    """The judge's prompt contract: the system prompt, the rendered user
-    content (documents and question, through the one renderer the API calls
-    use), the image block's shape and how many pictures go (MAX_IMAGES), and
-    the schema. See prompt_fingerprint. Not hashed: the images' position
-    before the documents — fixed in user_content and asserted by the tests."""
-    documents, prompt = build_verdict_content(_FROZEN_CLAIM, _FROZEN_HITS, _FROZEN_SOURCE_TYPES)
+    """The judge's prompt contract: the system prompt, the user content exactly
+    as the one renderer builds it (a stand-in picture for each attached figure,
+    then the documents, then the question), the picture cap (MAX_IMAGES, which
+    the frozen figures cannot show past their own number) and the schema. See
+    prompt_fingerprint."""
+    documents, prompt = build_verdict_content(
+        _FROZEN_CLAIM, _FROZEN_HITS, _FROZEN_SOURCE_TYPES, _FROZEN_FIGURE_TEXTS
+    )
+    pictures = [_FROZEN_PNG] * len(attached_figures(_FROZEN_HITS))
     rendered = json.dumps(
-        {
-            "content": user_content(prompt, documents=documents),
-            "image_block": llm_module._image_block(_FROZEN_PNG),
-            "max_images": MAX_IMAGES,
-        },
+        {"content": render_user_content(prompt, pictures, documents), "max_images": MAX_IMAGES},
         sort_keys=True,
     )
     return prompt_fingerprint(VERDICT_SYSTEM, rendered, output_type=Verdict)
@@ -284,11 +321,11 @@ def judge_identity(model: str, k: int = EVIDENCE_K) -> dict:
     return {"prompt_hash": verdict_stamp(k), "model": model}
 
 
-def stale_verdicts(verdict_rows: list[dict], k: int = EVIDENCE_K) -> list[dict]:
+def stale_verdicts(verdict_rows: list[dict]) -> list[dict]:
     """The rows another judge configuration produced (prompt or evidence-k);
     NULL (pre-guard rows) counts as stale. The one rule score, the eval
     commands and the jobs worker apply."""
-    stamp = verdict_stamp(k)
+    stamp = verdict_stamp()
     return [row for row in verdict_rows if row.get("prompt_hash") != stamp]
 
 
@@ -463,15 +500,17 @@ def verify_run(
 
     evidence = retrieve_evidence(conn, embedder, run_id, claims, k=k)
     claims_by_id = {claim["id"]: claim for claim in claims}
-    source_types = dict(
-        conn.execute(
-            """
-            SELECT d.id, u.source_type FROM documents d LEFT JOIN uploads u ON u.id = d.upload_id
-            WHERE d.run_id = ? AND d.kind = 'SOURCE'
-            """,
-            (run_id,),
-        ).fetchall()
-    )
+    # The one rule for a source's kind (a document with no upload row is a
+    # PDF, as the report and the chat say), and what each figure's text is.
+    source_types = {
+        source["doc_id"]: source["source_type"] for source in dbmod.list_run_sources(conn, run_id)
+    }
+    figure_texts = {
+        row["id"]: (bool((row["caption"] or "").strip()), bool(row["description"]))
+        for row in conn.execute(
+            "SELECT id, caption, description FROM figures WHERE run_id = ?", (run_id,)
+        )
+    }
 
     rows: list[dict] = []
     items: list[ParseItem] = []
@@ -483,7 +522,7 @@ def verify_run(
             logger.warning("no evidence retrieved for claim %s — UNVERIFIABLE", claim["id"])
             rows.append(_no_evidence_row(claim["id"]))
             continue
-        documents, prompt = build_verdict_content(claim, hits, source_types)
+        documents, prompt = build_verdict_content(claim, hits, source_types, figure_texts)
         items.append(
             ParseItem(
                 custom_id=claim["id"],
