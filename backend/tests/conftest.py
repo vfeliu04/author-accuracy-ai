@@ -291,9 +291,15 @@ class FakeLLM:
             for item in items
         }
 
-    def describe_image(self, *, model, image, prompt, max_tokens=512):
+    def describe_image(self, *, model, image, prompt, max_tokens=512, system=None):
         self.image_requests.append(
-            {"model": model, "size": image.size, "prompt": prompt, "max_tokens": max_tokens}
+            {
+                "model": model,
+                "size": image.size,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "system": system,
+            }
         )
         return self._image_description
 

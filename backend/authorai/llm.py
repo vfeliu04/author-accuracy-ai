@@ -126,7 +126,13 @@ class LLM(Protocol):
     def cancel_batch(self, batch_id: str) -> None: ...
 
     def describe_image(
-        self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512
+        self,
+        *,
+        model: str,
+        image: "Image",
+        prompt: str,
+        max_tokens: int = 512,
+        system: str | None = None,
     ) -> str: ...
 
     def chat(
@@ -468,10 +474,20 @@ class AnthropicClient:
         self._client.with_options(max_retries=0, timeout=30.0).messages.batches.cancel(batch_id)
 
     def describe_image(
-        self, *, model: str, image: "Image", prompt: str, max_tokens: int = 512
+        self,
+        *,
+        model: str,
+        image: "Image",
+        prompt: str,
+        max_tokens: int = 512,
+        system: str | None = None,
     ) -> str:
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
+        # `system` is the one channel a picture's own text cannot occupy; it is
+        # sent only when a caller states one, so a call without it is the
+        # request it always was.
+        rules = {} if system is None else {"system": system}
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -484,6 +500,7 @@ class AnthropicClient:
                     ],
                 }
             ],
+            **rules,
         )
         self._log_usage(model, response)
         if response.stop_reason == "max_tokens":

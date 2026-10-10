@@ -2250,7 +2250,11 @@ def _image_context(conn, tmp_path, llm):
 
 def test_an_image_upload_is_read_as_an_image_and_never_reaches_docling(conn, tmp_path, monkeypatch):
     from authorai import jobs as jobsmod
-    from authorai.ingest import IMAGE_DESCRIPTION_MAX_TOKENS, IMAGE_SOURCE_PROMPT
+    from authorai.ingest import (
+        IMAGE_DESCRIPTION_MAX_TOKENS,
+        IMAGE_READER_SYSTEM,
+        IMAGE_SOURCE_PROMPT,
+    )
     from tests.conftest import FakeLLM
 
     monkeypatch.setattr(jobsmod, "ingest_pdf", lambda *a, **k: pytest.fail("sent to Docling"))
@@ -2262,6 +2266,7 @@ def test_an_image_upload_is_read_as_an_image_and_never_reaches_docling(conn, tmp
 
     [request] = llm.image_requests
     assert request["prompt"] == IMAGE_SOURCE_PROMPT
+    assert request["system"] == IMAGE_READER_SYSTEM
     assert request["max_tokens"] == IMAGE_DESCRIPTION_MAX_TOKENS
     assert request["model"] == context.settings.caption_model
     document = conn.execute(
