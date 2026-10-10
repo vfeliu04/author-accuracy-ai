@@ -207,7 +207,7 @@ def test_opening_text_includes_section_headings_and_respects_the_page_window(con
     exact fields metadata extraction exists to find."""
     from authorai import db as dbmod
     from authorai.embeddings import FakeEmbedder
-    from authorai.scoring import _metadata_text
+    from authorai.scoring import _metadata_excerpts
 
     run_id = dbmod.create_run(conn)
     doc = dbmod.add_document(conn, run_id, "SOURCE")
@@ -219,7 +219,11 @@ def test_opening_text_includes_section_headings_and_respects_the_page_window(con
     ]
     dbmod.add_chunks(conn, run_id, doc, chunks, embedder.embed([c["text"] for c in chunks]))
 
-    text = _metadata_text(conn, run_id, doc)
+    excerpts = _metadata_excerpts(conn, run_id, doc)
+    text = excerpts.opening
+    assert excerpts.passages == ()
+    # The pieces are exact: headings once, chunks in order, nothing else.
+    assert text == "## The Real Title\n\nFirst page body\nwith a line break.\n\nSecond page body."
     assert "## The Real Title" in text  # heading included, once
     assert text.count("## The Real Title") == 1
     assert "First page body" in text and "Second page body." in text
@@ -233,7 +237,7 @@ def test_metadata_text_includes_deep_imprint_passages(conn):
     when the slots run out."""
     from authorai import db as dbmod
     from authorai.embeddings import FakeEmbedder
-    from authorai.scoring import _IMPRINT_CHUNK_LIMIT, _metadata_text
+    from authorai.scoring import _IMPRINT_CHUNK_LIMIT, _metadata_excerpts
 
     run_id = dbmod.create_run(conn)
     doc = dbmod.add_document(conn, run_id, "SOURCE")
@@ -254,21 +258,25 @@ def test_metadata_text_includes_deep_imprint_passages(conn):
     ]
     dbmod.add_chunks(conn, run_id, doc, chunks, embedder.embed([c["text"] for c in chunks]))
 
-    text = _metadata_text(conn, run_id, doc)
-    assert "Opening page text." in text
-    assert "LIKELY IMPRINT / CITATION PASSAGES" in text
-    assert "Recommended citation: Welthungerhilfe" in text
-    assert "ISBN 978-1-9191958-0-3" in text
+    excerpts = _metadata_excerpts(conn, run_id, doc)
+    assert excerpts.opening == "## Title\n\nOpening page text."
+    # The imprint is a passage of its own; the old inline label is gone (a
+    # source could print it), and no weak doi-only entry qualifies.
+    assert excerpts.passages == (
+        "Recommended citation: Welthungerhilfe (WHH). ISBN 978-1-9191958-0-3. "
+        "© 2025. All rights reserved.",
+    )
+    assert "LIKELY IMPRINT" not in excerpts.opening + "".join(excerpts.passages)
 
 
 def test_opening_text_is_loud_for_a_document_with_no_text(conn):
     from authorai import db as dbmod
-    from authorai.scoring import _metadata_text
+    from authorai.scoring import _metadata_excerpts
 
     run_id = dbmod.create_run(conn)
     doc = dbmod.add_document(conn, run_id, "SOURCE")
     with pytest.raises(ValueError, match="no text chunks"):
-        _metadata_text(conn, run_id, doc)
+        _metadata_excerpts(conn, run_id, doc)
 
 
 def test_validity_requires_sections():

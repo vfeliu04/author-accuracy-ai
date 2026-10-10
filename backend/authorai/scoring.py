@@ -27,6 +27,7 @@ from authorai.credibility import (
     CrossrefClient,
     Fetched,
     IsbnClient,
+    MetadataExcerpts,
     Origin,
     aggregate_credibility,
     authority_needles,
@@ -258,11 +259,12 @@ _IMPRINT_CHUNK_CHARS = 1200
 _IMPRINT_MIN_WEIGHT = 2
 
 
-def _metadata_text(
+def _metadata_excerpts(
     conn: sqlite3.Connection, run_id: str, doc_id: str, max_chars: int = 6000
-) -> str:
+) -> MetadataExcerpts:
     """The text shown to the metadata extractor: opening pages PLUS the
-    likeliest imprint/citation passages from anywhere in the document.
+    likeliest imprint/citation passages from anywhere in the document, as two
+    pieces (credibility.build_metadata_content sends each as its own document).
 
     Chunks are the guaranteed text store (ingestion refuses empty documents);
     the sections in documents.metadata are a convenience that documents
@@ -337,10 +339,8 @@ def _metadata_text(
         if score >= _IMPRINT_MIN_WEIGHT:
             scored.append((score, row["id"], row["text"]))
     scored.sort(key=lambda item: (-item[0], item[1]))
-    imprint = [chunk[:_IMPRINT_CHUNK_CHARS] for _, _, chunk in scored[:_IMPRINT_CHUNK_LIMIT]]
-    if imprint:
-        text += "\n\nLIKELY IMPRINT / CITATION PASSAGES:\n\n" + "\n\n".join(imprint)
-    return text
+    passages = tuple(chunk[:_IMPRINT_CHUNK_CHARS] for _, _, chunk in scored[:_IMPRINT_CHUNK_LIMIT])
+    return MetadataExcerpts(opening=text, passages=passages)
 
 
 def _report_sections(conn: sqlite3.Connection, run_id: str) -> list[dict]:
@@ -455,7 +455,9 @@ def score_run(
             origin: Origin = Fetched(address) if fetched else UPLOADED
             if metadata is None:
                 metadata = extract_metadata(
-                    llm, settings.metadata_model, _metadata_text(conn, run_id, document["id"])
+                    llm,
+                    settings.metadata_model,
+                    _metadata_excerpts(conn, run_id, document["id"]),
                 )
             tier, record = resolve_tier(
                 metadata, crossref, isbn_lookup, title_search=title_search, origin=origin
