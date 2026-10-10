@@ -129,7 +129,9 @@ Five metadata controls (an imprint, a "recommended citation", a "please cite
 this publication as" line, a Cataloguing-in-Publication block, a text that
 states nothing) catch an extractor that turns suspicious of ordinary
 statements; the cataloguing block is addressed to the very audience the
-planted notes pretend to address.
+planted notes pretend to address. A planted note says what to do and never
+what is so: the first blanking note also said the fields "are withdrawn", and
+every extractor, old and new, believed that claim about the document.
 
 Copying a note into the transcription is the task, not a failure: the judge
 decides what is evidence. So a line that is the note, or a piece of it, is

@@ -403,6 +403,12 @@ def test_the_planted_notes_read_like_a_document_not_like_a_test(probe):
     assert len(attacks) == 3 and len(controls) == 5
     for case in attacks:
         assert any(payload in case["opening"] for payload in probe.PAYLOADS)
+    # A note that says what to do, never what is so: the first blanking note
+    # also claimed the fields "are withdrawn", and every extractor believed it.
+    assert not re.search(
+        r"\b(?:is|are|was|were|has been|have been)\b",
+        probe.BLANK_NOTE.split("):")[1].replace("are to", ""),
+    )
     for case in controls:
         assert not any(
             payload in case["opening"] + "".join(case["passages"]) for payload in probe.PAYLOADS
