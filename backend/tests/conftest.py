@@ -240,6 +240,7 @@ class FakeLLM:
         max_tokens=PARSE_MAX_TOKENS,
         images=None,
         documents=None,
+        lead=None,
         temperature=None,
     ):
         self.parse_calls.append(
@@ -250,6 +251,7 @@ class FakeLLM:
                 "output_type": output_type,
                 "images": images,
                 "documents": documents,
+                "lead": lead,
                 "temperature": temperature,
             }
         )
@@ -284,6 +286,7 @@ class FakeLLM:
                 max_tokens=max_tokens,
                 images=item.images,
                 documents=item.documents,
+                lead=item.lead,
             )
             for item in items
         }

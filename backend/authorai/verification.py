@@ -12,7 +12,8 @@ in `raw_verdict` so the downgrade rate stays measurable.
 The evidence is fenced: each excerpt goes to the judge as its own plain-text
 document block, labelled only with what the pipeline knows for itself, so a
 source that imitates the prompt's structure stays inside its document, and the
-system prompt says text in the documents is data, never instructions.
+system prompt says text in the documents is data, never instructions. The
+claim is stated before the documents and again in the question after them.
 """
 
 import json
@@ -55,9 +56,9 @@ UNPROVEN_VERDICT = "UNVERIFIABLE"
 
 VERDICT_SYSTEM = """\
 You verify one claim from a report against evidence excerpts taken from
-SOURCE documents. Each excerpt is given as a document titled "Evidence [n]",
-and the claim follows them. Decide the verdict RELATIVE TO THIS EVIDENCE
-ONLY — never from your own knowledge.
+SOURCE documents. The claim is stated first; each excerpt then follows as a
+document titled "Evidence [n]", and the claim is repeated after them. Decide
+the verdict RELATIVE TO THIS EVIDENCE ONLY — never from your own knowledge.
 
 - SUPPORTED: the evidence states the claim's substance or directly entails it.
   Be strict — "the evidence vaguely gestures at this" is not entailment.
@@ -191,8 +192,8 @@ def build_verdict_content(
     hits: Sequence[Hit],
     source_types: Mapping[str, str | None],
     figure_texts: Mapping[str, tuple[bool, bool]] | None = None,
-) -> tuple[list[TextDocument], str]:
-    """The judge's evidence documents and its question.
+) -> tuple[str, list[TextDocument], str]:
+    """What the judge is shown: the claim, the evidence documents, the question.
 
     Each hit becomes a plain-text document titled "Evidence [n]", its data the
     hit's text byte for byte (the quote check matches against it); titles and
@@ -201,8 +202,14 @@ def build_verdict_content(
     figures (attached_figures — the rule images_for uses) say which picture
     is theirs, since images go out unlabelled; a PDF figure says which of a
     caption and a model's description its text is (`figure_texts`: figure id
-    -> (has caption, has description), as stored). The question comes last:
-    it points at the documents and states the claim.
+    -> (has caption, has description), as stored).
+
+    The claim is stated twice. First in the lead, before the documents: in
+    the runs of 2026-10-10 a judge that met the claim only after its evidence
+    answered UNVERIFIABLE more often where SUPPORTED or CONTRADICTED was right
+    (docs/architecture.md has the counts). Then in the question, which stays
+    last so that no document's text follows it, and which points at the
+    documents.
     """
     figure_texts = figure_texts or {}
     pictures = attached_figures(hits)
@@ -222,17 +229,23 @@ def build_verdict_content(
         )
         for n, hit in enumerate(hits, start=1)
     ]
-    parts = [
-        f"EVIDENCE: the documents above, titled Evidence [1] to Evidence [{len(hits)}]. "
-        "evidence_index is the number in the title of the document your quote comes from.",
-        f"CLAIM: {claim['text']}",
-    ]
+    claim_lines = [f"CLAIM: {claim['text']}"]
     details = ", ".join(
         f"{name}={claim[name]}" for name in ("value", "unit", "year") if claim.get(name) is not None
     )
     if details:
-        parts.append(f"CLAIM DETAILS: {details}")
-    return documents, "\n\n".join(parts)
+        claim_lines.append(f"CLAIM DETAILS: {details}")
+    lead = "\n\n".join(
+        [*claim_lines, "The evidence documents follow; the claim is repeated after them."]
+    )
+    question = "\n\n".join(
+        [
+            f"EVIDENCE: the documents above, titled Evidence [1] to Evidence [{len(hits)}]. "
+            "evidence_index is the number in the title of the document your quote comes from.",
+            *claim_lines,
+        ]
+    )
+    return lead, documents, question
 
 
 def _frozen_hit(
@@ -286,15 +299,18 @@ _FROZEN_PNG = b"\x89PNG\r\n\x1a\n"
 def _verdict_prompt_hash() -> str:
     """The judge's prompt contract: the system prompt, the user content exactly
     as the one renderer builds it (a stand-in picture for each attached figure,
-    then the documents, then the question), the picture cap (MAX_IMAGES, which
-    the frozen figures cannot show past their own number) and the schema. See
-    prompt_fingerprint."""
-    documents, prompt = build_verdict_content(
+    then the claim, the documents and the question), the picture cap
+    (MAX_IMAGES, which the frozen figures cannot show past their own number)
+    and the schema. See prompt_fingerprint."""
+    lead, documents, prompt = build_verdict_content(
         _FROZEN_CLAIM, _FROZEN_HITS, _FROZEN_SOURCE_TYPES, _FROZEN_FIGURE_TEXTS
     )
     pictures = [_FROZEN_PNG] * len(attached_figures(_FROZEN_HITS))
     rendered = json.dumps(
-        {"content": render_user_content(prompt, pictures, documents), "max_images": MAX_IMAGES},
+        {
+            "content": render_user_content(prompt, pictures, documents, lead),
+            "max_images": MAX_IMAGES,
+        },
         sort_keys=True,
     )
     return prompt_fingerprint(VERDICT_SYSTEM, rendered, output_type=Verdict)
@@ -522,7 +538,7 @@ def verify_run(
             logger.warning("no evidence retrieved for claim %s — UNVERIFIABLE", claim["id"])
             rows.append(_no_evidence_row(claim["id"]))
             continue
-        documents, prompt = build_verdict_content(claim, hits, source_types, figure_texts)
+        lead, documents, prompt = build_verdict_content(claim, hits, source_types, figure_texts)
         items.append(
             ParseItem(
                 custom_id=claim["id"],
@@ -531,6 +547,7 @@ def verify_run(
                 output_type=Verdict,
                 images=images_for(conn, hits),
                 documents=documents,
+                lead=lead,
             )
         )
 
@@ -555,6 +572,7 @@ def verify_run(
                     output_type=item.output_type,
                     images=item.images,
                     documents=item.documents,
+                    lead=item.lead,
                 )
                 for item in items
             }

@@ -85,7 +85,7 @@ class TextDocument:
 @dataclass
 class ParseItem:
     """One structured call in a batch. Carries the same payload the sync path
-    takes — images and documents included — so the two paths stay
+    takes — images, documents and the lead included — so the two paths stay
     interchangeable."""
 
     custom_id: str
@@ -94,6 +94,7 @@ class ParseItem:
     output_type: type[BaseModel]
     images: "list[Path] | None" = None
     documents: "list[TextDocument] | None" = None
+    lead: "str | None" = None
 
 
 class LLM(Protocol):
@@ -107,6 +108,7 @@ class LLM(Protocol):
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
         documents: "list[TextDocument] | None" = None,
+        lead: "str | None" = None,
         temperature: float | None = None,
     ) -> ModelT: ...
 
@@ -175,12 +177,17 @@ def render_user_content(
     prompt: str,
     image_data: "Sequence[bytes]" = (),
     documents: "Sequence[TextDocument]" = (),
+    lead: "str | None" = None,
 ):
-    """User-message content: the plain string, or [images…, documents…, text]
-    — the one renderer of what a model is shown (pure: images as bytes)."""
-    if not image_data and not documents:
+    """User-message content: the plain string, or [images…, lead, documents…,
+    text] — the one renderer of what a model is shown (pure: images as
+    bytes). `lead` is text the caller wants read before the documents; the
+    prompt is always the last block, so nothing in a document follows it."""
+    if not image_data and not documents and lead is None:
         return prompt
     blocks = [_image_block(data) for data in image_data]
+    if lead is not None:
+        blocks.append({"type": "text", "text": lead})
     blocks.extend(_document_block(document) for document in documents)
     blocks.append({"type": "text", "text": prompt})
     return blocks
@@ -190,12 +197,13 @@ def user_content(
     prompt: str,
     images: "list[Path] | None" = None,
     documents: "list[TextDocument] | None" = None,
+    lead: "str | None" = None,
 ):
     """render_user_content with images read from their files: what the sync
     call, the batch request and the batch's sync retry all send, so the three
     send identical content."""
     return render_user_content(
-        prompt, [Path(path).read_bytes() for path in images or ()], documents or ()
+        prompt, [Path(path).read_bytes() for path in images or ()], documents or (), lead
     )
 
 
@@ -224,7 +232,10 @@ def build_batch_request(item: ParseItem, model: str, max_tokens: int = BATCH_MAX
             max_tokens=max_tokens,
             system=item.system,
             messages=[
-                {"role": "user", "content": user_content(item.prompt, item.images, item.documents)}
+                {
+                    "role": "user",
+                    "content": user_content(item.prompt, item.images, item.documents, item.lead),
+                }
             ],
             output_config={
                 "format": {"type": "json_schema", "schema": transform_schema(item.output_type)}
@@ -254,6 +265,7 @@ class AnthropicClient:
         max_tokens: int = PARSE_MAX_TOKENS,
         images: "list[Path] | None" = None,
         documents: "list[TextDocument] | None" = None,
+        lead: "str | None" = None,
         timeout: float | None = None,
         temperature: float | None = None,
     ) -> ModelT:
@@ -271,7 +283,7 @@ class AnthropicClient:
             model=model,
             max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": user_content(prompt, images, documents)}],
+            messages=[{"role": "user", "content": user_content(prompt, images, documents, lead)}],
             output_format=output_type,
             **sampling,
         )
@@ -436,6 +448,7 @@ class AnthropicClient:
                         max_tokens=max_tokens,
                         images=item.images,
                         documents=item.documents,
+                        lead=item.lead,
                         timeout=600.0,
                     )
                 except Exception as exc:  # noqa: BLE001 - aggregated below
