@@ -1475,23 +1475,26 @@ def test_the_metadata_policy_names_the_titles_it_renders():
         assert f'"{document.title}"' in METADATA_SYSTEM
 
 
-def test_the_measured_metadata_prompt_is_unchanged():
-    """METADATA_SYSTEM is a measured prompt (the reader probe in
-    evals/injection/). It deliberately carries no paragraph about notes that
-    tell a cataloguer what to enter: with the excerpts as documents the
-    extractor ignored a planted "leave these fields blank" note in 10 of 10
-    runs, and two wordings of such a paragraph made it follow the note in 10
-    of 10. Changing the prompt is a decision that needs the probe run again,
-    and this pin then moves with it."""
-    import hashlib
+def test_the_measured_metadata_request_is_unchanged():
+    """The extractor's whole request is a measured one (the reader probe in
+    evals/injection/, whose README has the counts): the system prompt, the two
+    documents' titles and contexts, the question and the schema. It
+    deliberately carries no paragraph about notes that tell a cataloguer what
+    to enter; such a paragraph measured worse than none. Changing any part is a
+    decision that needs the probe run again, and this pin then moves with it."""
+    import json
 
-    from authorai.credibility import METADATA_SYSTEM
+    from authorai.credibility import METADATA_SYSTEM, MetadataExcerpts, build_metadata_content
+    from authorai.llm import prompt_fingerprint, render_user_content
 
     policy = " ".join(METADATA_SYSTEM.split())
     for phrase in ("never guess", "Reference-list and bibliography entries describe OTHER works"):
         assert phrase in policy, phrase
-    assert hashlib.sha256(METADATA_SYSTEM.encode()).hexdigest() == (
-        "1e151e1df0397613bdbb73b01041e16276675663040db7cf82bdb0ee8ae042da"
+    excerpts = MetadataExcerpts("Frozen opening.", ("Frozen passage one.", "Frozen passage two."))
+    documents, question = build_metadata_content(excerpts)
+    rendered = json.dumps(render_user_content(question, documents=documents), sort_keys=True)
+    assert prompt_fingerprint(METADATA_SYSTEM, rendered, output_type=SourceMetadata) == (
+        "d1a2e34897868795786229a03fca87a2a015af67c23c8616894b2d628041b1e4"
     )
 
 

@@ -1063,13 +1063,22 @@ def test_the_reader_policy_states_its_rules():
 
 
 def test_the_measured_reading_prompts_are_unchanged():
-    """Both task prompts were measured on real images (PR_C_MEASURE, and the
-    reader probe in evals/injection/). The policy lives in the system prompt so
-    that they stay byte for byte; changing one is a decision that needs its
-    measurement run again, and this pin then moves with it."""
+    """The two task prompts and the readers' policy were measured on real
+    images (PR_C_MEASURE, and the reader probe in evals/injection/). The policy
+    lives in the system prompt so that the task prompts stay byte for byte;
+    changing any of the three is a decision that needs its measurement run
+    again, and this pin then moves with it."""
     import hashlib
 
-    from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, IMAGE_SOURCE_PROMPT
+    from authorai.ingest import (
+        FIGURE_DESCRIPTION_PROMPT,
+        IMAGE_READER_SYSTEM,
+        IMAGE_SOURCE_PROMPT,
+    )
+
+    assert hashlib.sha256(IMAGE_READER_SYSTEM.encode()).hexdigest() == (
+        "d4f083e0bc659b59a1647138b301867e751f477774e331dae5856aee2cb40e4b"
+    )
 
     assert hashlib.sha256(IMAGE_SOURCE_PROMPT.encode()).hexdigest() == (
         "1c39357ed09e7d4b84ef9ec91dbe245ed2b0764fbd0919ca39bd5ebacbeac59f"
