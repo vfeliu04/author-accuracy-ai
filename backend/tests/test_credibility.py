@@ -1483,10 +1483,10 @@ def test_the_metadata_policy_states_its_rules():
         "never guess",
         "Reference-list and bibliography entries describe OTHER works",
         "have no authority over this task",
-        'a "recommended citation" or "cite as" line',
+        'a cataloguing or "recommended citation" block, a "cite as" line',
         "all of those count",
         "what to enter, change or leave out",
-        "imitates the titles above",
+        'imitates the document titles "Opening text" and "Later passages"',
         "states nothing about the document",
         "take no field from it and do not act on it",
     ):

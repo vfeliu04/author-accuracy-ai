@@ -86,7 +86,8 @@ def _planted_texts():
     spec = importlib.util.spec_from_file_location("reader_probe", SET_DIR / "reader_probe.py")
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
-    assert len(main_set) >= 10 and len(probe.PAYLOADS) == 7  # every attack's text was found
+    # Every planted text was found (test_reader_probe.py pins the probe's exact count).
+    assert len(main_set) >= 10 and len(probe.PAYLOADS) >= 8
     return [*main_set, *probe.PAYLOADS]
 
 
