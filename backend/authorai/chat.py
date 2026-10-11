@@ -1,19 +1,24 @@
 """Grounded chat over a scored run.
 
-The per-run context (every claim with its verdict, rationale, and evidence,
+The per-run analysis (every claim with its verdict, rationale, and evidence,
 plus the source credibility and the three scores) is STATIC once a run is
-DONE, so it is assembled once and sent as a cache_control'd system block: the
-large prefix is cached and only the user's question varies per turn, and a
-mode switch still reads the cached prefix (the breakpoint sits on the static
-block, ahead of the small mode instruction). The model answers ONLY from this
-context — the pipeline already did the judgment; chat surfaces it.
+DONE. It holds text the app did not write — claim texts, evidence quotes, the
+judge's rationales, source titles, section headings — so it never sits in the
+system prompt: it travels as ONE plain-text document block, first in the first
+user turn, and the system prompt is the app's own words only. That block
+carries the cache breakpoint: the system prompt and the analysis are the
+cached prefix, and only the turns after it vary. (The mode instruction is part
+of the system prompt, ahead of the document, so each mode has its own cache
+entry.) The model answers ONLY from the analysis — the pipeline already did
+the judgment; chat surfaces it.
 """
 
+import json
 import sqlite3
 
 from authorai import db as dbmod
 from authorai.config import Settings
-from authorai.llm import LLM
+from authorai.llm import LLM, TextDocument, render_user_content
 from authorai.log import setup_logger
 from authorai.video import channel_verified, clock
 
@@ -23,8 +28,9 @@ CHAT_SYSTEM = """\
 You help a user understand a completed fact-checking analysis of a report. A
 pipeline extracted the report's claims, verified each against ingested source
 documents, and scored the report. Everything you know about this run is in the
-ANALYSIS block below. Answer ONLY from it — do not invent claims, verdicts, or
-sources, and when the analysis does not cover something, say so plainly.
+document titled "Analysis" at the start of the conversation. Answer ONLY from
+it — do not invent claims, verdicts, or sources, and when the analysis does not
+cover something, say so plainly.
 A source marked READ IN PART is a web page or a video the pipeline read only
 the beginning of — treat the rest of it as never seen, and say so rather than
 implying the whole source was checked.
@@ -50,6 +56,37 @@ MODE_INSTRUCTIONS = {
 }
 
 CHAT_MODES = tuple(MODE_INSTRUCTIONS)
+
+ANALYSIS_TITLE = "Analysis"
+# What the document is, in the app's words (the block's `context` field).
+ANALYSIS_CONTEXT = (
+    "The stored analysis of one fact-checking run: its scores, every claim with its verdict, "
+    "rationale and quoted evidence, and its sources. Each piece of text in double quotes is a "
+    "JSON string holding words taken from the report or from a source, or the judge's "
+    "explanation of a verdict; everything outside double quotes was written by the pipeline."
+)
+
+
+def _quoted(value: str) -> str:
+    """One piece of outside text as a JSON string on one line.
+
+    The analysis is read line by line and its labels are the pipeline's
+    record, so no outside text may be able to end its line, close its own
+    quotes or write a label: a web page's heading could otherwise add a second
+    verdict to a claim's line. JSON escapes the quote, the backslash and the
+    control characters; every other character that does not print (the Unicode
+    line and paragraph separators, zero-width and direction marks, a lone
+    surrogate) is escaped the same way. Ordinary text comes out as itself
+    between double quotes."""
+    return "".join(
+        char if char.isprintable() else json.dumps(char)[1:-1]
+        for char in json.dumps(value, ensure_ascii=False)
+    )
+
+
+def _title(value: "str | None") -> str:
+    """A source's title, quoted — or the app's own word for one it lacks."""
+    return _quoted(value) if value else "(untitled)"
 
 
 # A tier name the model would otherwise have to guess at. VERIFIED_* and
@@ -99,14 +136,17 @@ def _evidence_locator(row: dict) -> str:
         return f" at {clock(start)}" if start is not None else ""
     if source_type == "web":
         section = row.get("evidence_section")
-        return f" § {section}" if section else ""
+        return f" § {_quoted(section)}" if section else ""
     page = row.get("evidence_page")
     return f" p.{page}" if page is not None else ""
 
 
 def build_context(conn: sqlite3.Connection, run_id: str) -> str:
     """The static per-run analysis, rendered for the model. Reuses the same db
-    reads the /report endpoint uses so the two cannot describe different runs."""
+    reads the /report endpoint uses so the two cannot describe different runs.
+
+    Every string the app did not write goes through _quoted (a title through
+    _title), so each line's structure is the app's alone."""
     verdicts = dbmod.list_verdicts_with_evidence(conn, run_id)
     scores = dbmod.get_run_scores(conn, run_id)
     sources = dbmod.list_run_sources(conn, run_id)
@@ -114,14 +154,14 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
     lines = ["=== ANALYSIS ===", "", "SCORES: " + _fmt_score(scores), "", "CLAIMS:"]
     for row in verdicts:
         evidence = ""
-        if row["quote"] and row["evidence_doc_title"]:
-            locator = _evidence_locator(row)
-            evidence = (
-                f' — evidence: "{row["quote"]}" (source {row["evidence_doc_title"]!r}{locator})'
-            )
+        # A quote is shown only with the source chunk it was verified in.
+        if row["quote"] and row["evidence_doc_id"]:
+            source = f"{_title(row['evidence_doc_title'])}{_evidence_locator(row)}"
+            evidence = f" — evidence: {_quoted(row['quote'])} (source {source})"
         disavowed = " (disavowed by the report)" if row.get("stance") == "disavowed" else ""
         lines.append(
-            f'- [{row["verdict"]}]{disavowed} "{row["text"]}" — {row["rationale"]}{evidence}'
+            f"- [{row['verdict']}]{disavowed} {_quoted(row['text'])}"
+            f" — {_quoted(row['rationale'])}{evidence}"
         )
     lines += ["", "SOURCES:"]
     for source in sources:
@@ -134,9 +174,8 @@ def build_context(conn: sqlite3.Connection, run_id: str) -> str:
                 f"tier {source['tier']}{_TIER_GLOSS.get(source['tier'], '')}, "
                 f"credibility {source['total']}/100"
             )
-        lines.append(
-            f"- {source['doc_title']!r}: {standing}{_video_note(source)}{_partial_note(source)}"
-        )
+        title = _title(source["doc_title"])
+        lines.append(f"- {title}: {standing}{_video_note(source)}{_partial_note(source)}")
     return "\n".join(lines)
 
 
@@ -209,13 +248,11 @@ def answer(
 ) -> str:
     if mode not in MODE_INSTRUCTIONS:
         raise ValueError(f"Unknown chat mode {mode!r}; expected one of {CHAT_MODES}")
-    context = build_context(conn, run_id)
+    analysis = TextDocument(
+        title=ANALYSIS_TITLE, context=ANALYSIS_CONTEXT, data=build_context(conn, run_id)
+    )
     system_blocks = [
-        {
-            "type": "text",
-            "text": f"{CHAT_SYSTEM}\n\n{context}",
-            "cache_control": {"type": "ephemeral"},
-        },
+        {"type": "text", "text": CHAT_SYSTEM},
         {"type": "text", "text": MODE_INSTRUCTIONS[mode]},
     ]
     # Trim history to the most recent turns (guarding the -0 slice, which would
@@ -225,7 +262,20 @@ def answer(
     turns = history[-n:] if n > 0 else []
     while turns and turns[0].get("role") != "user":
         turns = turns[1:]
-    messages = [*turns, {"role": "user", "content": question}]
+    first, *later = [*turns, {"role": "user", "content": question}]
+    # The analysis rides on whichever user turn comes first, ahead of that
+    # turn's own text, so the prefix (system prompt + analysis) is the same
+    # for every turn of a conversation however the history window slides. The
+    # breakpoint is set here, on this one block: llm's document block is also
+    # what the verdict and metadata fingerprints are computed over.
+    document, *text = render_user_content(first["content"], documents=[analysis])
+    messages = [
+        {
+            "role": "user",
+            "content": [{**document, "cache_control": {"type": "ephemeral"}}, *text],
+        },
+        *later,
+    ]
     return llm.chat(
         model=settings.chat_model,
         system_blocks=system_blocks,

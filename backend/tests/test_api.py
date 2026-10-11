@@ -1052,8 +1052,10 @@ def test_chat_answers_a_done_run(tmp_path, monkeypatch):
         )
     assert resp.status_code == 200
     assert resp.json() == {"answer": "One claim is unverifiable.", "mode": "evidence"}
-    # The endpoint actually built the context and called chat with the cache block.
-    assert fake.chat_calls[0]["system_blocks"][0]["cache_control"] == {"type": "ephemeral"}
+    # The endpoint actually built the analysis and sent it as the cached document.
+    document = fake.chat_calls[0]["messages"][0]["content"][0]
+    assert document["type"] == "document" and "CLAIMS:" in document["source"]["data"]
+    assert document.get("cache_control") == {"type": "ephemeral"}
 
 
 def test_report_sources_list_every_source_document_with_type_and_scorability(tmp_path):

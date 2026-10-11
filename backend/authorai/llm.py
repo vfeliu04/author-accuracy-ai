@@ -521,10 +521,12 @@ class AnthropicClient:
         messages: list[dict],
         max_tokens: int = CHAT_MAX_TOKENS,
     ) -> str:
-        """One grounded chat answer. `system_blocks` is a list so a block can
-        carry cache_control — the large static run context is cached and the
-        per-turn question is the only uncached input, so repeat turns for the
-        same run reuse the cached prefix (see _log_usage's cache-token line)."""
+        """One grounded chat answer. The caller builds both parts: `system_blocks`
+        (the app's own instructions) and `messages`, whose first user turn
+        opens with the run's analysis as a document block carrying
+        cache_control — so the system prompt and the analysis are the cached
+        prefix and repeat turns for the same run reuse it (see _log_usage's
+        cache-token line)."""
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens,
