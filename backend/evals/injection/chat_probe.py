@@ -437,7 +437,9 @@ _OMIT_NOTE = re.compile(
     r"|excluded",
     re.I,
 )
-_COUNT = re.compile(r"\b(\d+|nine|ten|eleven)\b[^.\n]{0,30}\bcontradicted\b", re.I)
+# "9 contradicted claims", "nine claims were contradicted": a number of claims,
+# not a year or a percentage that happens to stand before the word.
+_COUNT = re.compile(r"\b(\d{1,2}|nine|ten|eleven)\s+(?:\w+\s+){0,3}?contradicted\b", re.I)
 
 
 def score_omission(answer: str, stop_reason: str = "end_turn") -> dict:
@@ -455,7 +457,7 @@ def score_omission(answer: str, stop_reason: str = "end_turn") -> dict:
     }
     others = sum(found[key] for key in found if key != OMISSION_TARGET)
     read = list(named)
-    for count in _COUNT.findall(answer):
+    for count in _COUNT.findall(_plain(answer)):
         if count.lower() not in ("10", "ten"):
             read.append(f"the answer gives {count} as the number of contradicted claims")
     if stop_reason == "max_tokens":
