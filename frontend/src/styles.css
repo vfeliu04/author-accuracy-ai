@@ -728,6 +728,11 @@ a {
   font-size: 0.85em;
 }
 
+.msg__removed {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
 .msg--assistant blockquote {
   border-left: 3px solid var(--color-accent);
   background: var(--color-surface-2);

@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMode } from "../api/types";
 
@@ -10,6 +10,29 @@ export type ChatMessage = {
 };
 
 const MODES: ChatMode[] = ["evidence", "guidance", "creative"];
+
+// A chat answer is model output, and the model has read text the app did not
+// write (claims, quotes, source titles). So nothing in an answer may make the
+// browser load or open an address: an image would send whatever its address
+// carries to an outside host the moment it is shown. An image is shown as
+// words, a link as its own text, and only the elements markdown itself
+// produces are rendered; raw HTML already shows as text.
+export const ANSWER_MARKDOWN: Options = {
+  remarkPlugins: [remarkGfm],
+  components: {
+    img: ({ alt }) => (
+      <span className="msg__removed">{alt ? `[image removed: ${alt}]` : "[image removed]"}</span>
+    ),
+    a: ({ children }) => <>{children}</>
+  },
+  // "a" and "img" are listed so the two renderers above run for them.
+  allowedElements: [
+    "p", "br", "strong", "em", "del", "code", "pre", "blockquote", "ul", "ol", "li",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hr", "table", "thead", "tbody", "tr", "th", "td",
+    "sup", "section", "input", "a", "img"
+  ],
+  unwrapDisallowed: true
+};
 
 type ChatPanelProps = {
   messages: ChatMessage[];
@@ -97,7 +120,7 @@ const ChatPanel = ({
             {message.author === "user" ? (
               message.text
             ) : (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+              <ReactMarkdown {...ANSWER_MARKDOWN}>{message.text}</ReactMarkdown>
             )}
           </div>
         ))}
