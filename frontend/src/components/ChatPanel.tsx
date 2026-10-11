@@ -19,10 +19,19 @@ const MODES: ChatMode[] = ["evidence", "guidance", "creative"];
 const HISTORY_TURNS_SENT = 24;
 const HISTORY_TURN_MAX_CHARS = 16_000;
 
+// slice() counts UTF-16 units, so a cut can fall inside an emoji and leave half
+// of it; the server cannot read half a character, and every later question
+// would fail until that turn left the history.
+function cutTurn(text: string): string {
+  const head = text.slice(0, HISTORY_TURN_MAX_CHARS);
+  const last = head.charCodeAt(head.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head;
+}
+
 export function historyTurns(messages: ChatMessage[]): ChatTurn[] {
   return messages.slice(-HISTORY_TURNS_SENT).map((message) => ({
     role: message.author,
-    content: message.text.slice(0, HISTORY_TURN_MAX_CHARS)
+    content: cutTurn(message.text)
   }));
 }
 
@@ -38,7 +47,10 @@ export const ANSWER_MARKDOWN: Options = {
     img: ({ alt }) => (
       <span className="msg__removed">{alt ? `[image removed: ${alt}]` : "[image removed]"}</span>
     ),
-    a: ({ children }) => <>{children}</>
+    // A footnote's "back to the text" arrow is a link with nowhere to go once
+    // links are text: leave it out rather than show a stray mark.
+    a: ({ children, ...rest }) =>
+      "data-footnote-backref" in rest ? null : <>{children}</>
   },
   // "a" and "img" are listed so the two renderers above run for them.
   allowedElements: [

