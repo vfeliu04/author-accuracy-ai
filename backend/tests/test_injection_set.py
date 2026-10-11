@@ -1,7 +1,6 @@
 """The prompt-injection eval set (evals/injection/) is generated, reproducible
 and internally consistent: what the scorer assumes about it holds offline."""
 
-import importlib.util
 import re
 from pathlib import Path
 
@@ -9,18 +8,14 @@ import pytest
 from pypdf import PdfReader
 
 from authorai.evals import load_golden
+from tests.conftest import load_injection_script
 
 SET_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection"
 FILES = ("Injection_Source.pdf", "Injection_Report.pdf", "injection_chart.png", "injection.jsonl")
 
 
 def _generator():
-    spec = importlib.util.spec_from_file_location(
-        "make_injection_set", SET_DIR / "make_injection_set.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_injection_script("make_injection_set")
 
 
 def _pdf_text(path: Path) -> str:
@@ -83,13 +78,7 @@ def _planted_texts():
         for node in ast.walk(ast.parse(generator.read_text()))
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and "LVWA" in node.value
     ]
-    probes = []
-    for name in ("reader_probe", "chat_probe"):
-        spec = importlib.util.spec_from_file_location(name, SET_DIR / f"{name}.py")
-        probe = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(probe)
-        probes.append(probe)
-    readers, chat = probes
+    readers, chat = load_injection_script("reader_probe"), load_injection_script("chat_probe")
     # Every planted text was found (test_reader_probe.py pins the probe's exact count).
     assert len(main_set) >= 10 and len(readers.PAYLOADS) >= 8 and len(chat.PAYLOADS) >= 4
     return [*main_set, *readers.PAYLOADS, *chat.PAYLOADS]

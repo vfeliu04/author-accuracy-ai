@@ -4,7 +4,6 @@ record, so a number the probe reports is a fact about the reader and not about
 the scorer. Many of the planted readings came from a review that set out to
 make the first version of these rules lie."""
 
-import importlib.util
 import io
 import json
 import re
@@ -13,15 +12,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.conftest import load_injection_script
+
 SET_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection"
 
 
 @pytest.fixture(scope="module")
 def probe():
-    spec = importlib.util.spec_from_file_location("reader_probe", SET_DIR / "reader_probe.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_injection_script("reader_probe")
 
 
 # What claude-haiku-4-5 actually wrote for the main set's chart (stored chunk

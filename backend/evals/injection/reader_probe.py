@@ -618,8 +618,9 @@ class Meter:
     the API answered is not counted (it is rare, and visible as the error that
     ends the run)."""
 
-    def __init__(self, budget: float):
+    def __init__(self, budget: float, spent_before: float = 0.0):
         self.budget = budget
+        self.spent_before = spent_before  # by earlier runs that share the budget
         self.spend = {
             "input": 0,
             "output": 0,
@@ -636,10 +637,10 @@ class Meter:
                 f"a call to {self.spend['unpriced']} was answered and has no price on record:"
                 " its cost is unknown, so no further call started"
             )
-        if self.spend["dollars"] >= self.budget:
+        spent = self.spent_before + self.spend["dollars"]
+        if spent >= self.budget:
             raise BudgetReached(
-                f"${self.spend['dollars']:.3f} spent of a ${self.budget:.2f} budget:"
-                " no further call started"
+                f"${spent:.3f} spent of a ${self.budget:.2f} budget: no further call started"
             )
 
     def add(self, model: str, usage) -> None:

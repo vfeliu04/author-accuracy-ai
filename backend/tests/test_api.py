@@ -1004,6 +1004,15 @@ def test_report_before_scoring_returns_null_scores(tmp_path):
     assert report["claims"] == []
 
 
+def _done_run(settings) -> str:
+    """A scored run in the state the chat needs."""
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    dbmod.set_run_status(conn, run_id, "DONE")
+    conn.close()
+    return run_id
+
+
 def test_chat_unknown_run_404(client):
     assert (
         client.post("/api/runs/nope/chat", headers=AUTH, json={"question": "hi"}).status_code == 404
@@ -1023,10 +1032,7 @@ def test_chat_rejects_an_oversized_question(tmp_path):
     """A chat body must not be a memory-amplification vector — an overlong
     question is a 422, not forwarded whole to the paid model."""
     settings = _settings(tmp_path)
-    run_id = _seed_scored_run(settings)
-    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
-    dbmod.set_run_status(conn, run_id, "DONE")
-    conn.close()
+    run_id = _done_run(settings)
     with TestClient(create_app(settings, worker=_NoopWorker())) as client:
         resp = client.post(f"/api/runs/{run_id}/chat", headers=AUTH, json={"question": "x" * 5000})
     assert resp.status_code == 422
@@ -1037,10 +1043,7 @@ def test_chat_answers_a_done_run(tmp_path, monkeypatch):
     from tests.conftest import FakeLLM
 
     settings = _settings(tmp_path)
-    run_id = _seed_scored_run(settings)
-    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
-    dbmod.set_run_status(conn, run_id, "DONE")
-    conn.close()
+    run_id = _done_run(settings)
 
     fake = FakeLLM(chat_answer="One claim is unverifiable.")
     monkeypatch.setattr(apimod, "AnthropicClient", lambda key: fake)
@@ -1067,10 +1070,7 @@ def test_chat_takes_its_own_longest_answer_back_as_history(tmp_path, monkeypatch
     from tests.conftest import FakeLLM
 
     settings = _settings(tmp_path)
-    run_id = _seed_scored_run(settings)
-    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
-    dbmod.set_run_status(conn, run_id, "DONE")
-    conn.close()
+    run_id = _done_run(settings)
     monkeypatch.setattr(apimod, "AnthropicClient", lambda key: FakeLLM(chat_answer="ok"))
 
     def ask(history):
@@ -1085,6 +1085,44 @@ def test_chat_takes_its_own_longest_answer_back_as_history(tmp_path, monkeypatch
         too_long = ask([{"role": "user", "content": "x" * 16_001}])
     assert long_answer.status_code == 200
     assert too_long.status_code == 422
+
+
+def test_the_page_never_sends_a_history_the_api_refuses():
+    """The page's history rules (ChatPanel.tsx) and the API's bounds are one
+    contract written in two languages. If either side moves alone, the next
+    question after a long conversation fails again, with every other test
+    green: so the page's two numbers are read from its source and held against
+    the request model."""
+    import re
+
+    from pydantic import ValidationError
+
+    from authorai.api import ChatRequest, ChatTurn
+
+    panel = Path(__file__).resolve().parents[2] / "frontend/src/components/ChatPanel.tsx"
+    source = panel.read_text()
+    turns_sent = int(re.search(r"HISTORY_TURNS_SENT = (\d+);", source).group(1))
+    chars_kept = int(
+        re.search(r"HISTORY_TURN_MAX_CHARS = ([\d_]+);", source).group(1).replace("_", "")
+    )
+
+    def bound(model, field):
+        return next(
+            m.max_length for m in model.model_fields[field].metadata if hasattr(m, "max_length")
+        )
+
+    assert (turns_sent, chars_kept) == (24, 16_000)  # what the page's own test pins
+    assert turns_sent % 2 == 0 and turns_sent <= bound(ChatRequest, "history")
+    assert chars_kept <= bound(ChatTurn, "content")
+    # The page's largest body is taken; one turn more than the API allows is not.
+    longest = [
+        {"role": "user" if n % 2 == 0 else "assistant", "content": "x" * chars_kept}
+        for n in range(turns_sent)
+    ]
+    assert len(ChatRequest(question="q", history=longest).history) == turns_sent
+    too_many = [{"role": "user", "content": "x"}] * (bound(ChatRequest, "history") + 1)
+    with pytest.raises(ValidationError):
+        ChatRequest(question="q", history=too_many)
 
 
 def test_report_sources_list_every_source_document_with_type_and_scorability(tmp_path):

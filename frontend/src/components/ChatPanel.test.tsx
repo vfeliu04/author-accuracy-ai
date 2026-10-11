@@ -9,12 +9,8 @@ const ADDRESS_ATTRIBUTES =
 const ADDRESS_ELEMENTS =
   "img,a,video,audio,source,picture,iframe,object,embed,link,form,area,base";
 
-function renderAnswer(text: string) {
-  const messages: ChatMessage[] = [
-    { id: 1, author: "user", text: "What does the analysis say?" },
-    { id: 2, author: "assistant", text }
-  ];
-  const view = render(
+function renderChat(messages: ChatMessage[]) {
+  return render(
     <ChatPanel
       messages={messages}
       onSendMessage={() => {}}
@@ -22,6 +18,13 @@ function renderAnswer(text: string) {
       onModeChange={() => {}}
     />
   );
+}
+
+function renderAnswer(text: string) {
+  const view = renderChat([
+    { id: 1, author: "user", text: "What does the analysis say?" },
+    { id: 2, author: "assistant", text }
+  ]);
   const answer = view.container.querySelector(".msg--assistant") as HTMLElement;
   return { ...view, answer };
 }
@@ -156,17 +159,9 @@ describe("ChatPanel answers", () => {
   });
 
   it("show the user's own message as plain text", () => {
-    const messages: ChatMessage[] = [
+    const { container } = renderChat([
       { id: 1, author: "user", text: "![x](https://outside.example/b.png) **not bold**" }
-    ];
-    const { container } = render(
-      <ChatPanel
-        messages={messages}
-        onSendMessage={() => {}}
-        mode="evidence"
-        onModeChange={() => {}}
-      />
-    );
+    ]);
     const message = container.querySelector(".msg--user") as HTMLElement;
     expect(message).toHaveTextContent("![x](https://outside.example/b.png) **not bold**");
     expect(message.querySelector("img, a, strong")).toBeNull();

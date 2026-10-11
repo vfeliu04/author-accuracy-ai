@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import threading
 from collections.abc import Callable
@@ -83,6 +84,17 @@ def jobs_log(caplog):
     from authorai import jobs as jobsmod
 
     yield from _attached_to(jobsmod.logger, caplog)
+
+
+def load_injection_script(name: str):
+    """A script of evals/injection (not a package: each is run by its path),
+    loaded as a module for the tests of its rules."""
+    script = Path(__file__).resolve().parents[1] / "evals" / "injection" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture()

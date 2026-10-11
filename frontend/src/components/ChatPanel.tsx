@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, memo, useEffect, useRef, useState } from "react";
 import ReactMarkdown, { type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMode, ChatTurn } from "../api/types";
@@ -43,23 +43,29 @@ export function historyTurns(messages: ChatMessage[]): ChatTurn[] {
 // produces are rendered; raw HTML already shows as text.
 export const ANSWER_MARKDOWN: Options = {
   remarkPlugins: [remarkGfm],
+  // A footnote's "back to the text" arrow is a link with nowhere to go once
+  // links are text, so it is not generated (an empty string would be ignored).
+  remarkRehypeOptions: { footnoteBackContent: () => [] },
   components: {
     img: ({ alt }) => (
       <span className="msg__removed">{alt ? `[image removed: ${alt}]` : "[image removed]"}</span>
-    ),
-    // A footnote's "back to the text" arrow is a link with nowhere to go once
-    // links are text: leave it out rather than show a stray mark.
-    a: ({ children, ...rest }) =>
-      "data-footnote-backref" in rest ? null : <>{children}</>
+    )
   },
-  // "a" and "img" are listed so the two renderers above run for them.
+  // No "a": an element that is not listed is replaced by what it contains, so
+  // a link becomes its own text. "img" is listed so the renderer above runs.
   allowedElements: [
     "p", "br", "strong", "em", "del", "code", "pre", "blockquote", "ul", "ol", "li",
     "h1", "h2", "h3", "h4", "h5", "h6", "hr", "table", "thead", "tbody", "tr", "th", "td",
-    "sup", "section", "input", "a", "img"
+    "sup", "section", "input", "img"
   ],
   unwrapDisallowed: true
 };
+
+// react-markdown parses its text on every render, and the panel renders on every
+// keystroke in the question box: an answer is parsed again only when it changes.
+const Answer = memo(({ text }: { text: string }) => (
+  <ReactMarkdown {...ANSWER_MARKDOWN}>{text}</ReactMarkdown>
+));
 
 type ChatPanelProps = {
   messages: ChatMessage[];
@@ -147,7 +153,7 @@ const ChatPanel = ({
             {message.author === "user" ? (
               message.text
             ) : (
-              <ReactMarkdown {...ANSWER_MARKDOWN}>{message.text}</ReactMarkdown>
+              <Answer text={message.text} />
             )}
           </div>
         ))}
