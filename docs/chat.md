@@ -44,7 +44,7 @@ The cache breakpoint sits on block 1, and the mode instruction lives **outside**
 
 ## History: client-held, server stores nothing
 
-There is no chat persistence and no session id. The client sends prior turns in the request (`history`, capped at 50 turns of ≤ 8,000 chars each by the request model); the server:
+There is no chat persistence and no session id. The client sends prior turns in the request (`history`, capped at 50 turns of ≤ 16,000 chars each by the request model — a turn is a question or one of the app's own answers sent back, and a full-length answer can pass 8,000 characters; the page sends the most recent 24 turns, each cut to that limit, so a long conversation never fails on the cap); the server:
 
 1. keeps only the most recent `chat_history_turns` messages (default 12; a value ≤ 0 sends no history — the code guards the `[-0:]` slice, which would otherwise keep everything);
 2. drops any leading **assistant** turns left after trimming — the Anthropic API rejects a conversation that does not start with a user turn;

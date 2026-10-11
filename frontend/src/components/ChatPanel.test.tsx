@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import ReactMarkdown from "react-markdown";
 import { describe, expect, it } from "vitest";
-import ChatPanel, { ANSWER_MARKDOWN, type ChatMessage } from "./ChatPanel";
+import ChatPanel, { ANSWER_MARKDOWN, historyTurns, type ChatMessage } from "./ChatPanel";
 
 // Every attribute through which an element can load, open or post to an address.
 const ADDRESS_ATTRIBUTES =
@@ -53,6 +53,37 @@ const HOSTILE: Array<[string, string]> = [
     '<video poster="https://outside.example/p.png"><source srcset="https://outside.example/v"></video>'
   ]
 ];
+
+describe("historyTurns", () => {
+  const conversation = (exchanges: number): ChatMessage[] =>
+    Array.from({ length: exchanges * 2 }, (_, index) => ({
+      id: index,
+      author: index % 2 === 0 ? "user" : "assistant",
+      text: `message ${index}`
+    }));
+
+  it("sends a short conversation whole, in order", () => {
+    expect(historyTurns(conversation(2))).toEqual([
+      { role: "user", content: "message 0" },
+      { role: "assistant", content: "message 1" },
+      { role: "user", content: "message 2" },
+      { role: "assistant", content: "message 3" }
+    ]);
+  });
+
+  it("sends only the most recent turns of a long one, starting on a question", () => {
+    // The API refuses more than 50 history turns: 30 exchanges are 60.
+    const turns = historyTurns(conversation(30));
+    expect(turns).toHaveLength(24);
+    expect(turns[0]).toEqual({ role: "user", content: "message 36" });
+    expect(turns[23]).toEqual({ role: "assistant", content: "message 59" });
+  });
+
+  it("cuts a turn longer than the API accepts", () => {
+    const long: ChatMessage[] = [{ id: 1, author: "assistant", text: "x".repeat(20_000) }];
+    expect(historyTurns(long)[0].content).toHaveLength(16_000);
+  });
+});
 
 describe("ChatPanel answers", () => {
   it.each(HOSTILE)("render %s without any element that carries an address", (_name, text) => {

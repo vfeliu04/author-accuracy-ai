@@ -331,7 +331,7 @@ Grounded Q&A over a completed run's analysis. 404 for an unknown run; **409** un
 | Field | Rules |
 |---|---|
 | `question` | Required, 1–4,000 chars |
-| `history` | Optional, ≤ 50 turns of `{"role": "user"|"assistant", "content": <1–8,000 chars>}` — client-held; the server stores nothing |
+| `history` | Optional, ≤ 50 turns of `{"role": "user"|"assistant", "content": <1–16,000 chars>}` — client-held; the server stores nothing and reads only the most recent turns (`AUTHORAI_CHAT_HISTORY_TURNS`), so a client can send just the tail of a conversation |
 | `mode` | `evidence` (default) \| `guidance` \| `creative` |
 
 Response: `{"answer": "<text>", "mode": "<mode>"}`. Details — context construction, prompt caching, history trimming — in [chat.md](chat.md).

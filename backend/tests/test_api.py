@@ -1058,6 +1058,35 @@ def test_chat_answers_a_done_run(tmp_path, monkeypatch):
     assert document.get("cache_control") == {"type": "ephemeral"}
 
 
+def test_chat_takes_its_own_longest_answer_back_as_history(tmp_path, monkeypatch):
+    """History is the page sending the app's own answers back. An answer of the
+    full token budget can run past 8,000 characters, and the next question must
+    not be refused because of it; the bound that remains still refuses a body
+    built to be expensive."""
+    from authorai import api as apimod
+    from tests.conftest import FakeLLM
+
+    settings = _settings(tmp_path)
+    run_id = _seed_scored_run(settings)
+    conn = dbmod.connect(settings.db_path, settings.embedding_dim)
+    dbmod.set_run_status(conn, run_id, "DONE")
+    conn.close()
+    monkeypatch.setattr(apimod, "AnthropicClient", lambda key: FakeLLM(chat_answer="ok"))
+
+    def ask(history):
+        return client.post(
+            f"/api/runs/{run_id}/chat", headers=AUTH, json={"question": "and?", "history": history}
+        )
+
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        long_answer = ask(
+            [{"role": "user", "content": "first"}, {"role": "assistant", "content": "x" * 16_000}]
+        )
+        too_long = ask([{"role": "user", "content": "x" * 16_001}])
+    assert long_answer.status_code == 200
+    assert too_long.status_code == 422
+
+
 def test_report_sources_list_every_source_document_with_type_and_scorability(tmp_path):
     settings = _settings(tmp_path)
     run_id = _seed_scored_run(settings)

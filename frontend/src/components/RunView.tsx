@@ -5,7 +5,7 @@ import type { ChatMode } from "../api/types";
 import { humanizeError } from "../lib/errors";
 import AnalysisPanel from "./AnalysisPanel";
 import AppShell from "./AppShell";
-import ChatPanel, { type ChatMessage } from "./ChatPanel";
+import ChatPanel, { historyTurns, type ChatMessage } from "./ChatPanel";
 import FocusClaims from "./FocusClaims";
 import FocusCredibility from "./FocusCredibility";
 import FocusReport from "./FocusReport";
@@ -51,10 +51,7 @@ export default function RunView() {
 
   const handleSend = (text: string) => {
     setChatError(null);
-    const history = messages.map((message) => ({
-      role: message.author,
-      content: message.text
-    }));
+    const history = historyTurns(messages);
     setMessages((prev) => [...prev, { id: Date.now(), author: "user", text }]);
     chat.mutate(
       { question: text, history, mode },

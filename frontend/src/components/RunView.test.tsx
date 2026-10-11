@@ -233,6 +233,31 @@ describe("RunView", () => {
     ).not.toBeInTheDocument();
   }, 10000);
 
+  it("sends a long answer back as history cut to what the API accepts", async () => {
+    vi.spyOn(v2, "getRun").mockResolvedValue({
+      ...runningDetail,
+      run: { ...runningDetail.run, status: "DONE" }
+    });
+    vi.spyOn(v2, "getReport").mockResolvedValue(doneReport);
+    const postChat = vi
+      .spyOn(v2, "postChat")
+      .mockResolvedValue({ answer: "y".repeat(20_000), mode: "evidence" });
+    renderAt("r");
+    const input = await screen.findByPlaceholderText("Ask about this verification…");
+    fireEvent.change(input, { target: { value: "first question" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(document.querySelectorAll(".msg--assistant")).toHaveLength(1));
+    fireEvent.change(input, { target: { value: "second question" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(postChat).toHaveBeenCalledTimes(2));
+    const sent = postChat.mock.calls[1][1];
+    expect(sent.question).toBe("second question");
+    expect(sent.history.map((turn) => [turn.role, turn.content.length])).toEqual([
+      ["user", "first question".length],
+      ["assistant", 16_000]
+    ]);
+  });
+
   it("keeps chat errors out of the message history", async () => {
     vi.spyOn(v2, "getRun").mockResolvedValue({
       ...runningDetail,

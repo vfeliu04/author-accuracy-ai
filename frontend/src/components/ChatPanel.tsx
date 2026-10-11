@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown, { type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMode } from "../api/types";
+import type { ChatMode, ChatTurn } from "../api/types";
 
 export type ChatMessage = {
   id: number;
@@ -10,6 +10,21 @@ export type ChatMessage = {
 };
 
 const MODES: ChatMode[] = ["evidence", "guidance", "creative"];
+
+// What the API takes as history: at most 50 turns of at most 16,000 characters
+// each (ChatRequest and ChatTurn in the backend's api.py), of which the server
+// reads only the most recent. So the page sends the tail of the conversation,
+// an even number so it starts on a question, each turn cut to the limit: a
+// long conversation or a long answer must not make the next question fail.
+const HISTORY_TURNS_SENT = 24;
+const HISTORY_TURN_MAX_CHARS = 16_000;
+
+export function historyTurns(messages: ChatMessage[]): ChatTurn[] {
+  return messages.slice(-HISTORY_TURNS_SENT).map((message) => ({
+    role: message.author,
+    content: message.text.slice(0, HISTORY_TURN_MAX_CHARS)
+  }));
+}
 
 // A chat answer is model output, and the model has read text the app did not
 // write (claims, quotes, source titles). So nothing in an answer may make the
