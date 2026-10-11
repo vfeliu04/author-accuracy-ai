@@ -45,7 +45,7 @@ Each step is recorded in the job's `progress` JSON (`{step, label, status, ts}`,
 | `scoring.py` | Stance-aware accuracy (pure code), validity rubric, `score_run` orchestration |
 | `jobs.py` | Jobs worker: one thread, resumable steps, startup recovery |
 | `api.py` | Authenticated HTTP API + pure-ASGI auth/size middleware |
-| `chat.py` | Grounded chat over a DONE run (prompt-cached context) |
+| `chat.py` | Grounded chat over a DONE run: the analysis as one cached document in the first user turn, every outside string quoted |
 | `llm.py` | The one Anthropic client — all LLM traffic, sync + batch + vision + chat |
 | `evals.py` | Golden-set scorers (extraction recall/precision, verdict accuracy, stance) |
 | `config.py` | Pydantic settings from env / `backend/.env` (prefix `AUTHORAI_`) |
@@ -232,7 +232,7 @@ All Anthropic traffic goes through one client. It refuses to construct without `
 | `parse()` | `messages.parse()` structured outputs; `max_tokens=16000` (Opus thinking shares the budget; 16k is the ceiling under the SDK's non-streaming timeout); optional image blocks, a lead text block and plain-text document blocks (`user_content`: images, then the lead when one is given, then documents, then the text) |
 | `parse_batch()` | Batch API at `max_tokens=32000`; **all-or-nothing** — a failed item gets one logged sync retry, and anything still failing raises with nothing stored (partial results would silently change score denominators). The batch id is logged at creation so an interrupt never orphans a paid batch |
 | `describe_image()` | Figure captions (vision), and an uploaded image's transcription; an optional system prompt (the image readers' policy), sent only when a caller gives one; a reply cut off at `max_tokens` raises |
-| `chat()` | System sent as a list of blocks so the static per-run context carries `cache_control` (prompt caching); thinking disabled |
+| `chat()` | Sends what `chat.answer` built: the system prompt (the app's words only) and the turns, whose first user message opens with the run's analysis as a document block carrying `cache_control` (prompt caching); thinking disabled |
 
 `prompt_fingerprint()` produces the canonical hash of a **prompt contract**: the system prompt, a prompt *rendered* from frozen synthetic inputs (so builder formatting changes move the hash; for the judge, the whole rendered user content, documents included), and the output model's field descriptions (which are prompt text under structured outputs). Claims are stamped with `EXTRACTION_PROMPT_HASH` and verdicts with `VERDICT_PROMPT_HASH:k=N`; the eval commands and `score_run` refuse rows whose stamp differs from the current prompt (stale-guard; `--allow-stale` overrides).
 
@@ -313,7 +313,7 @@ Auth and the request-size cap live in a **pure-ASGI middleware** that runs befor
 | `GET /api/jobs/{id}` | Job by id |
 | `GET /api/runs/{id}/report` | Full report payload (claims + verdicts + evidence sources, scores, per-source credibility) read in one snapshot transaction |
 | `GET /api/runs/{id}/documents/{doc_id}/file` | Stream a run's stored file — a PDF, an image, or the JSON snapshot of a web page or video; scoped by `(run_id, doc_id)`, path resolve-checked inside `uploads_dir` |
-| `POST /api/runs/{id}/chat` | Grounded Q&A over a DONE run; the static per-run context is a `cache_control` system block, so repeat turns hit the prompt cache |
+| `POST /api/runs/{id}/chat` | Grounded Q&A over a DONE run; the run's analysis is a `cache_control` document block in the first user turn, so repeat turns hit the prompt cache (see [chat.md](chat.md)) |
 
 ## Frontend (`frontend/`)
 
@@ -322,7 +322,7 @@ React 18 + TypeScript + Vite 5, `react-router-dom` 6, **TanStack Query v5** as t
 | Route | Component | Purpose |
 | --- | --- | --- |
 | `/` | `HomePage` | Gallery of runs (`RunCard`, status filters); **New verification** opens `UploadDialog` — report PDF, source PDFs, and links in one request — then navigates to the run |
-| `/runs/:runId` | `RunView` | Three panels: `SourcesPanel` · a middle panel that shows the progress feed (`ProgressFeed`, with the chat input disabled) while the run is in progress, a failure card with **Retry run** and the feed when it FAILED, and `ChatPanel` once it is DONE · `AnalysisPanel` rings (accuracy / coverage / credibility / validity — **no composite overall**). On a DONE run, `?focus=` `claims`, `report`, `credibility`, or `validity` replaces them with a full-width focus mode (`FocusClaims`, `FocusReport`, `FocusCredibility`, `FocusValidity`) |
+| `/runs/:runId` | `RunView` | Three panels: `SourcesPanel` · a middle panel that shows the progress feed (`ProgressFeed`, with the chat input disabled) while the run is in progress, a failure card with **Retry run** and the feed when it FAILED, and `ChatPanel` once it is DONE (answers are markdown rendered with no image and no link element, and the page sends only the tail of a long conversation as history: see [chat.md](chat.md)) · `AnalysisPanel` rings (accuracy / coverage / credibility / validity — **no composite overall**). On a DONE run, `?focus=` `claims`, `report`, `credibility`, or `validity` replaces them with a full-width focus mode (`FocusClaims`, `FocusReport`, `FocusCredibility`, `FocusValidity`) |
 | `/compare` | `ComparePage` | Two runs' scores + stats with per-metric deltas |
 
 Pre-redesign routes redirect: `/runs/:runId/workspace` → `?focus=claims`, `/runs/:runId/report` → `?focus=report`, `/runs/:runId/sources/:sourceId` → `?focus=credibility&source=…`, and `/runs` and `/dashboard` → `/`.

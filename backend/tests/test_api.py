@@ -1059,10 +1059,10 @@ def test_chat_answers_a_done_run(tmp_path, monkeypatch):
 
 
 def test_chat_takes_its_own_longest_answer_back_as_history(tmp_path, monkeypatch):
-    """History is the page sending the app's own answers back. An answer of the
-    full token budget can run past 8,000 characters, and the next question must
-    not be refused because of it; the bound that remains still refuses a body
-    built to be expensive."""
+    """History is the page sending the app's own answers back. With the token
+    budget raised (`AUTHORAI_CHAT_MAX_TOKENS`) an answer can run past 8,000
+    characters, and the next question must not be refused because of it; the
+    bound that remains still refuses a body built to be expensive."""
     from authorai import api as apimod
     from tests.conftest import FakeLLM
 

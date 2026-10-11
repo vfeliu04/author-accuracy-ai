@@ -334,7 +334,7 @@ Grounded Q&A over a completed run's analysis. 404 for an unknown run; **409** un
 | `history` | Optional, ≤ 50 turns of `{"role": "user"|"assistant", "content": <1–16,000 chars>}` — client-held; the server stores nothing and reads only the most recent turns (`AUTHORAI_CHAT_HISTORY_TURNS`), so a client can send just the tail of a conversation |
 | `mode` | `evidence` (default) \| `guidance` \| `creative` |
 
-Response: `{"answer": "<text>", "mode": "<mode>"}`. Details — context construction, prompt caching, history trimming — in [chat.md](chat.md).
+Response: `{"answer": "<text>", "mode": "<mode>"}`. `answer` is markdown written by a model that has read the report's and the sources' own text: render it as untrusted text, without loading images or following links from it (the app's own page shows an image as words and a link as its text). Details — context construction, prompt caching, history trimming, rendering — in [chat.md](chat.md).
 
 ## Health and docs
 

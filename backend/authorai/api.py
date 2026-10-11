@@ -426,9 +426,10 @@ def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) ->
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
     # A turn of history is a question or one of the app's own answers sent
-    # back. An answer of the default token budget can run past 8,000
-    # characters, so the bound sits well above that: it is there to refuse a
-    # body built to be expensive, not the app's own output.
+    # back. At the default token budget an answer stays under 8,000 characters
+    # (2.1 to 3.3 characters a token over 138 measured answers), so this bound
+    # leaves room for a budget raised to about twice that: it is there to
+    # refuse a body built to be expensive, not the app's own output.
     content: str = Field(min_length=1, max_length=16_000)
 
 
