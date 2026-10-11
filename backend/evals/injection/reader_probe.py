@@ -599,9 +599,12 @@ def score_metadata(case: dict, got: dict) -> dict:
 # --- running -------------------------------------------------------------------
 
 # Dollars per million tokens, input and output (Anthropic's price list as the
-# claude-api reference had it on 2026-10-06). A model missing here stops the
-# run before its first call.
-PRICES = {"claude-haiku-4-5": (1.0, 5.0)}
+# claude-api reference had it: Haiku on 2026-10-06, Sonnet on 2026-10-11). A
+# model missing here stops the run before its first call. Cached input is
+# priced off the input price: written to a five-minute cache at 1.25 times it,
+# read from the cache at a tenth of it.
+PRICES = {"claude-haiku-4-5": (1.0, 5.0), "claude-sonnet-5": (2.0, 10.0)}
+CACHE_WRITE, CACHE_READ = 1.25, 0.1
 
 
 class BudgetReached(RuntimeError):
@@ -609,15 +612,30 @@ class BudgetReached(RuntimeError):
 
 
 class Meter:
-    """Dollars spent, from the token counts of every answered call. A call the
-    SDK rejects after the API answered is not counted (it is rare, and visible
-    as the error that ends the run)."""
+    """Dollars spent, from the token counts of every answered call, cached
+    tokens included (`input_tokens` leaves them out, and a call that reads a
+    large cached prompt is mostly made of them). A call the SDK rejects after
+    the API answered is not counted (it is rare, and visible as the error that
+    ends the run)."""
 
     def __init__(self, budget: float):
         self.budget = budget
-        self.spend = {"input": 0, "output": 0, "dollars": 0.0, "calls": 0}
+        self.spend = {
+            "input": 0,
+            "output": 0,
+            "cache_write": 0,
+            "cache_read": 0,
+            "dollars": 0.0,
+            "calls": 0,
+            "unpriced": [],
+        }
 
     def before_call(self) -> None:
+        if self.spend["unpriced"]:
+            raise BudgetReached(
+                f"a call to {self.spend['unpriced']} was answered and has no price on record:"
+                " its cost is unknown, so no further call started"
+            )
         if self.spend["dollars"] >= self.budget:
             raise BudgetReached(
                 f"${self.spend['dollars']:.3f} spent of a ${self.budget:.2f} budget:"
@@ -625,12 +643,23 @@ class Meter:
             )
 
     def add(self, model: str, usage) -> None:
-        price_in, price_out = PRICES[model]
+        """Never raises: it runs after the call is paid and before its answer
+        is handed back, so an error here would lose the answer."""
+        written = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        read = getattr(usage, "cache_read_input_tokens", 0) or 0
         self.spend["input"] += usage.input_tokens
         self.spend["output"] += usage.output_tokens
+        self.spend["cache_write"] += written
+        self.spend["cache_read"] += read
         self.spend["calls"] += 1
+        if model not in PRICES:
+            if model not in self.spend["unpriced"]:
+                self.spend["unpriced"].append(model)
+            return
+        price_in, price_out = PRICES[model]
         self.spend["dollars"] += (
-            usage.input_tokens * price_in + usage.output_tokens * price_out
+            (usage.input_tokens + written * CACHE_WRITE + read * CACHE_READ) * price_in
+            + usage.output_tokens * price_out
         ) / 1e6
 
 

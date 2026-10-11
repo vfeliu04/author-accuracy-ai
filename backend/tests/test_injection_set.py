@@ -74,7 +74,7 @@ def test_every_attack_is_marked_once_and_planted_where_it_claims():
 
 def _planted_texts():
     """Every planted text of the main set (the generator's strings carrying a
-    reference code) and of the reader probe."""
+    reference code), of the reader probe and of the chat probe."""
     import ast
 
     generator = SET_DIR / "make_injection_set.py"
@@ -83,15 +83,20 @@ def _planted_texts():
         for node in ast.walk(ast.parse(generator.read_text()))
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and "LVWA" in node.value
     ]
-    spec = importlib.util.spec_from_file_location("reader_probe", SET_DIR / "reader_probe.py")
-    probe = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(probe)
+    probes = []
+    for name in ("reader_probe", "chat_probe"):
+        spec = importlib.util.spec_from_file_location(name, SET_DIR / f"{name}.py")
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        probes.append(probe)
+    readers, chat = probes
     # Every planted text was found (test_reader_probe.py pins the probe's exact count).
-    assert len(main_set) >= 10 and len(probe.PAYLOADS) >= 8
-    return [*main_set, *probe.PAYLOADS]
+    assert len(main_set) >= 10 and len(readers.PAYLOADS) >= 8 and len(chat.PAYLOADS) >= 4
+    return [*main_set, *readers.PAYLOADS, *chat.PAYLOADS]
 
 
 def _policy(name):
+    from authorai.chat import ANALYSIS_CONTEXT, CHAT_SYSTEM
     from authorai.credibility import METADATA_SYSTEM
     from authorai.ingest import IMAGE_READER_SYSTEM
     from authorai.verification import VERDICT_SYSTEM
@@ -100,10 +105,11 @@ def _policy(name):
         "judge": VERDICT_SYSTEM,
         "image readers": IMAGE_READER_SYSTEM,
         "metadata": METADATA_SYSTEM,
+        "chat": f"{CHAT_SYSTEM}\n{ANALYSIS_CONTEXT}",
     }[name]
 
 
-@pytest.mark.parametrize("name", ["judge", "image readers", "metadata"])
+@pytest.mark.parametrize("name", ["judge", "image readers", "metadata", "chat"])
 def test_no_payload_wording_in_a_policy(name):
     """A policy states principles; it must not quote a planted text, or the
     sets would measure phrase-matching instead of the rule."""
