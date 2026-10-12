@@ -392,6 +392,22 @@ def test_a_lead_is_its_own_text_block_ahead_of_the_prompt(tmp_path):
     assert [block["type"] for block in content] == ["image", "document", "text"]
 
 
+def test_pictures_come_before_the_claim_that_opens_the_message(tmp_path):
+    """Attached pictures are the first blocks of a request, ahead of the lead
+    that states the claim, so a picture can draw a line that reads like the
+    claim before the real one is met. The independent probe's claimline run
+    measures what the judge does with that; this pins the order it measures."""
+    from authorai.llm import TextDocument, user_content
+
+    image = tmp_path / "fig.png"
+    image.write_bytes(b"\x89PNG fake")
+    content = user_content(
+        "p", [image], [TextDocument("Evidence [1]", "ctx", "one")], lead="CLAIM: stated first"
+    )
+    assert [block["type"] for block in content] == ["image", "text", "document", "text"]
+    assert content[1] == {"type": "text", "text": "CLAIM: stated first"}
+
+
 def test_a_jpeg_figure_reaches_the_judge_labelled_as_jpeg(tmp_path):
     """An uploaded photo's bounded copy is stored as JPEG; sent as image/png
     the API would refuse it (or read it wrong)."""

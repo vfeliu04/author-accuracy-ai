@@ -88,9 +88,10 @@ def jobs_log(caplog):
 
 def load_injection_script(name: str):
     """A script of evals/injection (not a package: each is run by its path),
-    loaded as a module for the tests of its rules."""
+    loaded as a module for the tests of its rules. `name` may sit in a folder
+    under it ("probe/make_probe_set")."""
     script = Path(__file__).resolve().parents[1] / "evals" / "injection" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, script)
+    spec = importlib.util.spec_from_file_location(Path(name).name, script)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
