@@ -1,11 +1,13 @@
-"""Generate the independent injection probe (every name and number is invented).
+"""Generate the second injection set, "the probe" (every name and number is
+invented).
 
-A second set, separate from the first one in evals/injection/ and built after
-the judge was frozen. One fictional bike-share operator, four SOURCES of the
-four kinds the app reads: a PDF (prose, a table, a figure), an uploaded image
-(a fares board), a web page and a video's automatic captions. Each source has
+A set separate from the first one in evals/injection/ and built after the
+judge was frozen. One fictional bike-share operator, four SOURCES of the four
+kinds the app reads: a PDF (prose, a table, a figure), an uploaded image (a
+fares board), a web page and a video's automatic captions. Each source has
 marked slots where a planted text can sit; the texts themselves live in
-payloads.py and were written by authors who never saw the first set.
+payloads.py, which also says who wrote them and why the set is not the
+independent probe it was planned as.
 
 Three builds:
     clean      no planted text anywhere; the report states every candidate

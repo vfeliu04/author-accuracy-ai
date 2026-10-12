@@ -1,6 +1,6 @@
-"""The independent injection probe (evals/injection/probe/) is generated,
-reproducible and sized as its measurement assumes: what the scorer, the ingest
-script and the delivery checks take for granted holds offline."""
+"""The second injection set, "the probe" (evals/injection/probe/), is
+generated, reproducible and sized as its measurement assumes: what the scorer,
+the ingest script and the delivery checks take for granted holds offline."""
 
 import io
 import itertools
