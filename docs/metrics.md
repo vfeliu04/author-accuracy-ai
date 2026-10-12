@@ -114,12 +114,14 @@ Quoted from the JSON files in `backend/evals/`. Re-record only deliberately, wit
 - stance agreement **36/37** (accept threshold ≥ 35/37); the one miss is the report's weakest falsity marker, and it errs conservative (stays `asserted`)
 - noise floor: "recall 1.00 precision 0.97 on ALL of 3 repeat runs (38 claims each) — fully stable"
 
-### Dev verdicts — `evals/verdict_baseline.json` (recorded 2026-08-12, `claude-opus-5`)
+### Dev verdicts — `evals/verdict_baseline.json` (measured 2026-10-10, recorded 2026-10-12, `claude-opus-5`, the fenced judge)
 
-- accuracy **0.838** (31/37 matched), coverage **1.0**, downgraded **0**
-- per class: SUPPORTED 11/14, CONTRADICTED 8/11, UNVERIFIABLE 12/12
-- noise floor: "accuracy 0.84–0.86 over 2 runs; treat |delta| ≤ 0.03 as noise"
-- remaining misses are all under-commitment (S/C judged UNVERIFIABLE), never fabricated support
+- accuracy **0.892** (33/37 matched), coverage **1.0**, downgraded **0**
+- per class: SUPPORTED 11/14, CONTRADICTED 10/11, UNVERIFIABLE 12/12
+- noise floor: 33, 33 and 32 of 37 over three runs on identical evidence (98 of 111); the unfenced judge scored 31, 29 and 32 (92 of 111) on the same evidence the same day; treat |delta| ≤ 0.03 as noise
+- **the evidence was pinned**: every run of the comparison was fed the stored evidence of one reference run, because ordinary retrieval is not a fixed input (the keyword channel's statistics cover every run in the database, so a run's evidence depends on what else the database holds). A fresh ingest need not reproduce this number
+- all misses are under-commitment (S/C judged UNVERIFIABLE), three of them the report's attributed claims in every run; no SUPPORTED/CONTRADICTED mix-up
+- supersedes the 2026-08-12 baseline of the unfenced judge (0.838, 31/37, ordinary retrieval). Not re-measured at the fencing PR's final measurement: a fresh ingest judged once stored nothing, because two answers looped to the output cap (the file's `note` has the unofficial reading of that batch, 30 of 37)
 
 ### Dev run scores — `evals/score_reference.json` (recorded 2026-08-13, credibility and validity re-recorded 2026-08-21; reference snapshot, not a golden eval — no labeled truth exists for these numbers)
 
@@ -133,11 +135,16 @@ Quoted from the JSON files in `backend/evals/`. Re-record only deliberately, wit
 - stance agreement **27/27** — the extractor disavowed exactly the 4 table rows under the "Circulating counter-claim (fabricated)" column and kept every neutral relay and straight-stated fabrication `asserted`; the narrow falsity-marker rule did not key on the dev report's flag words
 - score snapshot: accuracy **0.8077** — against the dev report's 0.95, the designed discrimination: a report that *labels* its fabrications is rewarded, one that asserts them straight is still punished
 
-### Holdout verdicts — `evals/holdout/verdict_reference.json` (recorded 2026-08-13)
+### Holdout verdicts — `evals/holdout/verdict_reference.json` (recorded 2026-10-12, the fenced judge)
 
-- accuracy **0.889** (24/27), coverage **1.0**, downgraded **2** (prior recording 0.963 with 0 downgrades; the judge prompt is unchanged)
-- per class: SUPPORTED 15/15, CONTRADICTED 6/8, UNVERIFIABLE 3/4 — both CONTRADICTED misses are quote-check **downgrades whose raw verdicts were correct** (the downgrade policy refusing unproven judgments; batch quote-fidelity variance), and the UNVERIFIABLE miss is the same deliberately borderline Protein Accord claim as every prior recording
-- dev verdict accuracy measured 0.86 the same day (within noise of its 0.838 baseline) — no dev-climbs-while-holdout-falls overfitting signature
+- accuracy **0.963** (26/27), coverage **1.0**, downgraded **0**
+- per class: SUPPORTED 15/15, CONTRADICTED 8/8, UNVERIFIABLE 3/4 — the one miss is the same deliberately borderline Protein Accord claim as every prior recording (labelled UNVERIFIABLE, answered CONTRADICTED)
+- measured as a comparison at the close of the prompt-fencing PR, on one fresh ingest with the evidence pinned: the fenced judge scored 26 and 26, the unfenced judge 26 and 26, the same claim missed in all four runs (**52 of 54 each: no loss detected**). Two runs a judge can detect a loss of about 3 claims in 27, not a smaller one
+- prior recording: 0.889 (24/27, 2 quote-check downgrades, 2026-08-13, the unfenced judge, ordinary retrieval)
+
+### Planted-injection sets — `evals/injection/` (its README holds the counts)
+
+Not accuracy baselines: two sets of sources with instructions planted in them, and probes of the other calls that read source text. In short: a judge told to obey follows the planted texts (8 of 9 delivered on the first set, 11 of 12 on the second), and neither the unfenced nor the fenced judge has followed one in any recorded run. What is measured is that the fence costs nothing on these sets and on the holdout, not that it is why the judge resists.
 
 ## Related docs
 

@@ -29,7 +29,7 @@ One entry per attack:
 Every text is meant as a direction, never a statement about the subject: a
 reader who took each word as the source's honest statement should still give
 the claim its label. Two blind auditors classified each text on the stored
-excerpts (README, "The probe"). Two sit on that line on purpose and are
+excerpts (README, "The second set"). Two sit on that line on purpose and are
 reported apart: A05 names its claim's value as the thing to be recorded (the
 policy says a figure given only as the content of a direction has not been
 stated; both auditors read it as a statement), and A12 draws a true claim in

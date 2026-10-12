@@ -1,17 +1,45 @@
 {
-  "accuracy": 0.889,
-  "correct": 24,
+  "accuracy": 0.963,
+  "correct": 26,
   "matched": 27,
   "golden_total": 27,
   "coverage": 1.0,
   "per_class": {
     "SUPPORTED": "15/15",
-    "CONTRADICTED": "6/8",
+    "CONTRADICTED": "8/8",
     "UNVERIFIABLE": "3/4"
   },
-  "downgraded": 2,
+  "downgraded": 0,
   "model": "claude-opus-5",
-  "run_id": "3eb1a2435c3b477f958095fd11934438",
-  "recorded": "2026-08-13",
-  "note": "Holdout verdict reference at the Phase 7 close (prior: 0.963, 2026-08-12). The judge prompt is UNCHANGED; the 2-claim drop is not judge drift: both new misses are quote-verification DOWNGRADES whose raw verdicts were CORRECT ('alarming category retired' and '900 papers', raw CONTRADICTED both — both rationales show the known batch corrupted-verdict-literal artifact), and the downgrade policy deliberately refuses unproven judgments rather than counting them. Downgrades went 0 -> 2 run-to-run (batch quote-fidelity variance, within the behavior documented in Phase 4). The third miss is the SAME deliberately borderline Protein Accord over-commitment as every prior recording (its golden note anticipates exactly this). Dev verdict accuracy on the same day: 0.86 vs the 0.838 baseline (within noise) — no dev-climbs-while-holdout-falls overfitting signature; nothing was tuned in response to this set. Policy: phase boundaries only, never tune against."
+  "judge": "e351f7062b2b83037e9b8e9c80e5677227ea6c0246e9c36ce03113e5f1d98659:k=8",
+  "run_id": "392f5984581d4a8bb1986bb8d6c535da",
+  "recorded": "2026-10-12",
+  "evidence": "Pinned: one fresh ingest, retrieval computed once and stored in a file, all four runs below fed from it and submitted within a minute of each other.",
+  "runs": {
+    "holdout-new-1": {
+      "correct": 26,
+      "matched": 27,
+      "downgraded": 0,
+      "judge": "e351f7062b2b83037e9b8e9c80e5677227ea6c0246e9c36ce03113e5f1d98659:k=8"
+    },
+    "holdout-new-2": {
+      "correct": 26,
+      "matched": 27,
+      "downgraded": 0,
+      "judge": "e351f7062b2b83037e9b8e9c80e5677227ea6c0246e9c36ce03113e5f1d98659:k=8"
+    },
+    "holdout-old-1": {
+      "correct": 26,
+      "matched": 27,
+      "downgraded": 0,
+      "judge": "ca920fdc7da7bb3a81a70a97ece5472ab9edf7d0839f800594580474f66ca5e2:k=8"
+    },
+    "holdout-old-2": {
+      "correct": 26,
+      "matched": 27,
+      "downgraded": 0,
+      "judge": "ca920fdc7da7bb3a81a70a97ece5472ab9edf7d0839f800594580474f66ca5e2:k=8"
+    }
+  },
+  "note": "Holdout verdict reference at the close of the prompt-fencing PR, the first holdout run since 2026-08-13 and the first of the fenced judge. Fenced judge (holdout-new) 26 and 26 of 27; unfenced judge (holdout-old, stamp ca920fdc) 26 and 26 of 27 on the same evidence: 52 of 54 each, no loss detected (the rule fixed before the runs would have called 3 or more below the old judge's pooled count a loss worth a third pair). No SUPPORTED/CONTRADICTED mix-up and no downgrade in any run. The one miss is the same claim in all four runs: \"The Global Protein Accord is projected to end world hunger by mid-2027.\" (labelled UNVERIFIABLE, answered CONTRADICTED), the deliberately borderline claim every earlier recording missed too. Two runs a judge can detect a loss of about 3 claims in 27, not a smaller one, and only on the two source PDFs this set shares with the dev set. Prior recording: 0.889 (24/27, 2 downgrades, 2026-08-13, ordinary retrieval, unfenced judge). Policy unchanged: phase boundaries only, never tuned against."
 }

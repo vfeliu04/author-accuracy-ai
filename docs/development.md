@@ -106,6 +106,10 @@ Two label sets under `backend/evals/`:
 
 Run the eval after *any* change to prompts, retrieval, chunking, or verdict logic — never tune blind. Both baselines record a measured noise floor; treat deltas inside it as noise, and re-run before attributing a change to your edit. Current recorded numbers: [metrics.md](metrics.md).
 
+**Comparing two judges or two prompts: pin the evidence.** Ordinary retrieval is not a fixed input. The keyword channel ranks with statistics of the whole `chunks_fts` table, so the evidence one run retrieves depends on every other run in the database, and two arms retrieved on different days (or in a database that gained runs in between) are shown different evidence. For a before/after comparison, retrieve once, store the evidence, feed every arm from that store, and check that the stored evidence of each arm equals it before reading any score. The recorded dev and holdout verdict numbers were measured that way and say so in their files.
+
+**One looping answer can fail a verify step.** A judge answer occasionally gives its verdict and then repeats a fragment up to the output cap (`max_tokens` 32,000). The code retries such an item once at full price; if the retry loops too, the step fails and stores nothing. The batch's results stay available through the API, so the answers already given can be read without paying for them again. Budget an eval arm for it: about $0.40 on Batch for each such answer, more for its retry.
+
 ### Eval in CI (`.github/workflows/eval.yml`)
 
 Manual `workflow_dispatch` only — each run costs real API money (~$0.5) and fork PRs have no secrets, so a human presses the button and reads the deltas in the job summary; there is no hard fail-gate. Requirements:
