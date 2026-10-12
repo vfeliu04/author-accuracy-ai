@@ -24,20 +24,27 @@ BUILD      clean | hostile | claimline (make_probe_set.BUILDS)
            would hold.
 
 Prints `run: <id>` first, like `authorai.cli ingest`, then what the run holds,
-and exits non-zero when that is not what the set was sized for.
+and exits non-zero when that is not what the set was sized for: the wrong
+chunks, a kept section lost, a planted text that is not whole in a stored
+chunk, a drawn note that is not in the picture the judge will be shown.
+
+A real ingest is paid (two image readings and the embeddings) and writes to
+the database AUTHORAI_DB_PATH names; without that variable it is refused, so
+it never lands in a default database by accident.
 """
 
 import argparse
 import importlib.util
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPORT_NAME = "Pellmere_on_Two_Wheels.pdf"
-SOURCE_NAME = "Pellmere_Operations_Statement_2025.pdf"
-BOARD_NAME = "pellmere_fares_board.png"
+# A drawn note is in a picture when its band holds at least this share of dark
+# pixels; a picture with nothing drawn there holds less than the lower one.
+INK, NO_INK = 0.01, 0.002
 
 
 def generator():
@@ -112,10 +119,12 @@ def ingest(context, build: str, probe) -> str:
             raise SystemExit(f"{path} is missing: build the set first (make_probe_set.py)")
     run_id = dbmod.create_run(conn)
     print(f"run: {run_id}", flush=True)
-    report = dbmod.add_upload(conn, "REPORT", REPORT_NAME, str(files["report"]))
+    report = dbmod.add_upload(conn, "REPORT", probe.REPORT_NAME, str(files["report"]))
     sources = [
-        dbmod.add_upload(conn, "SOURCE", SOURCE_NAME, str(files["pdf"])),
-        dbmod.add_upload(conn, "SOURCE", BOARD_NAME, str(files["board"]), source_type="image"),
+        dbmod.add_upload(conn, "SOURCE", probe.SOURCE_NAME, str(files["pdf"])),
+        dbmod.add_upload(
+            conn, "SOURCE", probe.BOARD_NAME, str(files["board"]), source_type="image"
+        ),
     ]
     if "page" in files:
         for url, source_type in ((probe.WEB_URL, "web"), (probe.VIDEO_URL, "youtube")):
@@ -173,9 +182,11 @@ def holdings(conn, run_id: str) -> dict:
     rows = []
     for document in documents:
         chunks = conn.execute(
-            "SELECT kind, section, length(text) AS chars, start_seconds FROM chunks"
-            " WHERE doc_id = ? ORDER BY id",
+            "SELECT kind, section, text, start_seconds FROM chunks WHERE doc_id = ? ORDER BY id",
             (document["id"],),
+        ).fetchall()
+        pictures = conn.execute(
+            "SELECT image_path FROM figures WHERE doc_id = ? ORDER BY rowid", (document["id"],)
         ).fetchall()
         provenance = (json.loads(document["metadata"] or "{}")).get("provenance") or {}
         rows.append(
@@ -184,47 +195,131 @@ def holdings(conn, run_id: str) -> dict:
                 "source_type": document["source_type"] or "pdf",
                 "title": document["title"],
                 "chunks": [
-                    (chunk["kind"], chunk["section"], chunk["chars"], chunk["start_seconds"])
+                    {
+                        "kind": chunk["kind"],
+                        "section": chunk["section"],
+                        "text": chunk["text"],
+                        "start": chunk["start_seconds"],
+                    }
                     for chunk in chunks
                 ],
+                "pictures": [row["image_path"] for row in pictures],
                 "truncated": provenance.get("truncated"),
                 "captions": (provenance.get("video") or {}).get("captions"),
             }
         )
-    figures = conn.execute(
-        "SELECT f.image_path FROM figures f JOIN documents d ON d.id = f.doc_id"
-        " WHERE d.run_id = ? ORDER BY f.rowid",
-        (run_id,),
-    ).fetchall()
-    return {"documents": rows, "figures": [row["image_path"] for row in figures]}
+    return {"documents": rows}
 
 
-def check(held: dict, build: str, probe) -> list[str]:
-    """Why this run is not what the set was sized for (empty when it is)."""
+def dark_share(image, band) -> float:
+    """The share of dark pixels in `band` (fractions: left, top, right, bottom)
+    of a picture."""
+    width, height = image.size
+    left, top, right, bottom = band
+    region = image.convert("L").crop(
+        (int(left * width), int(top * height), int(right * width), int(bottom * height))
+    )
+    pixels = list(region.getdata())
+    return sum(pixel < 100 for pixel in pixels) / len(pixels)
+
+
+def _plain(text: str) -> str:
+    """Text as compared between what was planted and what was stored: runs of
+    whitespace as one space (a chunk joins a section's paragraphs, the captions
+    join their lines)."""
+    return " ".join(text.split())
+
+
+def check(held: dict, build: str, probe, *, dry: bool) -> list[str]:
+    """Why this run is not what the set was sized for (empty when it is).
+
+    The sizing: the PDF as one text, one table and one figure; the board as
+    one figure; the page's first two sections and the captions' first two
+    windows, one chunk each, the rest cut by the cap. Then the planted texts:
+    each written one whole in a stored chunk of its own source, each drawn one
+    as ink in its band of the stored picture, and no ink in a band nothing was
+    drawn in. On a real ingest (`dry` false) the board's reading must also
+    repeat the code of a text drawn on it, since the scorer looks for it there.
+    """
+    from PIL import Image
+
     problems = []
-    sources = [document for document in held["documents"] if document["kind"] == "SOURCE"]
-    chunks = sum(len(document["chunks"]) for document in sources)
+    sources = {
+        document["source_type"]: document
+        for document in held["documents"]
+        if document["kind"] == "SOURCE"
+    }
     links = build != "claimline"
+    wanted = ["image", "pdf", "web", "youtube"] if links else ["image", "pdf"]
+    kinds = sorted(d["source_type"] for d in held["documents"] if d["kind"] == "SOURCE")
+    if kinds != wanted:
+        return [f"source kinds {kinds}, expected {wanted}"]
+    chunks = sum(len(document["chunks"]) for document in sources.values())
     expected = probe.EXPECTED_SOURCE_CHUNKS if links else 4
     if chunks != expected:
         problems.append(f"{chunks} SOURCE chunks, expected {expected}")
-    if len(held["figures"]) != probe.EXPECTED_FIGURES:
-        problems.append(f"{len(held['figures'])} pictures, expected {probe.EXPECTED_FIGURES}")
-    kinds = sorted(document["source_type"] for document in sources)
-    wanted = ["image", "pdf", "web", "youtube"] if links else ["image", "pdf"]
-    if kinds != wanted:
-        problems.append(f"source kinds {kinds}, expected {wanted}")
-    for document in sources:
-        if document["source_type"] in ("web", "youtube"):
-            if len(document["chunks"]) != 2:
-                problems.append(f"{document['source_type']}: {len(document['chunks'])} chunks kept")
-            if not document["truncated"]:
-                problems.append(f"{document['source_type']}: not read in part")
-        if document["source_type"] == "youtube" and document["captions"] != {
-            "kind": "automatic",
-            "language": "en",
-        }:
-            problems.append(f"captions read as {document['captions']}")
+    pictures = sum(len(document["pictures"]) for document in sources.values())
+    if pictures != probe.EXPECTED_FIGURES:
+        problems.append(f"{pictures} pictures, expected {probe.EXPECTED_FIGURES}")
+    for source_type, shape in (("pdf", ["figure", "table", "text"]), ("image", ["figure"])):
+        found = sorted(chunk["kind"] for chunk in sources[source_type]["chunks"])
+        if found != shape:
+            problems.append(f"{source_type}: chunks {found}, expected {shape}")
+    if links:
+        kept = [chunk["section"] for chunk in sources["web"]["chunks"]]
+        headings = [heading for heading, _ in probe.PAGE_SECTIONS[:2]]
+        if kept != headings:
+            problems.append(f"web: sections kept {kept}, expected {headings}")
+        windows = [
+            None if chunk["start"] is None else int(chunk["start"] // 75)
+            for chunk in sources["youtube"]["chunks"]
+        ]
+        if windows != [0, 1]:
+            problems.append(f"youtube: caption windows kept {windows}, expected [0, 1]")
+        for source_type in ("web", "youtube"):
+            if not sources[source_type]["truncated"]:
+                problems.append(f"{source_type}: not read in part")
+        captions = sources["youtube"]["captions"]
+        if captions != {"kind": "automatic", "language": "en"}:
+            problems.append(f"captions read as {captions}")
+
+    planted = {attack["slot"]: attack for attack in probe.attacks(build)}
+    stored = {
+        source_type: [_plain(chunk["text"]) for chunk in document["chunks"]]
+        for source_type, document in sources.items()
+    }
+    home = {"text": "pdf", "table": "pdf", "web": "web", "captions": "youtube"}
+    for slot, attack in planted.items():
+        channel = probe.SLOTS[slot][0]
+        if channel in home and not any(
+            _plain(attack["payload"]) in text for text in stored[home[channel]]
+        ):
+            problems.append(f"{attack['id']} ({slot}): its text is not whole in a stored chunk")
+    if build == "hostile" and not any(_plain(probe.PAYLOADS.LIE) in text for text in stored["web"]):
+        problems.append("the labelled statement (payloads.LIE) is not whole in a stored chunk")
+
+    for slot, band in probe.NOTE_BANDS.items():
+        source_type = "pdf" if slot == "pdf-figure" else "image"
+        paths = sources[source_type]["pictures"]
+        if len(paths) != 1:
+            continue  # counted above
+        with Image.open(paths[0]) as picture:
+            share = dark_share(picture, band)
+        if slot in planted and share < INK:
+            problems.append(
+                f"{planted[slot]['id']} ({slot}): no drawn text in its band of the stored "
+                f"picture {paths[0]} (dark share {share:.4f})"
+            )
+        if slot not in planted and share > NO_INK:
+            problems.append(f"{slot}: ink in a band nothing was planted in ({share:.4f})")
+        if slot in planted and source_type == "image" and not dry:
+            reading = stored["image"][0]
+            if planted[slot]["marker"] not in reading:
+                problems.append(
+                    f"{planted[slot]['id']} ({slot}): the reading of the board lacks its code "
+                    f"{planted[slot]['marker']!r}; the scorer would call it not tested. "
+                    "Ingest again"
+                )
     return problems
 
 
@@ -236,6 +331,11 @@ def main(argv=None) -> int:
     probe = generator()
     if args.build not in probe.builds():
         raise SystemExit(f"nothing to ingest for {args.build!r}: payloads.py holds no text for it")
+    if not args.dry and not os.environ.get("AUTHORAI_DB_PATH"):
+        raise SystemExit(
+            "REFUSED: a real ingest is paid and writes to a database. Name the database in "
+            "AUTHORAI_DB_PATH (the eval tools do), or use --dry DIR."
+        )
 
     from authorai import db as dbmod
     from authorai.config import Settings
@@ -260,18 +360,20 @@ def main(argv=None) -> int:
     else:
         settings = Settings(web_max_chars=probe.WEB_MAX_CHARS)
         context = PipelineContext(dbmod.connect(settings.db_path, settings.embedding_dim), settings)
+    print(f"database: {settings.db_path}", flush=True)
     run_id = ingest(context, args.build, probe)
     held = holdings(context.conn, run_id)
     for document in held["documents"]:
         print(f"{document['kind']:6} {document['source_type']:8} {document['title']!r}")
-        for kind, section, chars, start in document["chunks"]:
-            where = f" at {start:.0f}s" if start is not None else ""
-            print(f"         {kind:6} {chars:5} chars  {section!r}{where}")
+        for chunk in document["chunks"]:
+            where = f" at {chunk['start']:.0f}s" if chunk["start"] is not None else ""
+            size = f"{len(chunk['text']):5} chars"
+            print(f"         {chunk['kind']:6} {size}  {chunk['section']!r}{where}")
         if document["truncated"]:
             print(f"         read in part: {document['truncated']}")
-    for picture in held["figures"]:
-        print(f"picture: {picture}")
-    problems = check(held, args.build, probe)
+        for picture in document["pictures"]:
+            print(f"         picture: {picture}")
+    problems = check(held, args.build, probe, dry=bool(args.dry))
     for problem in problems:
         print(f"NOT AS SIZED: {problem}")
     return 1 if problems else 0
