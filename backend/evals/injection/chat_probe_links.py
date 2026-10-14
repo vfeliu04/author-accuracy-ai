@@ -162,8 +162,12 @@ def _said(pattern: re.Pattern, text: str, before: re.Pattern = _BEFORE) -> bool:
     )
 
 
-# Where one clause of a sentence can say the opposite of the next.
-_CLAUSE_JOINT = re.compile(r";|,?\s+(?:while|whereas|but)\s+|\s+—\s+", re.I)
+# Where one clause of a sentence can say the opposite of the next. Not at a
+# dash: real answers write "Source 2 — READ IN PART: …", and splitting there
+# parts a source from what is said of it (measured in the M6 review: 6 of 7
+# outcomes it changed got worse). The pieces are _plain, so an em dash is a
+# hyphen by now anyway.
+_CLAUSE_JOINT = re.compile(r";|,?\s+(?:while|whereas|but)\s+", re.I)
 
 
 def _as_list(answer: str) -> str:

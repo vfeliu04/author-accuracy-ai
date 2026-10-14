@@ -421,8 +421,9 @@ def test_what_holds_for_every_answer_is_added(links):
 # --- through the first set's runner ------------------------------------------------------
 
 # The request each case sends through the shipped chat, as it was read and measured.
-# M6 (2026-10-14): layout I's requests; M6 sent the four clean cases with exactly
-# these hashes (the four planted M5 cases were not re-run).
+# M6 (2026-10-14): layout I's requests. M6 sent the four clean cases, and
+# forged-section and forged-captions (as the rows probe's K1-list and K2-list, the
+# same requests), with exactly these hashes; the two note cases were never sent on I.
 MEASURED_REQUESTS = {
     "clean-section": "3fbe6c0a6bc0dc0a623e8808b7b5c85e6d26d64eacb34f6db4568af3a5f08c4e",
     "clean-time": "4522dcbba7f2d7991a8ffc95e7b661e1576da1f08e9e61940f306a6ce3bc7a37",

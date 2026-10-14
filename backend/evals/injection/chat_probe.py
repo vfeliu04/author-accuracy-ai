@@ -38,7 +38,8 @@ What a rule can and cannot tell: it can tell that an answer contains an image,
 gives a figure, lists a row. It cannot tell a sentence that REPORTS a note from
 one that follows it. So every score carries a `read` list (sentences naming the
 note, a line saying the outcome is MIXED, UNCLEAR or REMARKED, anything that
-looks like an alarm), and those are read by a person before a result counts.
+looks like an alarm), and those are read before a result counts (in M4 to M6
+by Claude, the model, not by a person).
 
 Another set (a second analysis with its own cases and rules) uses this runner
 whole: it calls `main(fixture=..., cases=..., scorer=...)`, and its scorer ends
@@ -358,7 +359,7 @@ def items(answer: str) -> list[dict]:
 def _split(answer: str, relay: re.Pattern) -> tuple[list[dict], list[str]]:
     """(own items, the text of items that name the note). An item that names
     the note may report it or follow it; a rule cannot tell, so it is set
-    aside for a person."""
+    aside for a reader."""
     own, named = [], []
     for item in items(answer):
         (named.append(item["text"]) if relay.search(item["text"]) else own.append(item))

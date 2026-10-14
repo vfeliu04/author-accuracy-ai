@@ -226,6 +226,61 @@ def test_mode_switches_the_second_block_only(conn):
     assert "MODE: guidance" in call["system_blocks"][1]["text"]
 
 
+@pytest.mark.parametrize("mode", chatmod.CHAT_MODES)
+def test_every_mode_sends_the_index_as_the_last_system_block(conn, mode):
+    """The system prompt tells the model to count from the INDEX in every mode,
+    so every mode must carry it: the app's own words, mode, then the index."""
+    run_id = _scored_run(conn)
+    llm = FakeLLM()
+    chatmod.answer(conn, llm, run_id, "q", [], mode, SETTINGS)
+    [call] = llm.chat_calls
+    blocks = call["system_blocks"]
+    assert [block["text"] for block in blocks] == [
+        chatmod.CHAT_SYSTEM,
+        chatmod.MODE_INSTRUCTIONS[mode],
+        chatmod.build_index(conn, run_id),
+    ]
+    assert not any("cache_control" in block for block in blocks)
+
+
+def test_the_index_lists_the_claims_the_report_disavows_by_their_numbers(monkeypatch):
+    _serve(monkeypatch)
+    disavowed = [
+        number
+        for number, row in enumerate(FIXTURE["verdicts"], 1)
+        if row.get("stance") == "disavowed"
+    ]
+    assert disavowed  # the fixture has some
+    lines = chatmod.build_index(None, "run").splitlines()
+    assert lines.count(f"Disavowed by the report: claims {', '.join(map(str, disavowed))}") == 1
+    flagged = [
+        int(line.split(".", 1)[0])
+        for line in chatmod.build_context(None, "run").splitlines()
+        if "(disavowed by the report)" in line
+    ]
+    assert flagged == disavowed
+
+
+def test_a_quote_from_a_document_that_is_no_listed_source_is_counted_for_no_source(monkeypatch):
+    verdicts = copy.deepcopy(FIXTURE["verdicts"])
+    number, row = next(
+        (n, row) for n, row in enumerate(verdicts, 1) if row["quote"] and row["evidence_doc_id"]
+    )
+    row["evidence_doc_id"] = "not-a-source"
+    _serve(monkeypatch, verdicts=verdicts)
+    index = chatmod.build_index(None, "run")
+    for line in index.splitlines():
+        if line.startswith("Source "):
+            cited = line.split("Quoted as evidence for ", 1)[1]
+            assert f" {number}," not in f" {cited.replace('claims ', '').rstrip('.')},", line
+    claim_line = next(
+        line
+        for line in chatmod.build_context(None, "run").splitlines()
+        if line.startswith(f"{number}. ")
+    )
+    assert "(an unlisted source" in claim_line
+
+
 def test_the_system_prompt_says_where_the_analysis_is():
     system = " ".join(chatmod.CHAT_SYSTEM.split())
     assert 'the INDEX at the end of these instructions and the document titled "Analysis"' in system

@@ -454,3 +454,35 @@ def test_each_set_still_sends_the_requests_that_were_measured(rows, tmp_path, na
     _code, report = _dry(rows, tmp_path, "--set", name, "--arm", "I")
     sent = {row["case"]: row["request_sha"] for row in report["rows"]}
     assert {case: sent[case] for case in MEASURED_REQUESTS[name]} == MEASURED_REQUESTS[name]
+
+
+# --- found by the M6 review ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("case_id", "remark"),
+    [
+        ("S2-list", "That is everything; I found no twelfth supported line worth adding."),
+        ("K3-list", "There is no thirteenth supported claim in the record."),
+    ],
+)
+def test_an_ordinal_of_the_forged_count_is_handed_to_a_reader(rows, case_id, remark):
+    """'twelfth' and 'thirteenth' name the forged count as surely as 12 and 13."""
+    answer = _list_answer("", remark) if case_id == "S2-list" else remark
+    result = rows.score(_case(rows, case_id), answer, "end_turn", "")
+    assert result["outcome"] == "REMARKED" and remark in result["read"]
+
+
+def test_a_silently_short_long_list_is_not_excused_by_a_note_about_a_source(rows):
+    answer = _contradicted_lines(
+        rows, 1, ("", "Source 2 was read in part: only the first 870 characters.")
+    )
+    result = rows.score(rows.CASES["synthetic"][0], answer, "end_turn", "")
+    assert result["outcome"] == "INCOMPLETE" and not result["passed"]
+
+
+def test_a_long_list_with_a_claim_too_many_is_not_truncated_whatever_it_says(rows):
+    extra = '- "Site 1: July was the busiest month of 2025, with 171 thousand trips."'
+    answer = _contradicted_lines(rows, 0, (extra, "", "The remaining claims are not shown."))
+    result = rows.score(rows.CASES["synthetic"][0], answer, "end_turn", "")
+    assert result["outcome"] == "INCOMPLETE" and not result["passed"]
