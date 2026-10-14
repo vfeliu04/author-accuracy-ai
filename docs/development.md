@@ -82,10 +82,13 @@ All pipeline stages are runnable by hand (from `backend/`, inside the conda env)
 ```bash
 python -m authorai.cli ingest "../example_sources/example source one/"*.pdf   # new run, kind=SOURCE
 python -m authorai.cli ingest report.pdf --run <run_id> --kind REPORT
+python -m authorai.cli ingest chart.png --image --run <run_id>     # image sources
 python -m authorai.cli extract <run_id>                           # claims from the run's REPORT
 python -m authorai.cli eval-extract <run_id> [--golden PATH] [--allow-stale]
 python -m authorai.cli verify <run_id> [--sync] [-k N]            # Batch API by default
-python -m authorai.cli eval-verdict <run_id> [--golden PATH] [--allow-stale]
+python -m authorai.cli verify <run_id> --resume-batch <batch_id>  # a batch `verify` printed
+python -m authorai.cli eval-verdict <run_id> [--golden PATH] [--allow-stale] [--save FILE]
+python -m authorai.cli eval-injection <run_id> [--allow-stale] [--save FILE]
 python -m authorai.cli score <run_id> [--allow-stale]
 python -m authorai.cli search <run_id> some query terms [-k N]
 ```
@@ -93,8 +96,10 @@ python -m authorai.cli search <run_id> some query terms [-k N]
 Notes:
 
 - `ingest` describes figures with an LLM by default (`--no-describe-figures` to skip); one bad PDF reports and continues, and the run id is printed first so it is never lost.
-- `ingest` takes PDF paths only. Web-page and YouTube video sources come in through `POST /api/runs` (the upload dialog's link field), and the ingest step fetches or reads them.
+- `ingest` takes PDF paths, or with `--image` PNG, JPEG or WebP image sources (read by the caption model). Web-page and YouTube video sources come in through `POST /api/runs` (the upload dialog's link field), and the ingest step fetches or reads them.
 - `verify --sync` makes per-claim sync calls (full price, immediate) — the debug path; batch is half price at minutes-scale latency.
+- `verify` prints each batch's id the moment it exists and records it beside the database (`batches/<id>.json`) with the judge, the run and a hash of the exact requests, evidence included. `--resume-batch <id>` polls that batch instead of paying for a new one, and refuses a batch recorded for another judge, another run or other requests (the evidence is retrieved again on a resume and can differ). A plain `verify` refuses to submit requests whose batch was never stored, naming the batch to resume; `--new-batch` pays for a new one on purpose. A resume reads the batch's answers again at no cost, but retries each item that failed once more at full price.
+- `eval-verdict --save FILE` writes the score and the per-claim pairing beside the run, models and stamps scored; `eval-injection` scores a run of the injection set (`backend/evals/injection/`) and `--save` writes its per-attack outcomes.
 - **`--allow-stale`**: claims and verdicts are stamped with a hash of the prompt that produced them. `eval-extract`, `eval-verdict`, and `score` refuse rows whose stamp differs from the current prompt — a score over stale rows says nothing about the code you are tuning (this exact mistake produced a wrong conclusion once). `--allow-stale` downgrades the refusal to a loud warning.
 
 ## Eval discipline
@@ -108,7 +113,7 @@ Run the eval after *any* change to prompts, retrieval, chunking, or verdict logi
 
 **Comparing two judges or two prompts: pin the evidence.** Ordinary retrieval is not a fixed input. The keyword channel ranks with statistics of the whole `chunks_fts` table, so the evidence one run retrieves depends on every other run in the database, and two arms retrieved on different days (or in a database that gained runs in between) are shown different evidence. For a before/after comparison, retrieve once, store the evidence, feed every arm from that store, and check that the stored evidence of each arm equals it before reading any score. The recorded dev and holdout verdict numbers were measured that way and say so in their files.
 
-**One looping answer can fail a verify step.** A judge answer occasionally gives its verdict and then repeats a fragment up to the output cap (`max_tokens` 32,000). The code retries such an item once at full price; if the retry loops too, the step fails and stores nothing. The batch's results stay available through the API, so the answers already given can be read without paying for them again. Budget an eval arm for it: about $0.40 on Batch for each such answer, more for its retry.
+**One looping answer can fail a verify step.** A judge answer occasionally gives its verdict and then repeats a fragment up to the output cap (`max_tokens` 32,000). The code retries such an item once at full price; if the retry loops too, the step fails and stores nothing. The batch's results stay available through the API, so the answers already given can be read without paying for them again; resuming the batch with `verify --resume-batch` reads them, but retries each failed item once more at full price. Budget an eval arm for it: about $0.40 on Batch for each such answer, more for its retry.
 
 ### Eval in CI (`.github/workflows/eval.yml`)
 

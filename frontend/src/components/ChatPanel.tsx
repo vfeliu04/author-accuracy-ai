@@ -14,14 +14,24 @@ const MODES: ChatMode[] = ["evidence", "guidance", "creative"];
 // What the API takes as history: at most 50 turns of at most 16,000 characters
 // each (ChatRequest and ChatTurn in the backend's api.py), of which the server
 // reads only the most recent. So the page sends the tail of the conversation,
-// an even number so it starts on a question, each turn cut to the limit: a
-// long conversation or a long answer must not make the next question fail.
+// an even number of turns (a conversation that alternates then starts on a
+// question; after a failed send it may not, and the server drops a leading
+// answer), each turn cut to the limit: a long conversation or a long answer
+// must not make the next question fail.
 const HISTORY_TURNS_SENT = 24;
 const HISTORY_TURN_MAX_CHARS = 16_000;
 
-// slice() counts UTF-16 units, so a cut can fall inside an emoji and leave half
-// of it; the server cannot read half a character, and every later question
-// would fail until that turn left the history.
+// The server cannot read half a character (a lone UTF-16 surrogate), and a turn
+// holding one would fail every later question until it left the history. Text
+// typed or pasted can hold one; it becomes U+FFFD before anything is sent.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+export function wellFormed(text: string): string {
+  return text.replace(LONE_SURROGATE, "\ufffd");
+}
+
+// slice() counts UTF-16 units, so a cut can also fall inside an emoji and leave
+// half of it: the cut drops that half.
 function cutTurn(text: string): string {
   const head = text.slice(0, HISTORY_TURN_MAX_CHARS);
   const last = head.charCodeAt(head.length - 1);
@@ -31,7 +41,7 @@ function cutTurn(text: string): string {
 export function historyTurns(messages: ChatMessage[]): ChatTurn[] {
   return messages.slice(-HISTORY_TURNS_SENT).map((message) => ({
     role: message.author,
-    content: cutTurn(message.text)
+    content: cutTurn(wellFormed(message.text))
   }));
 }
 
@@ -127,7 +137,7 @@ const ChatPanel = ({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const trimmed = draft.trim();
+    const trimmed = wellFormed(draft.trim());
     if (!trimmed || isSending) return;
     setDraft("");
     onSendMessage(trimmed);

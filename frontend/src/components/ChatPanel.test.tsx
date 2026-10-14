@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import ReactMarkdown from "react-markdown";
 import { describe, expect, it } from "vitest";
 import ChatPanel, { ANSWER_MARKDOWN, historyTurns, type ChatMessage } from "./ChatPanel";
@@ -98,6 +98,27 @@ describe("historyTurns", () => {
     expect(historyTurns([{ id: 1, author: "user", text: whole }])[0].content).toBe(
       "x".repeat(15_998) + "😀"
     );
+  });
+});
+
+describe("half a character", () => {
+  // A lone half of a surrogate pair cannot be sent: the server cannot read it,
+  // and kept in the conversation it would fail every later question too.
+  it("is replaced in the history the page sends", () => {
+    const [turn] = historyTurns([{ id: 1, author: "user", text: "a\ud83d b" }]);
+    expect(turn.content).toBe("a\ufffd b");
+  });
+
+  it("is replaced in a question before it is sent", () => {
+    const sent: string[] = [];
+    const { container } = render(
+      <ChatPanel messages={[]} onSendMessage={(text) => sent.push(text)} mode="evidence" onModeChange={() => {}} />
+    );
+    fireEvent.change(container.querySelector("textarea") as HTMLTextAreaElement, {
+      target: { value: "why\udc00 so?" }
+    });
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement);
+    expect(sent).toEqual(["why\ufffd so?"]);
   });
 });
 

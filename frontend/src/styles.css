@@ -2228,3 +2228,17 @@ a {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Read by assistive technology, not shown: the label markdown gives a
+   footnote section in an answer. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -632,7 +632,15 @@ def run_job(
     context = PipelineContext(conn, settings)
     run_id = job["run_id"]
     try:
-        completed = {p["step"] for p in job["progress"] if p["status"] == "done"}
+        done = {p["step"] for p in job["progress"] if p["status"] == "done"}
+        # Resume from the first step not done: a later step's old 'done'
+        # describes data an earlier step has since been asked to replace (a
+        # re-verify that failed must not leave the old scores counted).
+        completed = set()
+        for name in PIPELINE_STEPS:
+            if name not in done:
+                break
+            completed.add(name)
         if "verify" in completed and stale_verdicts(dbmod.list_verdicts(conn, run_id)):
             # Score refuses verdicts from another judge prompt, so skipping
             # verify would fail this retry and every one after it; and every

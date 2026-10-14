@@ -302,6 +302,27 @@ def test_a_retry_reverifies_only_verdicts_another_judge_gave(conn, fresh, done, 
     assert dbmod.get_job(conn, job_id)["status"] == "DONE"
 
 
+def test_a_failed_reverify_scores_again_on_the_next_retry(conn):
+    """The review of the fencing PR: a re-verify that fails left score's old
+    'done' in place, so the next retry ran verify and skipped score, and the
+    stored scores described the older judge's verdicts. A retry resumes from
+    the first step that is not done; every step after it runs again."""
+    run_id, job_id = _job(conn)
+    _verified_by(conn, run_id, "an-older-judge-prompt:k=8")
+    dbmod.claim_next_job(conn)
+    for step in ("ingest", "extract", "verify", "score"):
+        dbmod.push_job_progress(conn, job_id, step, "done earlier", status="done")
+    dbmod.requeue_running_jobs(conn)
+
+    record: list[str] = []
+    run_job(conn, SETTINGS, dbmod.claim_next_job(conn), steps=_fake_steps(record, fail_at="verify"))
+    assert dbmod.get_job(conn, job_id)["status"] == "FAILED"
+    dbmod.requeue_job(conn, job_id, run_id)
+    run_job(conn, SETTINGS, dbmod.claim_next_job(conn), steps=_fake_steps(record))
+    assert record == ["verify", "score"]
+    assert dbmod.get_job(conn, job_id)["status"] == "DONE"
+
+
 def test_update_job_payload_merges_and_deletes(conn):
     run_id, job_id = _job(conn, payload={"report_upload_id": "r", "source_upload_ids": []})
     dbmod.update_job_payload(conn, job_id, {"verify_batch_id": "msgbatch_1"})
@@ -2352,3 +2373,31 @@ def test_deleting_a_run_removes_the_original_image_and_its_copy(conn, tmp_path):
 
     assert not original.exists()
     assert not copy.exists()
+
+
+def test_the_worker_describes_a_pdf_figure_through_the_fenced_reader(conn, tmp_path, monkeypatch):
+    """The review of the fencing PR: the factories are tested to send the
+    reader policy, but nothing held the worker's PDF path to them. Whatever
+    describer the worker hands Docling must send IMAGE_READER_SYSTEM."""
+    from PIL import Image
+
+    from authorai import jobs as jobsmod
+    from authorai.ingest import FIGURE_DESCRIPTION_PROMPT, IMAGE_READER_SYSTEM
+
+    run_id = dbmod.create_run(conn)
+    pdf = tmp_path / "source.pdf"
+    pdf.write_bytes(b"%PDF-fake")
+    upload_id = dbmod.add_upload(conn, "SOURCE", "source.pdf", str(pdf))
+    llm = FakeLLM(image_description="A chart.")
+
+    def fake_ingest_pdf(*args, describe, **kwargs):
+        describe(Image.new("RGB", (8, 8)))
+        return "new-doc-id"
+
+    monkeypatch.setattr(jobsmod, "ingest_pdf", fake_ingest_pdf)
+    _reconcile_upload(_image_context(conn, tmp_path, llm), run_id, upload_id)
+    [request] = llm.image_requests
+    assert (request["system"], request["prompt"]) == (
+        IMAGE_READER_SYSTEM,
+        FIGURE_DESCRIPTION_PROMPT,
+    )

@@ -28,7 +28,14 @@ from pydantic import BaseModel, Field
 from authorai import db as dbmod
 from authorai.db import VERDICTS, VerdictLiteral
 from authorai.embeddings import Embedder
-from authorai.llm import LLM, ParseItem, TextDocument, prompt_fingerprint, render_user_content
+from authorai.llm import (
+    LLM,
+    ParseItem,
+    TextDocument,
+    batch_fingerprint,
+    prompt_fingerprint,
+    render_user_content,
+)
 from authorai.log import setup_logger
 from authorai.search import Hit, hybrid_search
 
@@ -482,12 +489,16 @@ def verify_run(
     resume_batch_id: str | None = None,
     on_batch_created: "Callable[[str], None] | None" = None,
     require_resume: bool = False,
+    on_requests: "Callable[[str], None] | None" = None,
 ) -> dict:
     """Verify every claim in a run; stores verdicts (replacing) and returns a summary.
 
     `resume_batch_id`/`on_batch_created`/`require_resume` thread through to
     parse_batch so a caller (the jobs worker, the CLI) can persist a submitted
     batch's id and resume it on retry instead of paying for a duplicate.
+    `on_requests` receives the batch requests' fingerprint before any batch is
+    submitted or resumed, and may raise to stop: the CLI records it with a
+    batch and refuses a resume whose requests (evidence included) differ.
     """
     if k < 1:
         raise ValueError(
@@ -553,6 +564,8 @@ def verify_run(
 
     if items:
         if batch:
+            if on_requests is not None:
+                on_requests(batch_fingerprint(items, model))
             results = llm.parse_batch(
                 model=model,
                 items=items,

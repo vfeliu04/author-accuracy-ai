@@ -250,6 +250,19 @@ def build_batch_request(item: ParseItem, model: str, max_tokens: int = BATCH_MAX
     )
 
 
+def batch_fingerprint(
+    items: list[ParseItem], model: str, max_tokens: int = BATCH_MAX_TOKENS
+) -> str:
+    """Hash of the exact Batch API requests these items make (in custom_id
+    order): a batch recorded with it can be shown to answer these requests,
+    evidence and pictures included, before its answers are stored."""
+    requests = sorted(
+        (build_batch_request(item, model, max_tokens) for item in items),
+        key=lambda request: request["custom_id"],
+    )
+    return hashlib.sha256(json.dumps(requests, sort_keys=True).encode()).hexdigest()
+
+
 class AnthropicClient:
     def __init__(self, api_key: str | None):
         if not api_key:

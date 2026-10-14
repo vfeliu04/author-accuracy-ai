@@ -22,7 +22,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from authorai import chat as chatmod
 from authorai import db as dbmod
@@ -423,6 +423,14 @@ def get_document_file(run_id: str, doc_id: str, request: Request, conn: Conn) ->
     )
 
 
+def _not_blank(value: str) -> str:
+    """The Messages API refuses a text block of whitespace alone: refuse it
+    here as a 422 rather than pass it on to fail as a 500."""
+    if not value.strip():
+        raise ValueError("must hold more than whitespace")
+    return value
+
+
 class ChatTurn(BaseModel):
     role: Literal["user", "assistant"]
     # A turn of history is a question or one of the app's own answers sent
@@ -430,14 +438,14 @@ class ChatTurn(BaseModel):
     # (2.1 to 3.3 characters a token over 138 measured answers), so this bound
     # leaves room for a budget raised to about twice that: it is there to
     # refuse a body built to be expensive, not the app's own output.
-    content: str = Field(min_length=1, max_length=16_000)
+    content: Annotated[str, AfterValidator(_not_blank)] = Field(min_length=1, max_length=16_000)
 
 
 class ChatRequest(BaseModel):
     # Bounded so a chat request can't be a memory-amplification vector or a
     # single very expensive model call — the 220MB Content-Length cap is
     # sized for PDF uploads, far too large for a question.
-    question: str = Field(min_length=1, max_length=4000)
+    question: Annotated[str, AfterValidator(_not_blank)] = Field(min_length=1, max_length=4000)
     history: list[ChatTurn] = Field(default_factory=list, max_length=50)
     mode: Literal["evidence", "guidance", "creative"] = "evidence"
 

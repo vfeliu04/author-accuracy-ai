@@ -114,7 +114,10 @@ python -m authorai.cli eval-injection RUN --save before-1.json
 ```
 
 A batch that outlasts the client's one-hour wait is resumed, not paid for
-twice: `verify RUN --resume-batch BATCH_ID`. The source is small enough (8
+twice: `verify RUN --resume-batch BATCH_ID` (a plain `verify RUN` refuses to
+submit the same requests again while that batch is unstored). A resume reads
+the batch's answers again at no cost, but retries each item that failed once
+more at full price. The source is small enough (8
 chunks with the chart) that every chunk is among the 8 shown to the judge for
 every claim; `eval-injection` checks this per attack rather than assuming it.
 

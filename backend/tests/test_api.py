@@ -1038,6 +1038,31 @@ def test_chat_rejects_an_oversized_question(tmp_path):
     assert resp.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"question": "   \n\t"},
+        {"question": "hi", "history": [{"role": "user", "content": "  "}]},
+    ],
+    ids=["blank-question", "blank-turn"],
+)
+def test_chat_rejects_a_question_or_turn_of_whitespace_alone(tmp_path, monkeypatch, body):
+    """The Messages API refuses a text block of whitespace alone; the request
+    is refused here first, as a 422, not passed on to fail as a 500."""
+    from authorai import api as apimod
+
+    settings = _settings(tmp_path)
+    run_id = _done_run(settings)
+
+    def no_model(key):
+        raise AssertionError("the model must not be reached")
+
+    monkeypatch.setattr(apimod, "AnthropicClient", no_model)
+    with TestClient(create_app(settings, worker=_NoopWorker())) as client:
+        resp = client.post(f"/api/runs/{run_id}/chat", headers=AUTH, json=body)
+    assert resp.status_code == 422
+
+
 def test_chat_answers_a_done_run(tmp_path, monkeypatch):
     from authorai import api as apimod
     from tests.conftest import FakeLLM

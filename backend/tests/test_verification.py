@@ -747,6 +747,35 @@ def test_verify_run_passes_a_required_resume_through(conn, verified_run):
     assert llm.require_resumes == [False]
 
 
+def test_verify_run_hands_over_the_hash_of_its_batch_requests_first(conn, verified_run):
+    # The CLI records this hash with a batch it submits and compares it on a
+    # resume: a batch sent other evidence must not be stored as this judgment.
+    run_id, embedder = verified_run["run"], verified_run["embedder"]
+
+    def digests(**kwargs):
+        seen = []
+        llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
+        verify_run(conn, embedder, llm, run_id, model="m", on_requests=seen.append, **kwargs)
+        return seen
+
+    first = digests()
+    assert len(first) == 1 and len(first[0]) == 64
+    assert digests() == first  # the same requests, the same hash
+    assert digests(batch=False) == []  # no batch, nothing to resume
+    text = "Hunger affected 735 million people in 2023, a revised count."
+    source = conn.execute("SELECT id FROM documents WHERE kind = 'SOURCE'").fetchone()["id"]
+    dbmod.add_chunks(conn, run_id, source, [{"text": text}], embedder.embed([text]))
+    assert digests() != first  # other evidence, other requests
+
+    def refuse(digest):
+        raise SystemExit("refused")
+
+    llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
+    with pytest.raises(SystemExit, match="refused"):
+        verify_run(conn, embedder, llm, run_id, model="m", on_requests=refuse)
+    assert not hasattr(llm, "resume_batch_ids")  # refused before any batch work
+
+
 def test_verify_run_batch_matches_sync(conn, verified_run):
     sent = []
     for batch in (False, True):
