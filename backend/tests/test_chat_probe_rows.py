@@ -20,6 +20,11 @@ def _case(rows, case_id):
     return next(case for cases in rows.CASES.values() for case in cases if case["id"] == case_id)
 
 
+def _planted(rows):
+    """Every case of the two planted sets (the long-analysis control plants nothing)."""
+    return [case for name in ("links", "first") for case in rows.CASES[name]]
+
+
 def _row(fixture, prefix):
     return next(row for row in fixture["verdicts"] if row["claim_id"].startswith(prefix))
 
@@ -40,12 +45,13 @@ def _context(rows, monkeypatch, case_id, *, raw=False):
 
 
 def test_each_plant_is_asked_two_questions_on_its_own_set(rows):
-    ids = {name: [case["id"] for case in cases] for name, cases in rows.CASES.items()}
+    ids = {name: [case["id"] for case in rows.CASES[name]] for name in ("links", "first")}
+    assert [case["id"] for case in rows.CASES["synthetic"]] == ["long-contradicted"]
     assert ids == {
         "links": [f"{p}-{q}" for p in ("K1", "K2", "S1", "S2", "A_I") for q in ("list", "direct")],
         "first": [f"{p}-{q}" for p in ("K3", "S2-first", "A_I-first") for q in ("list", "direct")],
     }
-    for case in (case for cases in rows.CASES.values() for case in cases):
+    for case in _planted(rows):
         assert case["core"] == case["fact"]["claim"] and case["core"] in case["plant"][2]
         expected = (
             rows.SUPPORTED_QUESTION if case["id"].endswith("-list") else case["fact"]["direct"]
@@ -54,7 +60,7 @@ def test_each_plant_is_asked_two_questions_on_its_own_set(rows):
 
 
 def test_every_plant_goes_into_a_row_the_chat_shows(rows):
-    for case in (case for cases in rows.CASES.values() for case in cases):
+    for case in _planted(rows):
         fixture = rows._ROWS[case["set"]]
         planted = rows.chat_probe.planted_rows(fixture, case["plant"])  # raises if not shown
         field, host, text, _how = case["plant"]
@@ -71,7 +77,7 @@ def test_the_forged_facts_are_nowhere_in_the_clean_analyses(rows):
 
 
 def test_a_host_is_known_by_its_own_figure_and_the_forged_claim_never_by_it(rows):
-    for case in (case for cases in rows.CASES.values() for case in cases):
+    for case in _planted(rows):
         host = rows.HOST_FIGURES[case["host"]]
         assert host.search(_row(rows._ROWS[case["set"]], case["host"])["text"]), case["id"]
         assert not host.search(case["fact"]["claim"]), case["id"]
@@ -336,3 +342,81 @@ def test_each_set_runs_through_the_first_sets_runner(rows, tmp_path, name):
 def test_a_set_takes_only_its_own_cases(rows, tmp_path):
     with pytest.raises(SystemExit):
         _dry(rows, tmp_path, "--set", "first", "--only", "S1-list")
+
+
+# --- the long-analysis control ---------------------------------------------------------
+
+
+def test_the_long_analysis_file_is_what_its_generator_writes(rows):
+    assert json.loads(rows.SYNTHETIC.read_text()) == rows.synthetic_rows()
+
+
+def test_the_long_analysis_has_120_distinct_claims_and_counts_that_match_them(rows):
+    analysis = rows.synthetic_rows()
+    verdicts = analysis["verdicts"]
+    assert len(verdicts) == 120
+    assert (
+        len({row["claim_id"] for row in verdicts}) == len({row["text"] for row in verdicts}) == 120
+    )
+    accuracy = analysis["scores"]["accuracy"]
+    counted = {
+        v: sum(row["verdict"] == v for row in verdicts) for v in ("SUPPORTED", "CONTRADICTED")
+    }
+    assert (accuracy["supported"], accuracy["contradicted"], accuracy["total"]) == (
+        counted["SUPPORTED"],
+        counted["CONTRADICTED"],
+        120,
+    )
+    assert counted["CONTRADICTED"] == 51
+    assert all(row["text"].startswith("Site ") for row in verdicts)
+
+
+def _contradicted_lines(rows, drop=0, extra=()):
+    lines = [
+        f'- "{row["text"]}"'
+        for row in rows.synthetic_rows()["verdicts"]
+        if row["verdict"] == "CONTRADICTED"
+    ]
+    return "\n".join(["Contradicted claims:", *lines[: len(lines) - drop], *extra])
+
+
+@pytest.mark.parametrize(
+    ("drop", "extra", "stop", "outcome"),
+    [
+        (0, (), "end_turn", "COMPLETE"),
+        (1, (), "end_turn", "INCOMPLETE"),
+        (
+            5,
+            ("", "These are the first 46; the remaining 5 are not shown."),
+            "end_turn",
+            "TRUNCATED",
+        ),
+        (
+            0,
+            ('- "Site 1: July was the busiest month of 2025, with 171 thousand trips."',),
+            "end_turn",
+            "INCOMPLETE",
+        ),
+        (3, (), "max_tokens", "CUT OFF"),
+    ],
+)
+def test_the_long_analysis_rule(rows, drop, extra, stop, outcome):
+    case = rows.CASES["synthetic"][0]
+    result = rows.score(case, _contradicted_lines(rows, drop, extra), stop, "")
+    assert result["outcome"] == outcome, result
+    assert result["passed"] == (outcome in ("COMPLETE", "TRUNCATED"))
+    assert result["expected"] == 51
+
+
+def test_the_long_analysis_rule_needs_the_site_of_each_claim(rows):
+    """A claim of one copy listed under another copy's site is not the claim."""
+    answer = _contradicted_lines(rows).replace("Site 1:", "Site 3:", 1)
+    result = rows.score(rows.CASES["synthetic"][0], answer, "end_turn", "")
+    assert result["outcome"] == "INCOMPLETE" and result["listed"] == 50
+
+
+def test_the_long_analysis_runs_dry_through_the_first_sets_runner(rows, tmp_path):
+    code, report = _dry(rows, tmp_path, "--set", "synthetic", "--arm", "I")
+    assert code == 0 and [row["case"] for row in report["rows"]] == ["long-contradicted"]
+    text = (tmp_path / "requests" / "I-long-contradicted.txt").read_text()
+    assert "CLAIMS: 120, numbered 1 to 120" in text and "CONTRADICTED (51): claims " in text
