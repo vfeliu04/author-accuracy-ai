@@ -778,11 +778,13 @@ def test_a_case_can_be_scored_by_another_sets_scorer(probe, fixture):
 # What `chat_probe.py --dry` printed for the tree that was measured and shipped
 # (the "rule" arm, 2026-10-11): model, token limit, system prompt, every turn,
 # the analysis document with the case's planted text.
+# M6 (in progress): layout I's requests. The hashes of the layout M6 measures and
+# ships replace these once its measurement is done.
 MEASURED_REQUESTS = {
-    "clean-scores": "8895fa15626460662a81370235d1f0c41ecd82a232862e7a73f9db430d22d8ae",
-    "forged-row": "280fcb1b7fdaff5f0bf5731c12ba60369e5e229cae641da0c65c2b914ffd44df",
-    "history": "ef04f0e2cd86a6fae074f3a4e1cff5b380a762ea52fe8e9796307ba174b79f81",
-    "creative": "a328d8404563d537d95d5a6852283bf57b3d9320850272a8b1e121cf66d6738f",
+    "clean-scores": "ec0efc0ec0b850c0e9539fbe5fcf881bed6e06eb64b15fd2df74a6e9cc3bedd5",
+    "forged-row": "d2f2aacf8091478c5ccbc58a1143a32319259ec5c80393acc66a4e8cd4850248",
+    "history": "b699856c3768650bb99ad42cf2ad56c31d8bef6d29095fc25e6fa1029f222389",
+    "creative": "667ffc889c36c65486f74fbe454f5f58389786f70c1f1a1143afa8de7a318076",
 }
 
 
@@ -833,20 +835,20 @@ def test_a_plant_that_is_not_in_the_request_stops_the_case(probe, fixture, monke
 
 def test_a_tree_that_reads_anything_else_is_refused(probe, fixture, monkeypatch):
     llm, _meter, tap = _wired(probe, ["x"] * 4)
-    real = chatmod.build_context
+    real = chatmod._read
 
     def twice(conn, run_id):
         real(conn, run_id)
         return real(conn, run_id)
 
-    monkeypatch.setattr(chatmod, "build_context", twice)
+    monkeypatch.setattr(chatmod, "_read", twice)
     with pytest.raises(RuntimeError, match="readers were called"):
         _run(probe, fixture, "clean-scores", llm, tap, [])
 
     def other_table(conn, run_id):
         chatmod.dbmod.list_claims(conn, run_id)
 
-    monkeypatch.setattr(chatmod, "build_context", other_table)
+    monkeypatch.setattr(chatmod, "_read", other_table)
     with pytest.raises(AttributeError):
         _run(probe, fixture, "clean-scores", llm, tap, [])
     record = probe._Record({"a": 1})
@@ -1013,7 +1015,7 @@ def test_another_set_runs_through_the_same_main(probe, fixture, tmp_path, monkey
     assert report["fixture"] != hashlib.sha256(probe.FIXTURE.read_bytes()).hexdigest()
     assert [row["case"] for row in report["rows"]] == ["links-clean"]
     clean = (requests / "shipped-links-clean.txt").read_text()
-    assert len(re.findall(r"^- \[", clean, re.M)) == 2  # this analysis's two claims, not the 38
+    assert len(re.findall(r"^\d+\. \[", clean, re.M)) == 2  # this set's two claims, not the 38
     assert "desk note K-1" not in clean
     # every case of this set, the planted one with its text where the chat shows a section
     dry = tmp_path / "dry.json"

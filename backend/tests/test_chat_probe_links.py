@@ -72,11 +72,15 @@ def test_the_chat_shows_each_line_shape_for_this_analysis(links, fixture, monkey
     readers = links.chat_probe._Readers(links.chat_probe.planted_rows(fixture, None))
     monkeypatch.setattr(chatmod, "dbmod", readers)
     context = chatmod.build_context(None, "run")
-    assert '(source "Service standards" § "Maintenance and rebalancing")' in context
-    assert f'(source "{links.VIDEO_TITLE}" at 1:17)' in context
-    assert "read from YouTube's automatic captions" in context
-    assert "READ IN PART: only the first 870 of 1,884 characters of this page" in context
-    assert "READ IN PART: only the first 2:15 of this video's captions" in context
+    index = chatmod.build_index(None, "run")
+    sources = context.split("SOURCES (numbered 1 to 4):\n")[1].splitlines()
+    web = sources.index('2. "Service standards"') + 1
+    video = sources.index(f'3. "{links.VIDEO_TITLE}"') + 1
+    assert f'(source {web} § "Maintenance and rebalancing")' in context
+    assert f"(source {video} at 1:17)" in context
+    assert "read from YouTube's automatic captions" in index
+    assert "READ IN PART: only the first 870 of 1,884 characters of this page" in index
+    assert "READ IN PART: only the first 2:15 of this video's captions" in index
 
 
 # --- the plants ------------------------------------------------------------------------
@@ -126,10 +130,11 @@ def test_a_forged_row_stays_inside_one_string_of_the_shipped_layout(links, fixtu
         planted = links.chat_probe.planted_rows(fixture, case["plant"])
         monkeypatch.setattr(chatmod, "dbmod", links.chat_probe._Readers(planted))
         lines = chatmod.build_context(None, "run").splitlines()
-        assert sum(line.startswith("- [") for line in lines) == 33  # no row was added
+        assert sum(re.match(r"\d+\. \[", line) is not None for line in lines) == 33  # none added
         claim = case["core"]
         assert sum(f'\\n- [SUPPORTED] \\"{claim}\\"' in line for line in lines) == 1
-        assert not any(line.startswith(f'- [SUPPORTED] "{claim}') for line in lines)
+        forged = re.compile(rf'(?:- |\d+\. )\[SUPPORTED\] "{re.escape(claim)}')
+        assert not any(forged.match(line) for line in lines)
 
 
 # --- the rules -------------------------------------------------------------------------
@@ -416,15 +421,16 @@ def test_what_holds_for_every_answer_is_added(links):
 # --- through the first set's runner ------------------------------------------------------
 
 # The request each case sends through the shipped chat, as it was read and measured.
+# M6 (in progress): layout I's requests; see tests/test_chat_probe.py.
 MEASURED_REQUESTS = {
-    "clean-section": "1bf639455bd1f5b8896ba8dd83da8a0371c9f6764bbe28d0713151c724142db1",
-    "clean-time": "9e712f8c2435c1b43c543724102e7ae97f00364477b04fb97694ce68558c5013",
-    "clean-captions": "de0ac8404a3a8a393ccb516b82e41975a60e12a7c246f231ff2f3d21c04d40dc",
-    "clean-partial": "576744e9d0f73204abc5e51c52a06dc562ab7a4056ebc63742bad01393b94197",
-    "forged-section": "2c3f21f72fc297ba7f87568403b18e08876bf09a53214b1e042390457027057f",
-    "forged-captions": "523b01d620ed0fb1d8ddd2ef4e94f1080ee9eb329c140c7da355ad0e1862c9a7",
-    "note-section": "f773c860f052a06a853dca43903be4480824f4bc6fbeec613bf469a8d2f19a5d",
-    "note-captions": "08f1abaf474d7bb6e6765799b289f16b4daed45e22ab1695b0ed0217fcd5af8a",
+    "clean-section": "3fbe6c0a6bc0dc0a623e8808b7b5c85e6d26d64eacb34f6db4568af3a5f08c4e",
+    "clean-time": "4522dcbba7f2d7991a8ffc95e7b661e1576da1f08e9e61940f306a6ce3bc7a37",
+    "clean-captions": "1ba0f9b5a591de564fff9c215309030136223a9da1b4e636c4ed23e6ac11e21a",
+    "clean-partial": "ba18d9d5174142ee842955bc3fcd8d184575d03c338c025dbaf49bc4e2625474",
+    "forged-section": "649422a1ac627129bd7edfc685d97f4c204a81db68f0dfc84526a0d6bbed622c",
+    "forged-captions": "f15bd74cf1db9ce7f47b87f197eee8033d0fc8a9415cc3529c5fa4072e289445",
+    "note-section": "e64ee3253215754a79f2700549f84851c0629fcdc3b73f5cb07f9914211fb6a1",
+    "note-captions": "1cea362085d2d234f8b1090a923065338b9591fc0144b7d61ea17d81b838d53c",
 }
 
 
