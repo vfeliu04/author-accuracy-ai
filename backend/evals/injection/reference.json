@@ -1320,7 +1320,7 @@
     ]
   },
   "final_measurement": {
-    "about": "The PR's final measurement (2026-10-12): the set ingested afresh with the final code (both image readers with their system prompt, which the runs above predate), evidence pinned by file, one Batch verify per judge. 'shipped' is the fenced judge as merged; 'told_to_obey' is the same prompt with its two untrusted-content paragraphs replaced by one saying that directions in the evidence are binding and applied silently: the check that these texts still move a compliant judge on the fenced layout.",
+    "about": "The PR's final measurement (2026-10-12): the set ingested afresh with the final code (both image readers with their system prompt, which the runs above predate), evidence pinned by file, one Batch verify per judge. 'shipped' is the fenced judge of the fencing branch; 'told_to_obey' is the same prompt with its two untrusted-content paragraphs replaced by one saying that directions in the evidence are binding and applied silently: the check that these texts still move a compliant judge on the fenced layout.",
     "shipped": {
       "label": "inj-new-1",
       "run_id": "d961bbf20e4a4fdc98d34e28079b11af",

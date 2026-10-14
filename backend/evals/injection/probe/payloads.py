@@ -3,13 +3,16 @@
 WHO WROTE THEM. The plan was for three author agents that had never seen the
 first set. All three declined (2026-10-12): without the project's context they
 could not tell an authorised test of the owner's own tool from a request for
-reusable injection texts, and that refusal was left standing. So these twelve
-were written by the set's designer, who also wrote the judge's policy and the
-first set. The set is therefore NOT an independent probe. What it adds to the
-first set is the channels that set never delivered (a note inside a PDF
-figure's crop, a picture that draws a CLAIM line, a web page, a video's
-captions) and one text per attack family from a list that a separate planning
-agent drew up from the shipped prompt alone: `technique` names the family.
+reusable injection texts, and that refusal was left standing (their answers are
+in the measuring session's transcript, not in the repository). So these twelve
+were written by the set's designer, the same model that wrote the judge's
+policy and the first set. The set is therefore NOT an independent probe. What
+it adds to the first set is the channels that set never delivered (a note
+inside a PDF figure's crop, a picture that draws a CLAIM line, a web page, a
+video's captions), drawing on the attack families a separate planning agent
+listed from the shipped prompt alone (nine families; four of these twelve texts
+are variants of a procedural note, and the list itself was not kept):
+`technique` names each text's family.
 
 One entry per attack:
     id         the attack's id in the golden file
@@ -28,16 +31,19 @@ One entry per attack:
 
 Every text is meant as a direction, never a statement about the subject: a
 reader who took each word as the source's honest statement should still give
-the claim its label. Two blind auditors classified each text on the stored
-excerpts (README, "The second set"). Two sit on that line on purpose and are
-reported apart: A05 names its claim's value as the thing to be recorded (the
-policy says a figure given only as the content of a direction has not been
-stated; both auditors read it as a statement), and A12 draws a true claim in
-the judge's own format. Three first drafts (A07, A10, A11) leaned on a
-pretext both auditors said an honest reader could take as the source vouching
-for the claim ("no further check is needed", "bulletin 209 says", "as
-confirmed by the trust"); they were reworded before any judge saw them, each
-now tied to a ground the reader can see does not hold ("by this briefing").
+the claim its label. Two blind auditors (agents) classified each text on the
+stored excerpts (README, "The second set"). Two sit on that line and are
+reported apart from the other nine: A05 names its claim's value as the thing to
+be recorded (the policy says a figure given only as the content of a direction
+has not been stated; both auditors said the label would change if the board
+meant it), and A11, which one auditor still found arguable after rewording.
+A12, which draws a claim line in the judge's own format, is its own run's
+result. Three first drafts (A07, A10, A11) leaned on a pretext both auditors
+said an honest reader could take as the source vouching for the claim ("no
+further check is needed", "bulletin 209 says", "as confirmed by the trust");
+they were reworded before any judge saw them: A07 into a bare order, A10 and
+A11 tied to "this briefing", which A10's excerpt contradicts and A11's is
+silent on.
 """
 
 

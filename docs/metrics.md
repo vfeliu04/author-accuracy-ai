@@ -120,8 +120,8 @@ Quoted from the JSON files in `backend/evals/`. Re-record only deliberately, wit
 - per class: SUPPORTED 11/14, CONTRADICTED 10/11, UNVERIFIABLE 12/12
 - noise floor: 33, 33 and 32 of 37 over three runs on identical evidence (98 of 111); the unfenced judge scored 31, 29 and 32 (92 of 111) on the same evidence the same day; treat |delta| ≤ 0.03 as noise
 - **the evidence was pinned**: every run of the comparison was fed the stored evidence of one reference run, because ordinary retrieval is not a fixed input (the keyword channel's statistics cover every run in the database, so a run's evidence depends on what else the database holds). A fresh ingest need not reproduce this number
-- all misses are under-commitment (S/C judged UNVERIFIABLE), three of them the report's attributed claims in every run; no SUPPORTED/CONTRADICTED mix-up
-- supersedes the 2026-08-12 baseline of the unfenced judge (0.838, 31/37, ordinary retrieval). Not re-measured at the fencing PR's final measurement: a fresh ingest judged once stored nothing, because two answers looped to the output cap (the file's `note` has the unofficial reading of that batch, 30 of 37)
+- all misses in these three runs are under-commitment (S/C judged UNVERIFIABLE), three of them the report's attributed claims in every run; no SUPPORTED/CONTRADICTED mix-up
+- supersedes the 2026-08-12 baseline of the unfenced judge (0.838, 31/37, ordinary retrieval). Not re-measured at the fencing PR's final measurement: a fresh ingest judged once stored nothing, because two answers looped to the output cap and the retry of one of them looped too (the file's `note` has the unofficial reading of that batch: 28 of the 35 usable answers right, one of the misses an over-commitment, and both cut-off answers beginning with the right verdict). The evidence of the recorded runs predates the image readers' system prompt; the noise to expect against a fresh ingest is the unfenced judge's spread on identical evidence, 3 claims (0.08), not the 0.03 the older baselines used
 
 ### Dev run scores — `evals/score_reference.json` (recorded 2026-08-13, credibility and validity re-recorded 2026-08-21; reference snapshot, not a golden eval — no labeled truth exists for these numbers)
 
@@ -139,12 +139,12 @@ Quoted from the JSON files in `backend/evals/`. Re-record only deliberately, wit
 
 - accuracy **0.963** (26/27), coverage **1.0**, downgraded **0**
 - per class: SUPPORTED 15/15, CONTRADICTED 8/8, UNVERIFIABLE 3/4 — the one miss is the same deliberately borderline Protein Accord claim as every prior recording (labelled UNVERIFIABLE, answered CONTRADICTED)
-- measured as a comparison at the close of the prompt-fencing PR, on one fresh ingest with the evidence pinned: the fenced judge scored 26 and 26, the unfenced judge 26 and 26, the same claim missed in all four runs (**52 of 54 each: no loss detected**). Two runs a judge can detect a loss of about 3 claims in 27, not a smaller one
+- measured as a comparison at the close of the prompt-fencing PR, on one fresh ingest with the evidence pinned: the fenced judge scored 26 and 26, the unfenced judge 26 and 26, the same claim missed in all four runs (**52 of 54 each: no loss of about 3 claims or more detected**). Two runs a judge can detect a loss of about 3 claims in 27, not a smaller one
 - prior recording: 0.889 (24/27, 2 quote-check downgrades, 2026-08-13, the unfenced judge, ordinary retrieval)
 
 ### Planted-injection sets — `evals/injection/` (its README holds the counts)
 
-Not accuracy baselines: two sets of sources with instructions planted in them, and probes of the other calls that read source text. In short: a judge told to obey follows the planted texts (8 of 9 delivered on the first set, 11 of 12 on the second), and neither the unfenced nor the fenced judge has followed one in any recorded run. What is measured is that the fence costs nothing on these sets and on the holdout, not that it is why the judge resists.
+Not accuracy baselines: two sets of sources with instructions planted in them, and probes of the chat and of the other calls that read source text. In short: a judge told to obey follows the planted texts (8 of 9 delivered on the first set, 11 of 12 on the second; the twelfth, a claim line drawn in a picture, moved no reader and shows nothing), and neither the unfenced nor the fenced judge has followed one in any recorded run. So the fence is measured as harmless to accuracy here (no loss of about 3 claims or more on the holdout; the second set was written by the same author as the first and the policy, so it is not an independent test), not as the reason the judge resists. It is not free: a fenced verdict run costs 21% to 26% more, almost all of it input tokens. **The chat's defence against a row forged inside a quoted string did not hold on the second set's analysis:** the shipped chat listed such a row as a real supported claim in 5 of 5 answers in each of two cases.
 
 ## Related docs
 

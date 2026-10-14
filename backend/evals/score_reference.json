@@ -26,5 +26,5 @@
     "noise_floor": "rubric component noise ±2-3 pts over 3 same-code runs (34.6/39.2/35.1); treat small deltas as noise",
     "note": "Within rubric noise of the prior 42.8/42.0/42.5 readings. Note: better date extraction can shift validity slightly through the code-side recency component (more sources now have known years). Low score is plausibly CORRECT for the fake report — deliberately self-contradicting, no methodology section."
   },
-  "note": "Reference snapshot, not a golden eval — there is no labeled truth for these scores. Exists so future scoring changes have a comparison point. Companion verdict eval on the same run: accuracy 0.86 (32/37), coverage 1.00, within noise of the 0.838 verdict baseline (which was deliberately NOT re-recorded — verdict semantics are untouched by the stance change)."
+  "note": "Reference snapshot, not a golden eval — there is no labeled truth for these scores. Exists so future scoring changes have a comparison point. Companion verdict eval on the same run: accuracy 0.86 (32/37), coverage 1.00, within noise of the 0.838 verdict baseline (which was deliberately NOT re-recorded — verdict semantics are untouched by the stance change). Since re-recorded (2026-10-12) for the fenced judge as 0.892 on pinned evidence; this snapshot is the unfenced judge's and was not measured again."
 }
