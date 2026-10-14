@@ -747,33 +747,87 @@ def test_verify_run_passes_a_required_resume_through(conn, verified_run):
     assert llm.require_resumes == [False]
 
 
-def test_verify_run_hands_over_the_hash_of_its_batch_requests_first(conn, verified_run):
-    # The CLI records this hash with a batch it submits and compares it on a
-    # resume: a batch sent other evidence must not be stored as this judgment.
+def test_verify_run_hands_over_its_batch_requests_and_their_evidence_first(conn, verified_run):
+    # The CLI records both with a batch it submits. A resume rebuilds the
+    # evidence from the recorded chunk ids instead of retrieving again
+    # (retrieval is not repeatable: the embeddings vary from call to call and
+    # the keyword ranking's statistics cover every run in the database), so
+    # the rebuilt requests hash the same, and the answers are checked against
+    # the evidence the judge was shown.
     run_id, embedder = verified_run["run"], verified_run["embedder"]
 
-    def digests(**kwargs):
+    def handed(**kwargs):
         seen = []
         llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
-        verify_run(conn, embedder, llm, run_id, model="m", on_requests=seen.append, **kwargs)
+        verify_run(
+            conn, embedder, llm, run_id, model="m", on_requests=lambda *a: seen.append(a), **kwargs
+        )
         return seen
 
-    first = digests()
-    assert len(first) == 1 and len(first[0]) == 64
-    assert digests() == first  # the same requests, the same hash
-    assert digests(batch=False) == []  # no batch, nothing to resume
+    [(requests, evidence)] = handed()
+    assert len(requests) == 64
+    assert set(evidence) == set(verified_run["claims"])
+    stored = {
+        v["claim_id"]: json.loads(v["evidence_chunk_ids"])
+        for v in dbmod.list_verdicts(conn, run_id)
+    }
+    assert evidence == stored  # what the rows record is what the judge was sent
+    assert handed(batch=False) == []  # no batch, nothing to resume
+
     text = "Hunger affected 735 million people in 2023, a revised count."
     source = conn.execute("SELECT id FROM documents WHERE kind = 'SOURCE'").fetchone()["id"]
     dbmod.add_chunks(conn, run_id, source, [{"text": text}], embedder.embed([text]))
-    assert digests() != first  # other evidence, other requests
+    [(retrieved, _)] = handed()
+    assert retrieved != requests  # retrieved again, the evidence moved
+    [(rebuilt, again)] = handed(evidence_ids=evidence)
+    assert (rebuilt, again) == (requests, evidence)  # rebuilt from the record, it did not
+    stored = {
+        v["claim_id"]: json.loads(v["evidence_chunk_ids"])
+        for v in dbmod.list_verdicts(conn, run_id)
+    }
+    assert stored == evidence
 
-    def refuse(digest):
+    def refuse(*_):
         raise SystemExit("refused")
 
     llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
     with pytest.raises(SystemExit, match="refused"):
         verify_run(conn, embedder, llm, run_id, model="m", on_requests=refuse)
     assert not hasattr(llm, "resume_batch_ids")  # refused before any batch work
+
+
+def test_recorded_evidence_must_be_this_runs_source_chunks_for_every_claim(conn, verified_run):
+    run_id, embedder = verified_run["run"], verified_run["embedder"]
+    first, second = verified_run["claims"]
+    source_chunk = conn.execute(
+        "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE d.kind = 'SOURCE'"
+    ).fetchone()["id"]
+    report_chunk = conn.execute(
+        "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE d.kind = 'REPORT'"
+    ).fetchone()["id"]
+    llm = FakeLLM(parse_results={Verdict: _canned_verdicts()})
+    for evidence_ids, message in (
+        ({first: [source_chunk]}, "no recorded evidence"),  # a claim the batch never saw
+        ({first: [source_chunk], second: [report_chunk]}, "not a SOURCE chunk"),
+        ({first: [source_chunk], second: [999_999]}, "not a SOURCE chunk"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            verify_run(conn, embedder, llm, run_id, model="m", evidence_ids=evidence_ids)
+    assert not hasattr(llm, "resume_batch_ids")
+
+
+def test_the_batch_fingerprint_covers_pictures_model_and_budget(tmp_path):
+    from authorai.llm import BATCH_MAX_TOKENS, ParseItem, batch_fingerprint
+
+    picture = tmp_path / "chart.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\none chart")
+    items = [*_items(), ParseItem("pic", "s", "p3", Verdict, images=[picture])]
+    base = batch_fingerprint(items, "m")
+    assert batch_fingerprint(list(reversed(items)), "m") == base  # order is not content
+    assert batch_fingerprint(items, "other-model") != base
+    assert batch_fingerprint(items, "m", BATCH_MAX_TOKENS - 1) != base
+    picture.write_bytes(b"\x89PNG\r\n\x1a\nanother chart")
+    assert batch_fingerprint(items, "m") != base
 
 
 def test_verify_run_batch_matches_sync(conn, verified_run):

@@ -1,7 +1,7 @@
 import { fireEvent, render } from "@testing-library/react";
 import ReactMarkdown from "react-markdown";
 import { describe, expect, it } from "vitest";
-import ChatPanel, { ANSWER_MARKDOWN, historyTurns, type ChatMessage } from "./ChatPanel";
+import ChatPanel, { ANSWER_MARKDOWN, historyTurns, wellFormed, type ChatMessage } from "./ChatPanel";
 
 // Every attribute through which an element can load, open or post to an address.
 const ADDRESS_ATTRIBUTES =
@@ -104,6 +104,17 @@ describe("historyTurns", () => {
 describe("half a character", () => {
   // A lone half of a surrogate pair cannot be sent: the server cannot read it,
   // and kept in the conversation it would fail every later question too.
+  it.each([
+    ["a whole pair is kept", "a\ud83d\ude00b", "a\ud83d\ude00b"],
+    ["a high half at the end", "ab\ud83d", "ab\ufffd"],
+    ["a high half before a high half", "\ud83d\ud83d\ude00", "\ufffd\ud83d\ude00"],
+    ["a low half at the start", "\ude00ab", "\ufffdab"],
+    ["a low half after a whole pair", "\ud83d\ude00\ude00", "\ud83d\ude00\ufffd"],
+    ["text with no halves", "plain é text", "plain é text"]
+  ])("%s", (_name, text, expected) => {
+    expect(wellFormed(text)).toBe(expected);
+  });
+
   it("is replaced in the history the page sends", () => {
     const [turn] = historyTurns([{ id: 1, author: "user", text: "a\ud83d b" }]);
     expect(turn.content).toBe("a\ufffd b");

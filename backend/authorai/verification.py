@@ -456,6 +456,63 @@ def retrieve_evidence(
     }
 
 
+def evidence_from_ids(
+    conn: sqlite3.Connection,
+    run_id: str,
+    claims: list[dict],
+    evidence_ids: Mapping[str, Sequence[int]],
+) -> dict[str, list[Hit]]:
+    """The evidence a batch was sent, rebuilt from the chunk ids recorded with
+    it (in their order) instead of retrieved again.
+
+    Retrieval is not repeatable: the embeddings vary from call to call, and the
+    keyword ranking's statistics cover every run in the database. A resumed
+    batch rebuilt this way is asked, and its quotes checked, on what the judge
+    was shown. A claim with no record, or an id that is not one of this run's
+    SOURCE chunks, raises: the claims or the sources changed since.
+    """
+    rows = {
+        row["id"]: row
+        for row in conn.execute(
+            """
+            SELECT c.id, c.doc_id, c.page, c.section, c.kind, c.text, c.figure_id
+            FROM chunks c JOIN documents d ON d.id = c.doc_id
+            WHERE c.run_id = ? AND d.kind = 'SOURCE'
+            """,
+            (run_id,),
+        )
+    }
+    evidence: dict[str, list[Hit]] = {}
+    for claim in claims:
+        if claim["id"] not in evidence_ids:
+            raise ValueError(
+                f"Claim {claim['id']} has no recorded evidence: the claims changed since "
+                "the batch was submitted"
+            )
+        ids = list(evidence_ids[claim["id"]])
+        missing = [chunk_id for chunk_id in ids if chunk_id not in rows]
+        if missing:
+            raise ValueError(
+                f"Recorded evidence {missing} for claim {claim['id']} is not a SOURCE chunk "
+                f"of run {run_id}"
+            )
+        evidence[claim["id"]] = [
+            Hit(
+                chunk_id=row["id"],
+                doc_id=row["doc_id"],
+                page=row["page"],
+                section=row["section"],
+                kind=row["kind"],
+                text=row["text"],
+                score=0.0,
+                channels=("recorded",),
+                figure_id=row["figure_id"],
+            )
+            for row in (rows[chunk_id] for chunk_id in ids)
+        ]
+    return evidence
+
+
 def images_for(conn: sqlite3.Connection, hits: list[Hit]) -> list[Path]:
     """PNGs for the attached figure hits, so the judge sees the chart.
 
@@ -489,16 +546,19 @@ def verify_run(
     resume_batch_id: str | None = None,
     on_batch_created: "Callable[[str], None] | None" = None,
     require_resume: bool = False,
-    on_requests: "Callable[[str], None] | None" = None,
+    on_requests: "Callable[[str, dict[str, list[int]]], None] | None" = None,
+    evidence_ids: "Mapping[str, Sequence[int]] | None" = None,
 ) -> dict:
     """Verify every claim in a run; stores verdicts (replacing) and returns a summary.
 
     `resume_batch_id`/`on_batch_created`/`require_resume` thread through to
     parse_batch so a caller (the jobs worker, the CLI) can persist a submitted
     batch's id and resume it on retry instead of paying for a duplicate.
-    `on_requests` receives the batch requests' fingerprint before any batch is
-    submitted or resumed, and may raise to stop: the CLI records it with a
-    batch and refuses a resume whose requests (evidence included) differ.
+    `on_requests` receives the batch requests' fingerprint and each claim's
+    evidence chunk ids before any batch is submitted or resumed, and may raise
+    to stop; `evidence_ids` judges on that recorded evidence instead of
+    retrieving again (evidence_from_ids). The CLI records both with a batch,
+    and resumes it on the recorded evidence, refusing if the requests differ.
     """
     if k < 1:
         raise ValueError(
@@ -525,7 +585,11 @@ def verify_run(
             "vacuously UNVERIFIABLE; ingest sources first"
         )
 
-    evidence = retrieve_evidence(conn, embedder, run_id, claims, k=k)
+    evidence = (
+        retrieve_evidence(conn, embedder, run_id, claims, k=k)
+        if evidence_ids is None
+        else evidence_from_ids(conn, run_id, claims, evidence_ids)
+    )
     claims_by_id = {claim["id"]: claim for claim in claims}
     # The one rule for a source's kind (a document with no upload row is a
     # PDF, as the report and the chat say), and what each figure's text is.
@@ -565,7 +629,13 @@ def verify_run(
     if items:
         if batch:
             if on_requests is not None:
-                on_requests(batch_fingerprint(items, model))
+                on_requests(
+                    batch_fingerprint(items, model),
+                    {
+                        claim_id: [hit.chunk_id for hit in hits]
+                        for claim_id, hits in evidence.items()
+                    },
+                )
             results = llm.parse_batch(
                 model=model,
                 items=items,

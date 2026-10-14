@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 from authorai import db as dbmod
@@ -289,9 +290,25 @@ def _batch_record(settings: Settings, batch_id: str) -> Path:
     return Path(settings.db_path).parent / "batches" / f"{batch_id}.json"
 
 
+def _read_record(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_record(path: Path, record: dict) -> None:
+    """Whole or not at all: a torn record would hide an unstored batch from the
+    guard below, or stop its resume."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_suffix(".part")
+    part.write_text(json.dumps(record))
+    part.replace(path)
+
+
 def _check_batch_record(settings: Settings, batch_id: str, judge: dict) -> dict:
-    """Refuse to resume a batch this judge configuration did not submit;
-    returns its record (whose requests are checked once they are built).
+    """Refuse to resume a batch this judge configuration did not submit, or
+    whose record holds no evidence; returns the record.
 
     A resumed batch's answers are stored under the CURRENT code's stamp, and
     the freshness guards then trust them: a batch submitted before a prompt
@@ -304,80 +321,91 @@ def _check_batch_record(settings: Settings, batch_id: str, judge: dict) -> dict:
             f"There is no record of batch {batch_id} under {path.parent}: `verify` did not "
             "submit it against this database, so nothing proves which judge answered it."
         )
-    record = json.loads(path.read_text())
+    record = _read_record(path)
+    if record is None:
+        raise SystemExit(f"The record of batch {batch_id} ({path}) cannot be read.")
     for field, now in judge.items():
         if record.get(field) != now:
             raise SystemExit(
                 f"Batch {batch_id} cannot be resumed here: its {field} differs (submitted "
                 f"with {record.get(field)!r}, now {now!r})."
             )
+    if not isinstance(record.get("evidence"), dict):
+        raise SystemExit(
+            f"Batch {batch_id} cannot be resumed here: its record holds no evidence, so its "
+            "answers could not be checked against what the judge was shown."
+        )
     return record
 
 
-def _unstored_batches(settings: Settings, record: dict) -> list[str]:
-    """Batches recorded for this judge and these exact requests whose answers
-    were never stored (a queue that outlasted the wait, an item that failed
-    twice): submitting the same requests again would pay for them twice."""
+def _batch_records(settings: Settings, judge: dict) -> list[tuple[str, dict]]:
+    """Every readable batch record for this run and judge, oldest first."""
     folder = Path(settings.db_path).parent / "batches"
     found = []
-    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
-        try:
-            other = json.loads(path.read_text())
-        except (OSError, ValueError):
-            continue
-        if other.get("stored") is False and all(other.get(f) == v for f, v in record.items()):
-            found.append(path.stem)
-    return found
+    for path in folder.glob("*.json") if folder.is_dir() else []:
+        record = _read_record(path)
+        if record is not None and all(record.get(f) == v for f, v in judge.items()):
+            found.append((path.stem, record))
+    return sorted(found, key=lambda item: str(item[1].get("submitted", "")))
+
+
+def _unstored(record: dict) -> bool:
+    """Submitted and paid for, its answers never stored (a queue that outlasted
+    the wait, an item that failed twice), and no later run stored this run's."""
+    return record.get("stored") is False and not record.get("superseded_by")
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
     resuming = args.resume_batch is not None
     if args.sync and resuming:
         raise SystemExit("--resume-batch resumes a Batch API run; it cannot apply with --sync")
+    if args.pay_again and resuming:
+        raise SystemExit("--pay-again judges anew; it cannot apply with --resume-batch")
     settings, conn = _setup()
     judge = {"run_id": args.run_id, **judge_identity(settings.verdict_model, args.k)}
     resumed = _check_batch_record(settings, args.resume_batch, judge) if resuming else None
-    batch = {"id": args.resume_batch}
-
-    def check_requests(requests: str) -> None:
-        # Called with the hash of the exact batch requests before any batch
-        # work: a resumed batch must have been sent these (the evidence is
-        # retrieved again now, and can differ), and a plain rerun must not pay
-        # again for requests whose batch was never stored.
-        if resumed is not None and resumed.get("requests") != requests:
-            raise SystemExit(
-                f"Batch {args.resume_batch} cannot be resumed here: its requests differ from "
-                "the ones built now (other evidence was retrieved, or its record predates "
-                "request hashes)."
-            )
-        unstored = (
-            []
-            if resuming or args.new_batch
-            else _unstored_batches(settings, {**judge, "requests": requests})
-        )
+    if not resuming and not args.pay_again:
+        # New answers are paid for, by batch or --sync: while a batch for this
+        # run and judge sits unstored, judging again would pay twice.
+        unstored = [
+            batch_id for batch_id, record in _batch_records(settings, judge) if _unstored(record)
+        ]
         if unstored:
             raise SystemExit(
-                f"Batch {unstored[-1]} was submitted for these exact requests and its answers "
+                f"Batch {unstored[-1]} was submitted for this run and judge and its answers "
                 f"were never stored: resume it with `verify {args.run_id} --resume-batch "
-                f"{unstored[-1]}`, or pass --new-batch to pay for a new one."
+                f"{unstored[-1]}`, or pass --pay-again to pay for new answers"
+                + (f" ({len(unstored)} such batches)." if len(unstored) > 1 else ".")
             )
-        judge["requests"] = requests
+    sent: dict = {}
+    batch = {"id": args.resume_batch}
 
-    def record(batch_id: str, stored: bool) -> None:
-        path = _batch_record(settings, batch_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({**judge, "stored": stored}))
+    def check_requests(requests: str, evidence: dict) -> None:
+        # Called before any batch work. A resume is rebuilt from the evidence
+        # its record holds, so the requests hash the same unless something
+        # else changed (the claims, a figure, the code): then its answers are
+        # not this judgment.
+        if resumed is not None and resumed.get("requests") != requests:
+            raise SystemExit(
+                f"Batch {args.resume_batch} cannot be resumed here: the requests rebuilt from "
+                "its recorded evidence differ from the ones it was sent (a figure or the code "
+                "changed since)."
+            )
+        sent.update(requests=requests, evidence=evidence)
 
     def announce(batch_id: str) -> None:
         # Printed the moment it exists, so a queue that outlasts the client's
         # wait is resumed with --resume-batch instead of paid for twice; then
-        # recorded, so that resume can prove it is the same judge and the same
-        # requests. The batch already exists, so a failed record write must
-        # not fail this run.
+        # recorded with the judge, the requests and the evidence, so that
+        # resume proves it is the same judgment. The batch already exists, so
+        # a failed record write must not fail this run.
         print(f"batch: {batch_id}", flush=True)
         batch["id"] = batch_id
         try:
-            record(batch_id, stored=False)
+            _write_record(
+                _batch_record(settings, batch_id),
+                {**judge, **sent, "submitted": datetime.now(UTC).isoformat(), "stored": False},
+            )
         except OSError as exc:
             print(f"WARNING: could not record batch {batch_id} ({exc}); it cannot be resumed")
 
@@ -395,12 +423,21 @@ def cmd_verify(args: argparse.Namespace) -> None:
         require_resume=resuming,
         on_batch_created=announce,
         on_requests=check_requests,
+        evidence_ids=resumed["evidence"] if resumed is not None else None,
     )
-    if batch["id"] is not None:
+    # This run's answers are stored now: its batch is, and no batch of the
+    # same run and judge left unstored should stop the next judgment.
+    for batch_id, record in _batch_records(settings, judge):
+        if batch_id == batch["id"]:
+            record["stored"] = True
+        elif _unstored(record):
+            record["superseded_by"] = batch["id"] or "sync"
+        else:
+            continue
         try:
-            record(batch["id"], stored=True)
+            _write_record(_batch_record(settings, batch_id), record)
         except OSError:
-            pass  # announce already warned that this batch has no record
+            print(f"WARNING: could not update the record of batch {batch_id}")
     for verdict, count in summary["counts"].items():
         print(f"{verdict}: {count}")
     print(
@@ -621,15 +658,18 @@ def main() -> None:
         "--resume-batch",
         metavar="BATCH_ID",
         help=(
-            "Poll this already-submitted batch (the id `verify` printed) instead of a new one; "
-            "its answers are read again at no cost, but items that failed are retried once "
-            "each at full price"
+            "Poll this already-submitted batch (the id `verify` printed) instead of a new one, "
+            "on the evidence it was sent; its answers are read again at no cost, but items "
+            "that failed are retried once each at full price"
         ),
     )
     verify.add_argument(
-        "--new-batch",
+        "--pay-again",
         action="store_true",
-        help="Submit a new batch even though one for these exact requests was never stored",
+        help=(
+            "Judge anew (batch or --sync) even though a batch for this run and judge was "
+            "never stored; its answers are paid for again"
+        ),
     )
     verify.set_defaults(func=cmd_verify)
 

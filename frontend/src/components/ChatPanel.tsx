@@ -24,10 +24,28 @@ const HISTORY_TURN_MAX_CHARS = 16_000;
 // The server cannot read half a character (a lone UTF-16 surrogate), and a turn
 // holding one would fail every later question until it left the history. Text
 // typed or pasted can hold one; it becomes U+FFFD before anything is sent.
-const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
-
+// A loop over code units, not a regular expression: the one that matches a
+// lone low half needs a lookbehind, which Safari before 16.4 cannot parse, and
+// at module level that would stop the whole app from loading there.
 export function wellFormed(text: string): string {
-  return text.replace(LONE_SURROGATE, "\ufffd");
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const unit = text.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += text[i] + text[i + 1];
+        i += 1;
+      } else {
+        out += "\ufffd";
+      }
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      out += "\ufffd";
+    } else {
+      out += text[i];
+    }
+  }
+  return out;
 }
 
 // slice() counts UTF-16 units, so a cut can also fall inside an emoji and leave

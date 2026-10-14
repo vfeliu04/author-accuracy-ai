@@ -190,10 +190,14 @@ def test_ingest_reads_through_the_fenced_readers(conn, tmp_path, monkeypatch, im
     assert (request["system"], request["prompt"]) == (IMAGE_READER_SYSTEM, prompt)
 
 
+EVIDENCE = {"claim-1": [3, 1, 2], "claim-2": []}
+
+
 def _stub_verify(monkeypatch, conn, tmp_path, requests="digest-1", fail=False):
     """verify against a stand-in verify_run; returns the calls it received.
-    It hands over `requests` as its batch requests' hash and, with `fail`,
-    fails after its batch exists (a queue timeout, an item failing twice)."""
+    It hands over `requests` as its batch requests' hash with EVIDENCE as each
+    claim's chunk ids and, with `fail`, fails after its batch exists (a queue
+    timeout, an item failing twice)."""
     from authorai.config import Settings
 
     settings = Settings(
@@ -205,15 +209,13 @@ def _stub_verify(monkeypatch, conn, tmp_path, requests="digest-1", fail=False):
     calls = []
 
     def fake_verify_run(conn_, embedder, llm, run_id, **kwargs):
-        # Mirrors verify_run and parse_batch: the requests' hash comes first,
-        # then a new batch announces itself; a resumed one does not.
-        if not kwargs.get("batch", True):
-            calls.append(kwargs)
-        else:
-            kwargs["on_requests"](requests)
-            calls.append(kwargs)
-            if kwargs.get("resume_batch_id") is None:
-                kwargs["on_batch_created"]("msgbatch_new")
+        # Mirrors verify_run and parse_batch: the requests' hash and evidence
+        # come first, then a new batch announces itself; a resumed one does not.
+        if kwargs.get("batch", True):
+            kwargs["on_requests"](requests, kwargs["evidence_ids"] or EVIDENCE)
+        calls.append(kwargs)
+        if kwargs.get("batch", True) and kwargs.get("resume_batch_id") is None:
+            kwargs["on_batch_created"]("msgbatch_new")
         if fail:
             raise TimeoutError("still queued")
         return {"counts": {}, "downgraded": 0, "year_flagged": 0, "no_evidence": 0, "total": 0}
@@ -222,23 +224,32 @@ def _stub_verify(monkeypatch, conn, tmp_path, requests="digest-1", fail=False):
     return calls
 
 
+def _record(tmp_path, batch_id):
+    record = json.loads((tmp_path / "batches" / f"{batch_id}.json").read_text())
+    assert isinstance(record.pop("submitted", None), str)
+    return record
+
+
 def test_verify_prints_and_records_each_new_batch(conn, tmp_path, monkeypatch, capsys):
     calls = _stub_verify(monkeypatch, conn, tmp_path)
 
     _main(monkeypatch, "verify", "run1", "-k", "4")
 
     # The id is printed the moment it exists, so a long queue can be resumed,
-    # and recorded with what judged it, so a resume can prove it is the same judge.
+    # and recorded with what judged it, what it was sent and on what evidence,
+    # so a resume can prove it is the same judgment.
     assert "batch: msgbatch_new" in capsys.readouterr().out
-    record = json.loads((tmp_path / "batches" / "msgbatch_new.json").read_text())
-    assert record == {
+    assert _record(tmp_path, "msgbatch_new") == {
         "run_id": "run1",
         "prompt_hash": verdict_stamp(k=4),
         "model": "m",
         "requests": "digest-1",
+        "evidence": EVIDENCE,
         "stored": True,  # its answers were stored
     }
     assert calls[0]["require_resume"] is False
+    assert calls[0]["evidence_ids"] is None  # a new batch retrieves its evidence
+    assert not list((tmp_path / "batches").glob("*.part"))  # written whole
 
 
 def test_a_batch_that_cannot_be_recorded_still_runs_and_says_so(
@@ -255,7 +266,9 @@ def test_a_batch_that_cannot_be_recorded_still_runs_and_says_so(
     assert len(calls) == 1
 
 
-def test_verify_resumes_only_a_batch_recorded_for_this_judge(conn, tmp_path, monkeypatch):
+def test_verify_resumes_a_batch_only_for_its_judge_on_its_recorded_evidence(
+    conn, tmp_path, monkeypatch
+):
     calls = _stub_verify(monkeypatch, conn, tmp_path)
     resume = ("verify", "run1", "--resume-batch", "msgbatch_x")
 
@@ -270,63 +283,78 @@ def test_verify_resumes_only_a_batch_recorded_for_this_judge(conn, tmp_path, mon
         "prompt_hash": verdict_stamp(),
         "model": "m",
         "requests": "digest-1",
+        "evidence": {"claim-1": [7, 5], "claim-2": [5]},
+        "submitted": "2026-10-14T10:00:00+00:00",
         "stored": False,
     }
-    for field, other in (
-        ("prompt_hash", verdict_stamp(k=4)),  # another prompt or another k
-        ("run_id", "run2"),
-        ("model", "other-model"),
+    for field, other, message in (
+        ("prompt_hash", verdict_stamp(k=4), "prompt_hash differs"),  # another prompt or k
+        ("run_id", "run2", "run_id differs"),
+        ("model", "other-model", "model differs"),
+        ("evidence", None, "holds no evidence"),  # recorded before evidence was
     ):
         (records / "msgbatch_x.json").write_text(json.dumps({**same, field: other}))
-        with pytest.raises(SystemExit, match=f"{field} differs"):
+        with pytest.raises(SystemExit, match=message):
             _main(monkeypatch, *resume)
+    (records / "msgbatch_x.json").write_text("{torn")
+    with pytest.raises(SystemExit, match="cannot be read"):
+        _main(monkeypatch, *resume)
     assert calls == []  # every refusal came before any batch work
-    # The same judge, but the evidence retrieved now is not what it was sent
-    # (or the record predates request hashes): its answers are not this judgment.
-    for requests in ("digest-0", None):
-        (records / "msgbatch_x.json").write_text(json.dumps({**same, "requests": requests}))
-        with pytest.raises(SystemExit, match="requests differ"):
-            _main(monkeypatch, *resume)
-    assert calls == []
 
+    # Rebuilt from its own evidence, the requests hash as recorded unless
+    # something else changed: then its answers are not this judgment.
+    (records / "msgbatch_x.json").write_text(json.dumps({**same, "requests": "digest-0"}))
+    with pytest.raises(SystemExit, match="rebuilt from its recorded evidence differ"):
+        _main(monkeypatch, *resume)
+
+    calls = _stub_verify(monkeypatch, conn, tmp_path)
     (records / "msgbatch_x.json").write_text(json.dumps(same))
     _main(monkeypatch, *resume)
     assert calls[0]["resume_batch_id"] == "msgbatch_x"
+    assert calls[0]["evidence_ids"] == same["evidence"]  # judged on what it was sent
     # An id that cannot be resumed must fail, never quietly pay for a new batch.
     assert calls[0]["require_resume"] is True
-    assert json.loads((records / "msgbatch_x.json").read_text())["stored"] is True
+    assert _record(tmp_path, "msgbatch_x")["stored"] is True
 
 
 def test_verify_will_not_pay_twice_for_a_batch_it_has_not_stored(conn, tmp_path, monkeypatch):
     # A queue that outlasts the wait (or an item failing twice) leaves the
-    # batch unstored; a plain rerun would submit and pay for the same requests
-    # again, so it is refused, naming the batch to resume.
+    # batch unstored; judging the run again, by batch or --sync, would pay for
+    # the same answers twice, so it is refused, naming the batch to resume.
     _stub_verify(monkeypatch, conn, tmp_path, fail=True)
     with pytest.raises(TimeoutError):
         _main(monkeypatch, "verify", "run1")
     records = tmp_path / "batches"
-    unfinished = json.loads((records / "msgbatch_new.json").read_text())
+    unfinished = _record(tmp_path, "msgbatch_new")
     assert unfinished["stored"] is False
+    (records / "msgbatch_new.json").rename(records / "msgbatch_old.json")
 
-    calls = _stub_verify(monkeypatch, conn, tmp_path)
-    with pytest.raises(SystemExit, match="--resume-batch msgbatch_new"):
-        _main(monkeypatch, "verify", "run1")
-    assert calls == []  # refused before any batch work
+    for args in (("verify", "run1"), ("verify", "run1", "--sync")):
+        # The evidence retrieved now may differ: the guard does not depend on it.
+        calls = _stub_verify(monkeypatch, conn, tmp_path, requests="digest-2")
+        with pytest.raises(SystemExit, match="--resume-batch msgbatch_old"):
+            _main(monkeypatch, *args)
+        assert calls == []  # refused before any paid work
+    with pytest.raises(SystemExit, match="cannot apply with --resume-batch"):
+        _main(monkeypatch, "verify", "run1", "--pay-again", "--resume-batch", "msgbatch_old")
 
-    # Another judge, another run, other requests or --new-batch (paying on
-    # purpose) submit a new batch; so does a rerun once the batch is stored.
-    (records / "msgbatch_new.json").unlink()
-    for args, requests, stored in (
-        (("verify", "run1", "-k", "4"), "digest-1", False),
-        (("verify", "run2"), "digest-1", False),
-        (("verify", "run1"), "digest-2", False),
-        (("verify", "run1", "--new-batch"), "digest-1", False),
-        (("verify", "run1"), "digest-1", True),
-    ):
-        (records / "msgbatch_old.json").write_text(json.dumps({**unfinished, "stored": stored}))
-        calls = _stub_verify(monkeypatch, conn, tmp_path, requests=requests)
+    # Another judge or another run is not blocked.
+    for args in (("verify", "run1", "-k", "4"), ("verify", "run2")):
+        calls = _stub_verify(monkeypatch, conn, tmp_path)
         _main(monkeypatch, *args)
-        assert len(calls) == 1 and calls[0]["resume_batch_id"] is None
+        assert len(calls) == 1
+    assert _record(tmp_path, "msgbatch_old")["stored"] is False
+
+    # Paying again on purpose stores this run's answers, and the unstored
+    # batch then blocks nothing: a plain rerun (a repeat for the noise floor)
+    # goes ahead.
+    calls = _stub_verify(monkeypatch, conn, tmp_path)
+    _main(monkeypatch, "verify", "run1", "--sync", "--pay-again")
+    assert len(calls) == 1 and calls[0]["batch"] is False
+    assert _record(tmp_path, "msgbatch_old")["superseded_by"] == "sync"
+    calls = _stub_verify(monkeypatch, conn, tmp_path)
+    _main(monkeypatch, "verify", "run1")
+    assert len(calls) == 1 and calls[0]["resume_batch_id"] is None
 
 
 def test_verify_refuses_an_unusable_resume_request(conn, tmp_path, monkeypatch):
