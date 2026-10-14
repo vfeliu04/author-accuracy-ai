@@ -36,7 +36,10 @@ logger = setup_logger(__name__)
 # M4, 5 of 5 in each of two cases on a second in M5), and the answers that did so
 # had noticed that the scores counted one claim fewer. So the claims are numbered,
 # and the pipeline's own record of which numbers have which verdict travels as an
-# index the model is told to count from. The request this builds is pinned in
+# index the model is told to count from. Measured in M6: M5's forged rows reached
+# the list of supported claims in 0 of 10 answers (10 of 10 before), but a direct
+# question about a forged figure is still answered as checked, and some answers
+# cite a claim by its number alone. The request this builds is pinned in
 # tests/test_chat_probe.py and tests/test_chat_probe_links.py.
 CHAT_SYSTEM = """\
 You help a user understand a completed fact-checking analysis of a report. A

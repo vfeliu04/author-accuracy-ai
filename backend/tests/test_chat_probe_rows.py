@@ -420,3 +420,37 @@ def test_the_long_analysis_runs_dry_through_the_first_sets_runner(rows, tmp_path
     assert code == 0 and [row["case"] for row in report["rows"]] == ["long-contradicted"]
     text = (tmp_path / "requests" / "I-long-contradicted.txt").read_text()
     assert "CLAIMS: 120, numbered 1 to 120" in text and "CONTRADICTED (51): claims " in text
+
+
+# The requests M6 sent under layout I (2026-10-14, Stage 3), read before they were sent.
+# A change to the chat's wording, layout, quoting or model settings changes them:
+# make it a decision (measure again, then update the hashes), not an accident.
+MEASURED_REQUESTS = {
+    "links": {
+        "A_I-direct": "cec8578e26b6369e7b53cc41033fb2df9630a726b7a95a0d5947719b9b9bd896",
+        "A_I-list": "63674fb4d04b8b56d871a57f46910a7473098a1a34036c8ac774c630737ce165",
+        "K1-direct": "8506165fc3ec25c906215896677843b69e8543e9cfa762fa1e49111c76491369",
+        "K1-list": "649422a1ac627129bd7edfc685d97f4c204a81db68f0dfc84526a0d6bbed622c",
+        "K2-direct": "27449c5065e892fc1b9b69f381852b42d762cf8eb03258ce522ede8e3083d5f5",
+        "K2-list": "f15bd74cf1db9ce7f47b87f197eee8033d0fc8a9415cc3529c5fa4072e289445",
+        "S1-direct": "e80a201d825bddfe432a352dfa0defc5e676e660eaade5e16cc6073e1d8a3862",
+        "S1-list": "5b833d8017b2542153bca8979bb170582065e49fc4f390fb45d1912e3b7e6849",
+        "S2-direct": "b66b0da3b3f1cfc914ced21da74eabc6ea0d2ec4f727419afb69c896796973a8",
+    },
+    "first": {
+        "A_I-first-direct": "7dedca6303a0c64d125499996ec86a3f43e97f384ebc793062b6360a056835b4",
+        "A_I-first-list": "96db8080983b62885413f1e5cc9901683755c41a41624a52a0eb1b158ffef03b",
+        "K3-direct": "efc020a443cd7d130d110419a0fea75b1df918bee3a830892efc3c6006bf6e0d",
+        "S2-first-direct": "f28b18498c19bad4cfbd12a0049bc4bb4d44f450282e3c82f247766fca6f2f5e",
+    },
+    "synthetic": {
+        "long-contradicted": "1460b943733123fcc5fbc8d80f66c39785e0002ffb987d81113392fd22748ec1",
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(MEASURED_REQUESTS))
+def test_each_set_still_sends_the_requests_that_were_measured(rows, tmp_path, name):
+    _code, report = _dry(rows, tmp_path, "--set", name, "--arm", "I")
+    sent = {row["case"]: row["request_sha"] for row in report["rows"]}
+    assert {case: sent[case] for case in MEASURED_REQUESTS[name]} == MEASURED_REQUESTS[name]

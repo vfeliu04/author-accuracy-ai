@@ -141,8 +141,9 @@ const ChatPanel = ({
       <div className="panel__body chat-scroll" ref={historyRef}>
         {messages.length === 0 && !isSending ? (
           <p className="chat-empty">
-            Ask anything about this verification — answers come only from its claims, verdicts,
-            and sources, never from outside knowledge.
+            Ask anything about this verification. Answers are drawn from its claims, verdicts and
+            sources, but text quoted from a source can still mislead them: the claims and scores
+            on this page are the record.
           </p>
         ) : null}
         {messages.map((message) => (

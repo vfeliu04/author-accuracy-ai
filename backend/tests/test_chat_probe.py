@@ -778,8 +778,8 @@ def test_a_case_can_be_scored_by_another_sets_scorer(probe, fixture):
 # What `chat_probe.py --dry` printed for the tree that was measured and shipped
 # (the "rule" arm, 2026-10-11): model, token limit, system prompt, every turn,
 # the analysis document with the case's planted text.
-# M6 (in progress): layout I's requests. The hashes of the layout M6 measures and
-# ships replace these once its measurement is done.
+# M6 (2026-10-14): layout I's requests, the layout M6 measured and ships; M6 sent
+# clean-scores with exactly this hash (the other three are M4's cases, not re-run).
 MEASURED_REQUESTS = {
     "clean-scores": "ec0efc0ec0b850c0e9539fbe5fcf881bed6e06eb64b15fd2df74a6e9cc3bedd5",
     "forged-row": "d2f2aacf8091478c5ccbc58a1143a32319259ec5c80393acc66a4e8cd4850248",

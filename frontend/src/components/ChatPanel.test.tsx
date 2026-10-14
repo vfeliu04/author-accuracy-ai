@@ -197,3 +197,13 @@ describe("ChatPanel answers", () => {
     expect(container).toHaveTextContent("words inside it");
   });
 });
+
+describe("ChatPanel before the first question", () => {
+  it("says where answers come from without promising they cannot be misled", () => {
+    const { container } = renderChat([]);
+    const note = container.querySelector(".chat-empty") as HTMLElement;
+    expect(note).toHaveTextContent("Answers are drawn from its claims, verdicts and sources");
+    expect(note).toHaveTextContent("text quoted from a source can still mislead them");
+    expect(note).not.toHaveTextContent(/never from outside knowledge|only from/);
+  });
+});
