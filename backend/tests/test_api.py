@@ -1055,10 +1055,10 @@ def test_chat_answers_a_done_run(tmp_path, monkeypatch):
         )
     assert resp.status_code == 200
     assert resp.json() == {"answer": "One claim is unverifiable.", "mode": "evidence"}
-    # The endpoint actually built the analysis and sent it as the cached document.
-    document = fake.chat_calls[0]["messages"][0]["content"][0]
-    assert document["type"] == "document" and "CLAIMS (numbered 1 to" in document["source"]["data"]
-    assert document.get("cache_control") == {"type": "ephemeral"}
+    # The endpoint actually built the analysis and sent it as cached documents.
+    *documents, _question = fake.chat_calls[0]["messages"][0]["content"]
+    assert documents[0]["type"] == "document" and documents[0]["title"] == "Claim 1"
+    assert documents[-1].get("cache_control") == {"type": "ephemeral"}
 
 
 def test_chat_takes_its_own_longest_answer_back_as_history(tmp_path, monkeypatch):
