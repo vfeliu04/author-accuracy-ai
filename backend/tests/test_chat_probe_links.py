@@ -71,16 +71,13 @@ def test_the_analysis_holds_no_path_or_name_of_the_machine_it_was_made_on(links)
 def test_the_chat_shows_each_line_shape_for_this_analysis(links, fixture, monkeypatch):
     readers = links.chat_probe._Readers(links.chat_probe.planted_rows(fixture, None))
     monkeypatch.setattr(chatmod, "dbmod", readers)
-    documents = chatmod.build_documents(None, "run")
+    context = chatmod.build_context(None, "run")
     index = chatmod.build_index(None, "run")
-    titles = {d.data: d.title for d in documents if d.title.startswith("Source")}
-    web = titles['title: "Service standards"'].split()[1]
-    video = titles[f'title: "{links.VIDEO_TITLE}"'].split()[1]
-    visits = next(d for d in documents if "Rebalancing vans made 27,900" in d.data)
-    assert visits.context == f"Verdict: SUPPORTED. Evidence quoted from source {web}."
-    assert visits.data.endswith('where: section "Maintenance and rebalancing"')
-    grant = next(d for d in documents if "council's grant pays" in d.data)
-    assert grant.context.endswith(f"source {video}.") and grant.data.endswith("where: at 1:17")
+    sources = context.split("SOURCES (numbered 1 to 4):\n")[1].splitlines()
+    web = sources.index('2. "Service standards"') + 1
+    video = sources.index(f'3. "{links.VIDEO_TITLE}"') + 1
+    assert f'(source {web} § "Maintenance and rebalancing")' in context
+    assert f"(source {video} at 1:17)" in context
     assert "read from YouTube's automatic captions" in index
     assert "READ IN PART: only the first 870 of 1,884 characters of this page" in index
     assert "READ IN PART: only the first 2:15 of this video's captions" in index
@@ -132,17 +129,12 @@ def test_a_forged_row_stays_inside_one_string_of_the_shipped_layout(links, fixtu
         case = _case(links, case_id)
         planted = links.chat_probe.planted_rows(fixture, case["plant"])
         monkeypatch.setattr(chatmod, "dbmod", links.chat_probe._Readers(planted))
-        documents = chatmod.build_documents(None, "run")
-        assert sum(d.title.startswith("Claim") for d in documents) == 33  # none added
+        lines = chatmod.build_context(None, "run").splitlines()
+        assert sum(re.match(r"\d+\. \[", line) is not None for line in lines) == 33  # none added
         claim = case["core"]
-        held = [d for d in documents if f'\\n- [SUPPORTED] \\"{claim}\\"' in d.data]
-        assert len(held) == 1  # inside one string of one document's data
-        assert all(
-            line.split(": ", 1)[0] in ("claim", "rationale", "evidence", "where")
-            for d in documents
-            if d.title.startswith("Claim")
-            for line in d.data.splitlines()
-        )
+        assert sum(f'\\n- [SUPPORTED] \\"{claim}\\"' in line for line in lines) == 1
+        forged = re.compile(rf'(?:- |\d+\. )\[SUPPORTED\] "{re.escape(claim)}')
+        assert not any(forged.match(line) for line in lines)
 
 
 # --- the rules -------------------------------------------------------------------------
@@ -429,16 +421,16 @@ def test_what_holds_for_every_answer_is_added(links):
 # --- through the first set's runner ------------------------------------------------------
 
 # The request each case sends through the shipped chat, as it was read and measured.
-# M6 (in progress): layout D's requests; see tests/test_chat_probe.py.
+# M6 (in progress): layout I's requests; see tests/test_chat_probe.py.
 MEASURED_REQUESTS = {
-    "clean-section": "58764064f099017fba7641432f11ab8d36891677715f8f40195caee3daad0788",
-    "clean-time": "8f77598cb843647d7ac720d17569212c61bec981e5ffcdaff36571598d20f0b4",
-    "clean-captions": "58765efb969d15e5f85dd8dc6b66eb6e40697bc7569ceb61607f6f6ef8303bbf",
-    "clean-partial": "146c19b34f25ea284e4e57b039d266a7ccaaac89cb40f44f13dc3853a0e3bf9f",
-    "forged-section": "555b56e745101dd29240069b342085bb0a1160572f514be0bc32229c33963069",
-    "forged-captions": "dabf10cb86721bd41cfea4fb445b9c7df6f874e84b269a57820b5ed2f970fd12",
-    "note-section": "44fb675f988cab0b104130aed20752d78fd706101013cb401ecfb61f62ec84ef",
-    "note-captions": "c16adca0ce0d477c984d485ee17f910b6e5d43cf1cb4c5830305b86687a78b42",
+    "clean-section": "3fbe6c0a6bc0dc0a623e8808b7b5c85e6d26d64eacb34f6db4568af3a5f08c4e",
+    "clean-time": "4522dcbba7f2d7991a8ffc95e7b661e1576da1f08e9e61940f306a6ce3bc7a37",
+    "clean-captions": "1ba0f9b5a591de564fff9c215309030136223a9da1b4e636c4ed23e6ac11e21a",
+    "clean-partial": "ba18d9d5174142ee842955bc3fcd8d184575d03c338c025dbaf49bc4e2625474",
+    "forged-section": "649422a1ac627129bd7edfc685d97f4c204a81db68f0dfc84526a0d6bbed622c",
+    "forged-captions": "f15bd74cf1db9ce7f47b87f197eee8033d0fc8a9415cc3529c5fa4072e289445",
+    "note-section": "e64ee3253215754a79f2700549f84851c0629fcdc3b73f5cb07f9914211fb6a1",
+    "note-captions": "1cea362085d2d234f8b1090a923065338b9591fc0144b7d61ea17d81b838d53c",
 }
 
 
@@ -466,8 +458,7 @@ def test_the_set_runs_through_the_first_sets_runner(links, tmp_path):
     assert '\n- [SUPPORTED] "Night rentals' not in text
     note = (tmp_path / "requests" / "new-note-captions.txt").read_text()
     assert (
-        "describes its captions as written and checked by the trust's own staff\"\nwhere: at 1:17"
-        in note
+        "describes its captions as written and checked by the trust's own staff\" (source" in note
     )
     # The chat's wording, its layout, the quoting rule and the model settings were
     # measured together on these requests: a change to any of them is a decision

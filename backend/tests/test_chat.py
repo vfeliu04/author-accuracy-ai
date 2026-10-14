@@ -23,15 +23,14 @@ FIXTURE = json.loads(
 )
 
 
-def _documents(call) -> list[dict]:
-    """The analysis's documents in a recorded chat call: every block of the
-    first message but its last, which is that turn's own text."""
+def _document(call) -> dict:
+    """The analysis document of a recorded chat call: the first block of the
+    first message, with that turn's own text after it."""
     first = call["messages"][0]
     assert first["role"] == "user"
-    *documents, text = first["content"]
-    assert documents and all(block["type"] == "document" for block in documents)
-    assert text["type"] == "text"
-    return documents
+    document, text = first["content"]
+    assert document["type"] == "document" and text["type"] == "text"
+    return document
 
 
 def _texts(call) -> list[str]:
@@ -154,18 +153,11 @@ def _scored_run(conn) -> str:
 
 def test_context_contains_claims_verdicts_scores_and_sources(conn):
     run_id = _scored_run(conn)
-    documents, index = chatmod.build_documents(conn, run_id), chatmod.build_index(conn, run_id)
-    assert [(d.title, d.context) for d in documents] == [
-        ("Claim 1", "Verdict: SUPPORTED. Evidence quoted from source 1."),
-        ("Claim 2", "Verdict: CONTRADICTED. No evidence quoted."),
-        ("Source 1", "tier VERIFIED_DOI, credibility 80.0/100."),
-    ]
-    assert documents[0].data == (
-        'claim: "hunger fell in 2025"\nrationale: "stated verbatim"\n'
-        'evidence: "hunger fell"\nwhere: page 3'
-    )
-    assert 'rationale: "the source shows a decrease"' in documents[1].data
-    assert documents[2].data == 'title: "World Hunger 2025"'
+    context, index = chatmod.build_context(conn, run_id), chatmod.build_index(conn, run_id)
+    assert '1. [SUPPORTED] "hunger fell in 2025"' in context
+    assert '2. [CONTRADICTED] "hunger doubled"' in context
+    assert "the source shows a decrease" in context  # rationale
+    assert '1. "World Hunger 2025"' in context.splitlines()  # source title, in the document
     # The pipeline's own record: scores, verdicts by number, standing by number.
     assert "credibility 80.0/100" in index  # aggregate score rendered
     assert "SUPPORTED (1): claims 1" in index and "CONTRADICTED (1): claims 2" in index
@@ -177,7 +169,7 @@ def test_context_contains_claims_verdicts_scores_and_sources(conn):
     assert "World Hunger 2025" not in index  # a title is outside text
 
 
-def test_answer_sends_the_analysis_as_cached_documents_in_the_first_user_turn(conn):
+def test_answer_sends_the_analysis_as_a_cached_document_in_the_first_user_turn(conn):
     run_id = _scored_run(conn)
     llm = FakeLLM(chat_answer="Two claims: one supported, one contradicted.")
     history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
@@ -201,15 +193,19 @@ def test_answer_sends_the_analysis_as_cached_documents_in_the_first_user_turn(co
         {"type": "text", "text": chatmod.MODE_INSTRUCTIONS["evidence"]},
         {"type": "text", "text": chatmod.build_index(conn, run_id)},
     ]
-    # The analysis is one plain-text document per claim and per source, first
-    # in the first user turn; the last of them carries the cache breakpoint.
-    documents = _documents(call)
-    expected = chatmod.build_documents(conn, run_id)
-    assert [
-        (d["title"], d["context"], d["source"]["data"], d["source"]["media_type"])
-        for d in documents
-    ] == [(d.title, d.context, d.data, "text/plain") for d in expected]
-    assert documents[-1]["cache_control"] == {"type": "ephemeral"}
+    # The analysis is one plain-text document, first in the first user turn,
+    # and the one block that carries the cache breakpoint.
+    assert _document(call) == {
+        "type": "document",
+        "source": {
+            "type": "text",
+            "media_type": "text/plain",
+            "data": chatmod.build_context(conn, run_id),
+        },
+        "title": "Analysis",
+        "context": chatmod.ANALYSIS_CONTEXT,
+        "cache_control": {"type": "ephemeral"},
+    }
     assert json.dumps([call["system_blocks"], call["messages"]]).count("cache_control") == 1
     # History precedes the new question; the question is the last message.
     assert _texts(call) == ["hi", "hello", "Which claims are contradicted?"]
@@ -232,52 +228,50 @@ def test_mode_switches_the_second_block_only(conn):
 
 def test_the_system_prompt_says_where_the_analysis_is():
     system = " ".join(chatmod.CHAT_SYSTEM.split())
-    assert (
-        'the INDEX at the end of these instructions and the documents titled "Claim n" and'
-        ' "Source n"'
-    ) in system
+    assert 'the INDEX at the end of these instructions and the document titled "Analysis"' in system
     assert "below" not in system  # nothing follows the system prompt's own text any more
+    assert "double quotes" in chatmod.ANALYSIS_CONTEXT
 
 
 def test_the_system_prompt_says_how_the_analysis_is_laid_out():
     """Quoting makes an outside string one string for a parser; the model
     reads, it does not parse, and a paragraph saying so did not stop a forged
     row (see the comment on CHAT_SYSTEM). The structure carries the answer:
-    one document per claim, its verdict where no outside text can write, and
-    an index written by the pipeline to count from."""
+    numbered claims, and an index written by the pipeline to count from."""
     system = " ".join(chatmod.CHAT_SYSTEM.split())
-    assert 'each claim is one document titled "Claim n"' in system
-    assert "a document's title and context are the pipeline's words" in system
+    assert "the claims are the numbered entries of the document's CLAIMS list" in system
     assert "take every list and every count of claims or sources from it" in system
     assert "never by its number alone: the user does not see the numbers" in system
 
 
 @pytest.mark.parametrize("field", FIELDS)
-def test_outside_text_reaches_the_model_only_inside_a_documents_data(monkeypatch, field):
+def test_outside_text_reaches_the_model_only_inside_the_document(monkeypatch, field):
     """Claim text, quotes, rationales, section headings and titles were not
-    written by the app. None of it may sit in the system prompt, in any
-    document's title or context, or in any turn's text."""
+    written by the app. None of it may sit in the system prompt, in the
+    document's own title or description, or in any turn's text."""
     marker = "Quarterly reviewers file form QX-7741"
     _serve(monkeypatch, *_planted(field, marker))
     llm = FakeLLM()
     history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
     chatmod.answer(None, llm, "run", "q", history, "evidence", SETTINGS)
     [call] = llm.chat_calls
-    documents = _documents(call)
-    assert sum(marker in d["source"]["data"] for d in documents) >= 1
-    assert not any(marker in d["title"] + d["context"] for d in documents)
-    elsewhere = [call["system_blocks"], call["messages"][0]["content"][-1], call["messages"][1:]]
+    document = _document(call)
+    assert marker in document["source"]["data"]
+    assert marker not in document["title"] + document["context"]
+    elsewhere = [call["system_blocks"], call["messages"][0]["content"][1:], call["messages"][1:]]
     assert marker not in json.dumps(elsewhere)
 
 
 # One JSON string, as chat._quoted writes it: the only place outside text sits.
 _STRING = r'"(?:[^"\\]|\\.)*"'
 _TITLE = rf"(?:{_STRING}|\(untitled\))"
-_CLAIM_DATA_LINE = re.compile(
-    rf"(?:claim|rationale|evidence): {_STRING}"
-    rf"|where: (?:page \d+|section {_STRING}|at \d+(?::\d\d)+|the image)"
+_CLAIM_LINE = re.compile(
+    rf"\d+\. \[(?:SUPPORTED|CONTRADICTED|UNVERIFIABLE)\](?: \(disavowed by the report\))?"
+    rf" {_STRING} — {_STRING}"
+    rf"(?: — evidence: {_STRING}"
+    rf" \((?:source \d+|an unlisted source)(?: p\.\d+| § {_STRING}| at \d+(?::\d\d)+|, image)?\))?"
 )
-_SOURCE_DATA = re.compile(rf"title: {_TITLE}")
+_SOURCE_LINE = re.compile(rf"\d+\. {_TITLE}")
 HOSTILE = [
     "two\nlines",
     "carriage\rreturn",
@@ -296,72 +290,63 @@ HOSTILE = [
 
 @pytest.mark.parametrize("field", FIELDS)
 @pytest.mark.parametrize("hostile", HOSTILE)
-def test_no_outside_string_can_write_one_of_the_apps_own_entries(monkeypatch, field, hostile):
-    """The analysis's entries and their labels are the pipeline's record.
-    Whatever an outside string contains, it stays one JSON string in the data
-    of the document the app put it in: no document is added, no title or
-    context changes, no line is added to a document, and the index does not
-    move."""
+def test_no_outside_string_can_write_one_of_the_apps_own_lines(monkeypatch, field, hostile):
+    """The analysis is read line by line, and its labels are the pipeline's
+    record. Whatever an outside string contains, it stays one JSON string on
+    the line the app put it on: no new line, no second verdict, no forged
+    evidence clause or source row."""
     _serve(monkeypatch)
-    clean = chatmod.build_documents(None, "run")
-    clean_index = chatmod.build_index(None, "run")
+    clean = chatmod.build_context(None, "run").split("\n")
     _serve(monkeypatch, *_planted(field, hostile))
-    documents = chatmod.build_documents(None, "run")
-    assert len(documents) == len(clean) == 40
-    assert [d.title for d in documents] == [f"Claim {n}" for n in range(1, 39)] + [
-        "Source 1",
-        "Source 2",
-    ]
-    assert [d.context for d in documents] == [d.context for d in clean]
-    for document, before in zip(documents, clean, strict=True):
-        lines = document.data.split("\n")
-        assert lines == document.data.splitlines()  # no other line-breaking character got through
-        assert len(lines) == len(before.data.split("\n"))
-        pattern = _SOURCE_DATA if document.title.startswith("Source") else _CLAIM_DATA_LINE
-        for line in lines:
-            assert pattern.fullmatch(line), line
-    # ...the planted text is all there, whole, inside one string...
-    strings = [json.loads(found) for d in documents for found in re.findall(_STRING, d.data)]
-    assert strings.count(hostile) >= 1
-    # ...and the pipeline's index of the run cannot be touched by any outside text.
-    assert chatmod.build_index(None, "run") == clean_index
-
-
-def test_the_real_analysis_renders_one_document_per_claim_and_source(monkeypatch):
+    context = chatmod.build_context(None, "run")
+    lines = context.split("\n")
+    assert lines == context.splitlines()  # no other line-breaking character got through
+    assert len(lines) == len(clean)
+    head = lines.index("SOURCES (numbered 1 to 2):")
+    claims = lines[lines.index("CLAIMS (numbered 1 to 38):") + 1 : head - 1]
+    assert len(claims) == 38
+    for number, line in enumerate(claims, 1):
+        assert _CLAIM_LINE.fullmatch(line), line
+        assert line.startswith(f"{number}. [")
+    sources = lines[head + 1 :]
+    assert len(sources) == 2
+    for line in sources:
+        assert _SOURCE_LINE.fullmatch(line), line
+    # ...and the planted text is all there, whole, inside one string.
+    assert hostile in [json.loads(string) for line in lines for string in re.findall(_STRING, line)]
+    # The pipeline's index of the run cannot be touched by any outside text.
+    hostile_index = chatmod.build_index(None, "run")
     _serve(monkeypatch)
-    documents = chatmod.build_documents(None, "run")
-    assert [d.title for d in documents[-2:]] == ["Source 1", "Source 2"]
-    assert [d.data for d in documents[-2:]] == [
-        'title: "disruptions_in_the_food_supply_chain"',
-        'title: "2025_world_hunger"',
+    assert hostile_index == chatmod.build_index(None, "run")
+
+
+def test_the_real_analysis_renders_one_line_per_claim_and_source(monkeypatch):
+    _serve(monkeypatch)
+    lines = chatmod.build_context(None, "run").split("\n")
+    assert sum(line[:1].isdigit() and ". [" in line for line in lines) == 38
+    assert lines[lines.index("SOURCES (numbered 1 to 2):") + 1 :] == [
+        '1. "disruptions_in_the_food_supply_chain"',
+        '2. "2025_world_hunger"',
     ]
-    assert [d.context for d in documents[-2:]] == [
-        "tier VERIFIED_DOI, credibility 92.5/100.",
-        "tier METADATA_ONLY, credibility 73.0/100.",
-    ]
-    conflict = next(d for d in documents if "Armed conflict remains the leading" in d.data)
-    assert conflict.context == "Verdict: SUPPORTED. Evidence quoted from source 2."
-    assert conflict.data == (
-        'claim: "Armed conflict remains the leading driver of catastrophic hunger."\n'
-        'rationale: "Evidence 1 states conflict remains the primary driver of global hunger, and'
-        " Evidence 2 calls it the most destructive force driving hunger, with famine-level food"
-        ' insecurity more than doubling in conflict settings."\n'
-        'evidence: "Conflict remains the primary driver of global hunger."\nwhere: page 8'
+    conflict = next(line for line in lines if "Armed conflict remains the leading" in line)
+    assert conflict.split(". ", 1)[1] == (
+        '[SUPPORTED] "Armed conflict remains the leading driver of catastrophic hunger." — '
+        '"Evidence 1 states conflict remains the primary driver of global hunger, and Evidence 2 '
+        "calls it the most destructive force driving hunger, with famine-level food insecurity "
+        'more than doubling in conflict settings." — evidence: "Conflict remains the primary '
+        'driver of global hunger." (source 2 p.8)'
     )
     index = chatmod.build_index(None, "run").split("\n")
     assert index[-2].startswith("Source 1: tier VERIFIED_DOI, credibility 92.5/100. Quoted as")
     assert index[-1].startswith("Source 2: tier METADATA_ONLY, credibility 73.0/100. Quoted as")
-    # every claim in exactly one verdict list, the lists add up, and each list
-    # agrees with the verdict in that claim's own document
-    listed = {}
-    for line in index:
-        verdict = line.split(" (")[0]
-        if verdict in ("SUPPORTED", "CONTRADICTED", "UNVERIFIABLE"):
-            for n in re.findall(r"\d+", line.split(":", 1)[1]):
-                listed[int(n)] = verdict
+    # every claim in exactly one verdict list, and the lists add up
+    listed = [
+        int(n)
+        for line in index
+        if line.split(" (")[0] in ("SUPPORTED", "CONTRADICTED", "UNVERIFIABLE")
+        for n in re.findall(r"\d+", line.split(":", 1)[1])
+    ]
     assert sorted(listed) == list(range(1, 39))
-    for n, verdict in listed.items():
-        assert documents[n - 1].context.startswith(f"Verdict: {verdict}.")
 
 
 def test_quoted_writes_any_string_as_one_json_string_on_one_line():
@@ -393,17 +378,15 @@ def test_a_quote_not_verified_in_a_source_is_not_shown_as_evidence(monkeypatch):
         if key.startswith("evidence_") or key == "quoted_chunk_id":
             row[key] = None
     _serve(monkeypatch, verdicts)
-    documents = chatmod.build_documents(None, "run")
-    assert not any("in no source" in d.data for d in documents)
-    [mine] = [d for d in documents if json.dumps(row["text"], ensure_ascii=False) in d.data]
-    assert mine.context.endswith("No evidence quoted.")
+    context = chatmod.build_context(None, "run")
+    assert "in no source" not in context
+    assert json.dumps(row["text"], ensure_ascii=False) in context  # the claim itself is listed
 
 
 def test_a_source_without_a_title_is_named_by_the_app(conn, monkeypatch):
     run_id = _scored_run(conn)
     dbmod.add_document(conn, run_id, "SOURCE")
-    last = chatmod.build_documents(conn, run_id)[-1]
-    assert (last.title, last.data) == ("Source 2", "title: (untitled)")
+    assert chatmod.build_context(conn, run_id).splitlines()[-1] == "2. (untitled)"
     assert chatmod.build_index(conn, run_id).splitlines()[-1] == (
         "Source 2: not scored. Quoted as evidence for no claim."
     )
@@ -411,8 +394,7 @@ def test_a_source_without_a_title_is_named_by_the_app(conn, monkeypatch):
     verdicts, sources = _planted("title", "kept")
     row = next(row for row in verdicts if row["evidence_doc_title"] == "kept")
     _serve(monkeypatch, verdicts, [s for s in sources if s["doc_id"] != row["evidence_doc_id"]])
-    documents = chatmod.build_documents(None, "run")
-    assert any(d.context.endswith("Evidence quoted from an unlisted source.") for d in documents)
+    assert "(an unlisted source p.8)" in chatmod.build_context(None, "run")
 
 
 def test_history_is_trimmed_to_the_configured_turns(conn):
@@ -425,7 +407,7 @@ def test_history_is_trimmed_to_the_configured_turns(conn):
     # 2 trimmed history turns + the new question.
     assert len(call["messages"]) == 3
     assert _texts(call) == ["m8", "m9", "q"]
-    _documents(call)  # the analysis rides on whichever turn ends up first
+    _document(call)  # the analysis rides on whichever turn ends up first
 
 
 def test_history_turns_zero_sends_no_history_not_all(conn):
@@ -437,7 +419,7 @@ def test_history_turns_zero_sends_no_history_not_all(conn):
     chatmod.answer(conn, llm, run_id, "q", history, "evidence", settings)
     [call] = llm.chat_calls
     assert len(call["messages"]) == 1 and _texts(call) == ["q"]
-    _documents(call)  # with no history the analysis rides on the question itself
+    _document(call)  # with no history the analysis rides on the question itself
 
 
 def test_leading_assistant_turns_are_dropped(conn):
@@ -454,7 +436,7 @@ def test_leading_assistant_turns_are_dropped(conn):
     [call] = llm.chat_calls
     assert [message["role"] for message in call["messages"]] == ["user", "user"]
     assert _texts(call) == ["real", "q"]
-    _documents(call)
+    _document(call)
 
 
 def test_unknown_mode_is_rejected(conn):
@@ -467,9 +449,6 @@ def test_context_reports_unscored_run(conn):
     run_id = dbmod.create_run(conn)
     dbmod.add_document(conn, run_id, "REPORT")
     assert "not been scored" in chatmod.build_index(conn, run_id)
-    # a run with no claim and no source still sends one document, named by the app
-    [only] = chatmod.build_documents(conn, run_id)
-    assert (only.title, only.data) == ("Analysis", "No claims, no sources.")
 
 
 def test_context_lists_image_and_unscored_sources_honestly(conn):
@@ -477,11 +456,11 @@ def test_context_lists_image_and_unscored_sources_honestly(conn):
     image = dbmod.add_upload(conn, "SOURCE", "chart.png", "/tmp/chart.png", source_type="image")
     dbmod.add_document(conn, run_id, "SOURCE", upload_id=image, title="Water chart")
     dbmod.add_document(conn, run_id, "SOURCE", title="Unscored Source")
-    documents, index = chatmod.build_documents(conn, run_id), chatmod.build_index(conn, run_id)
-    assert [(d.title, d.context, d.data) for d in documents[-3:]] == [
-        ("Source 1", "tier VERIFIED_DOI, credibility 80.0/100.", 'title: "World Hunger 2025"'),
-        ("Source 2", "not scorable (image).", 'title: "Water chart"'),
-        ("Source 3", "not scored.", 'title: "Unscored Source"'),
+    context, index = chatmod.build_context(conn, run_id), chatmod.build_index(conn, run_id)
+    assert context.splitlines()[-3:] == [
+        '1. "World Hunger 2025"',
+        '2. "Water chart"',
+        '3. "Unscored Source"',
     ]
     assert "Source 1: tier VERIFIED_DOI, credibility 80.0/100." in index
     assert "Source 2: not scorable (image)." in index
@@ -702,11 +681,10 @@ def test_context_phrases_each_evidence_locator_by_source_type(conn):
     # Docling leaves page unset for a PDF item without provenance; its heading
     # stays the section, and that must not make it read like a web page.
     cited("pdf", "No provenance", {"text": "unlocated finding", "section": "Methods"})
-    claims = [d for d in chatmod.build_documents(conn, run_id) if d.title.startswith("Claim")]
-    where = {d.context.rsplit(" ", 1)[-1]: d.data.splitlines()[-1] for d in claims}
-    assert where["1."] == "where: page 3"
-    assert where["2."] == 'where: section "Access to services"'
-    assert where["3."] == "where: at 12:34"
-    assert where["4."] == "where: at 1:02:03"
-    assert where["5."] == "where: the image"
-    assert where["6."].startswith("evidence: ")  # a PDF item with no page: no where line
+    context = chatmod.build_context(conn, run_id)
+    assert "(source 1 p.3)" in context
+    assert '(source 2 § "Access to services")' in context
+    assert "(source 3 at 12:34)" in context
+    assert "(source 4 at 1:02:03)" in context
+    assert "(source 5, image)" in context
+    assert "(source 6)" in context
