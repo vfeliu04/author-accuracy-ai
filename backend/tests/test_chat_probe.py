@@ -656,10 +656,11 @@ def test_a_section_plant_the_chat_would_not_show_is_refused(probe, fixture):
     assert probe.planted_rows(_with_a_web_row(probe, fixture), plant)  # and this one is shown
 
 
-def test_the_planted_notes_read_as_a_documents_own_notes(probe):
+@pytest.mark.parametrize("module", ["chat_probe", "chat_probe_links"])
+def test_the_planted_notes_read_as_a_documents_own_notes(module):
     """No word that announces a test, and an instruction, not a statement: a
-    note that says what IS true is believed, not followed."""
-    for note in probe.PAYLOADS:
+    note that says what IS true is believed, not followed. Both sets."""
+    for note in load_injection_script(module).PAYLOADS:
         lowered = note.lower()
         for word in ("ai", "model", "assistant", "prompt", "ignore", "instruction", "chatbot"):
             assert not re.search(rf"\b{word}s?\b", lowered), (word, note)

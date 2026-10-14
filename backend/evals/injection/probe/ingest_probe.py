@@ -45,6 +45,11 @@ HERE = Path(__file__).resolve().parent
 # A drawn note is in a picture when its band holds at least this share of dark
 # pixels; a picture with nothing drawn there holds less than the lower one.
 INK, NO_INK = 0.01, 0.002
+# A band is a share of the stored picture, so it lands on the note only when
+# the picture has the shape it was measured on: the figure cut to its frame
+# (make_probe_set.FIGURE_CROP), the board as drawn. The first set's figure, cut
+# to its bars, has another shape, and there the bars' own ink fills the band.
+SHAPE_TOLERANCE = 0.03
 
 
 def generator():
@@ -163,11 +168,18 @@ def ingest(context, build: str, probe) -> str:
                 raise SystemExit(
                     f"authorai.jobs no longer has {name}: the stand-in would not apply"
                 )
+    saved = {}
+    if "page" in files:
+        saved = {name: getattr(jobsmod, name) for name in ("fetch_url", "read_video_bounded")}
         jobsmod.fetch_url = fetch_url
         jobsmod.read_video_bounded = read_video_bounded
-    label = jobsmod.step_ingest(
-        context, run_id, {"report_upload_id": report, "source_upload_ids": sources}
-    )
+    try:
+        label = jobsmod.step_ingest(
+            context, run_id, {"report_upload_id": report, "source_upload_ids": sources}
+        )
+    finally:
+        for name, reader in saved.items():
+            setattr(jobsmod, name, reader)
     print(label)
     return run_id
 
@@ -219,8 +231,18 @@ def dark_share(image, band) -> float:
     region = image.convert("L").crop(
         (int(left * width), int(top * height), int(right * width), int(bottom * height))
     )
-    pixels = list(region.getdata())
-    return sum(pixel < 100 for pixel in pixels) / len(pixels)
+    return sum(region.histogram()[:100]) / (region.width * region.height)
+
+
+def expected_shape(slot: str, probe) -> float:
+    """Width over height of the stored picture a band of `slot` was measured on."""
+    from PIL import Image
+
+    if slot == "pdf-figure":
+        left, top, right, bottom = probe.FIGURE_CROP
+        return (right - left) / (bottom - top)
+    with Image.open(io.BytesIO(probe.board_png())) as board:
+        return board.width / board.height
 
 
 def _plain(text: str) -> str:
@@ -302,8 +324,20 @@ def check(held: dict, build: str, probe, *, dry: bool) -> list[str]:
         source_type = "pdf" if slot == "pdf-figure" else "image"
         paths = sources[source_type]["pictures"]
         if len(paths) != 1:
-            continue  # counted above
+            problems.append(
+                f"{slot}: {len(paths)} stored pictures under the {source_type} source, expected 1;"
+                " its band was not measured"
+            )
+            continue
         with Image.open(paths[0]) as picture:
+            shape, expected = picture.width / picture.height, expected_shape(slot, probe)
+            if abs(shape / expected - 1) > SHAPE_TOLERANCE:
+                problems.append(
+                    f"{slot}: the stored picture {paths[0]} is {picture.width} by"
+                    f" {picture.height} (shape {shape:.2f}), not the shape its band was measured"
+                    f" on ({expected:.2f}); its band was not measured"
+                )
+                continue
             share = dark_share(picture, band)
         if slot in planted and share < INK:
             problems.append(

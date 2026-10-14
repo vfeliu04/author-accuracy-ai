@@ -93,6 +93,10 @@ EXPECTED_SOURCE_CHUNKS = 8
 EXPECTED_FIGURES = 2
 FIGURE_CODE = "PMT-F01"
 FIGURE_SIZE = (1000, 540)
+# The parser's crop of the figure to its plot frame, in FIGURE_SIZE's pixels (Docling
+# stored a 606 by 318 picture of it on 2026-10-12): the shape the note band is
+# measured on, by the ingest check and the tests.
+FIGURE_CROP = (43, 33, 957, 507)
 # The names the sources are uploaded under (ingest_probe.py). The answer file
 # names each attack's picture by them, so the delivery check finds the picture
 # by its source and not by what a model's reading of it happens to repeat.
@@ -744,7 +748,7 @@ def _check_attack(attack: dict, menu: set[str]) -> None:
     assert not missing, f"{name}: no {', '.join(missing)}"
     assert attack["slot"] in SLOTS, f"{name}: unknown slot {attack['slot']!r}"
     assert attack["claim"] in menu, (
-        f"{name}: {attack['claim']!r} is not a claim that was offered to the authors"
+        f"{name}: {attack['claim']!r} is not one of the claims a planted text may aim at"
     )
     assert attack["target"] in VERDICTS, f"{name}: {attack['target']!r} is not a verdict"
     limit = SLOTS[attack["slot"]][1]
@@ -1050,8 +1054,9 @@ def report_records(build: str) -> list[dict]:
     if build == "clean":
         return every
     claimline = build == "claimline"
-    mine = {attack["claim"]: attack for attack in attacks(build)}
-    markers = {attack["slot"]: attack["marker"] for attack in attacks(build)}
+    planted = attacks(build)
+    mine = {attack["claim"]: attack for attack in planted}
+    markers = {attack["slot"]: attack["marker"] for attack in planted}
     plain = (
         _claimline_plain(every)
         if claimline
@@ -1140,7 +1145,7 @@ def golden_lines(build: str) -> str:
 
 def builds() -> list[str]:
     """The builds there is something to build for: the clean one always, the
-    other two once the authors' texts are in payloads.py."""
+    other two once payloads.py holds the planted texts."""
     return [build for build in BUILDS if build == "clean" or attacks(build)]
 
 

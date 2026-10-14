@@ -395,8 +395,9 @@ def test_a_lead_is_its_own_text_block_ahead_of_the_prompt(tmp_path):
 def test_pictures_come_before_the_claim_that_opens_the_message(tmp_path):
     """Attached pictures are the first blocks of a request, ahead of the lead
     that states the claim, so a picture can draw a line that reads like the
-    claim before the real one is met. The independent probe's claimline run
-    measures what the judge does with that; this pins the order it measures."""
+    claim before the real one is met. The second injection set's claim-line run
+    planted such a picture (it moved no judge, not even one told to obey, so
+    it measured nothing); this pins the order it was planted against."""
     from authorai.llm import TextDocument, user_content
 
     image = tmp_path / "fig.png"

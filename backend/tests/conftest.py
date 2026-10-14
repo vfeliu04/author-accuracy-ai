@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -84,6 +85,14 @@ def jobs_log(caplog):
     from authorai import jobs as jobsmod
 
     yield from _attached_to(jobsmod.logger, caplog)
+
+
+def pdf_text(path: Path) -> str:
+    """A PDF's text as one line: what its words are, whatever the layout."""
+    from pypdf import PdfReader
+
+    text = " ".join(page.extract_text() for page in PdfReader(path).pages)
+    return re.sub(r"\s+", " ", text)
 
 
 def load_injection_script(name: str):

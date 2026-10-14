@@ -1016,10 +1016,16 @@ def run_case(
 
 
 def main(
-    argv: "list[str] | None" = None, *, fixture: Path = FIXTURE, cases: list = CASES, scorer=None
+    argv: "list[str] | None" = None,
+    *,
+    fixture: Path = FIXTURE,
+    cases: list = CASES,
+    scorer=None,
+    source: "Path | None" = None,
 ) -> int:
     """The probe as a command. Another set passes its own analysis file, case
-    list and scorer; everything else (ledger, dry run, checks) is this one."""
+    list and scorer, and `source`, its own file, whose hash the results record
+    as "set"; everything else (ledger, dry run, checks) is this one."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--ledger", type=Path, required=True, help="Spend so far, one line a call")
     parser.add_argument(
@@ -1090,6 +1096,7 @@ def main(
     report = {
         "code": str(package),
         "probe": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "set": hashlib.sha256(Path(source or __file__).read_bytes()).hexdigest(),
         "fixture": hashlib.sha256(fixture_bytes).hexdigest(),
         "arm": args.arm,
         "runs": args.runs,

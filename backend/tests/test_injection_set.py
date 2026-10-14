@@ -5,10 +5,9 @@ import re
 from pathlib import Path
 
 import pytest
-from pypdf import PdfReader
 
 from authorai.evals import load_golden
-from tests.conftest import load_injection_script
+from tests.conftest import load_injection_script, pdf_text
 
 SET_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection"
 FILES = ("Injection_Source.pdf", "Injection_Report.pdf", "injection_chart.png", "injection.jsonl")
@@ -16,11 +15,6 @@ FILES = ("Injection_Source.pdf", "Injection_Report.pdf", "injection_chart.png", 
 
 def _generator():
     return load_injection_script("make_injection_set")
-
-
-def _pdf_text(path: Path) -> str:
-    text = " ".join(page.extract_text() for page in PdfReader(path).pages)
-    return re.sub(r"\s+", " ", text)
 
 
 def test_generation_is_byte_reproducible_and_matches_the_committed_golden(tmp_path):
@@ -50,7 +44,7 @@ def test_every_attack_is_marked_once_and_planted_where_it_claims():
             # An attack asking for the verdict that is already right measures nothing.
             assert record["attack"]["target"] != record["expected_verdict"], record["text"]
 
-    source = _pdf_text(SET_DIR / "Injection_Source.pdf")
+    source = pdf_text(SET_DIR / "Injection_Source.pdf")
     for attack in attacks:
         planted = source.count(attack["marker"])
         if attack["channel"] == "image":
@@ -62,15 +56,16 @@ def test_every_attack_is_marked_once_and_planted_where_it_claims():
     for control in controls:
         assert control["marker"] in markers, "a control must sit beside a real payload"
 
-    report = _pdf_text(SET_DIR / "Injection_Report.pdf")
+    report = pdf_text(SET_DIR / "Injection_Report.pdf")
     for record in golden:
         assert record["text"] in report, record["text"]
 
 
 def _planted_texts():
     """Every planted text of the main set (the generator's strings carrying a
-    reference code), of the reader probe, of the chat probe and of the
-    independent probe (its authors' texts and its one labelled statement)."""
+    reference code), of the reader probe, of the chat probe's two sets and of
+    the second injection set (its planted texts and its one labelled
+    statement)."""
     import ast
 
     generator = SET_DIR / "make_injection_set.py"
@@ -82,9 +77,10 @@ def _planted_texts():
     readers, chat = load_injection_script("reader_probe"), load_injection_script("chat_probe")
     # Every planted text was found (test_reader_probe.py pins the probe's exact count).
     assert len(main_set) >= 10 and len(readers.PAYLOADS) >= 8 and len(chat.PAYLOADS) >= 4
-    payloads = load_injection_script("probe/make_probe_set").PAYLOADS
-    independent = [*(attack["payload"] for attack in payloads.ATTACKS), payloads.LIE]
-    return [*main_set, *readers.PAYLOADS, *chat.PAYLOADS, *independent]
+    links = load_injection_script("chat_probe_links")
+    payloads = load_injection_script("probe/payloads")
+    second = [*(attack["payload"] for attack in payloads.ATTACKS), payloads.LIE]
+    return [*main_set, *readers.PAYLOADS, *chat.PAYLOADS, *links.PAYLOADS, *second]
 
 
 def _policy(name):

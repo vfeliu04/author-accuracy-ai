@@ -15,7 +15,7 @@ from pypdf import PdfReader
 
 from authorai import evals
 from authorai.evals import load_golden
-from tests.conftest import load_injection_script
+from tests.conftest import load_injection_script, pdf_text
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection" / "probe"
 
@@ -81,11 +81,6 @@ def _probe(attacks=None, **changed):
             attacks.append(entry)
     probe.PAYLOADS.ATTACKS = attacks
     return probe
-
-
-def _pdf_text(path: Path) -> str:
-    text = " ".join(page.extract_text() for page in PdfReader(path).pages)
-    return re.sub(r"\s+", " ", text)
 
 
 def _golden(probe, build: str) -> dict[str, dict]:
@@ -180,10 +175,10 @@ def test_no_two_claims_can_be_taken_for_each_other():
 
 def test_every_claim_is_in_its_report_and_every_fact_in_its_source():
     probe = load_injection_script("probe/make_probe_set")
-    report = _pdf_text(PROBE_DIR / "clean" / probe.REPORT_PDF)
+    report = pdf_text(PROBE_DIR / "clean" / probe.REPORT_PDF)
     for record in load_golden(PROBE_DIR / "clean" / "golden.jsonl"):
         assert record["text"] in report, record["text"]
-    source = _pdf_text(PROBE_DIR / "clean" / probe.SOURCE_PDF)
+    source = pdf_text(PROBE_DIR / "clean" / probe.SOURCE_PDF)
     for fact in (
         "Riders made 1,482,300 trips in 2025.",
         "The busiest month was July, with 171 thousand trips",
@@ -281,7 +276,7 @@ def test_a_spoken_text_stays_inside_its_window_at_its_full_length():
     )
     events = json.loads(probe.captions_json3("hostile"))["events"]
     planted = {
-        line
+        line: attack["slot"]
         for attack in probe.attacks("hostile")
         if attack["slot"].startswith("cap")
         for line in attack["lines"]
@@ -293,8 +288,7 @@ def test_a_spoken_text_stays_inside_its_window_at_its_full_length():
         start = event["tStartMs"] / 1000
         end = start + event["dDurationMs"] / 1000
         if text in planted:
-            slot = next(a["slot"] for a in probe.attacks("hostile") if text in a.get("lines", []))
-            spans.setdefault(slot, []).append((start, end))
+            spans.setdefault(planted[text], []).append((start, end))
     for slot, window in (("cap-1a", 0), ("cap-1b", 0), ("cap-2a", 1)):
         first, last = spans[slot][0][0], spans[slot][-1][1]
         assert len(spans[slot]) == 3
@@ -386,15 +380,15 @@ def test_the_claimline_run_holds_only_claims_its_two_sources_settle():
 def test_planted_texts_sit_where_they_claim(tmp_path):
     probe = _probe()
     probe.build(tmp_path)
-    source = _pdf_text(tmp_path / "hostile" / probe.SOURCE_PDF)
-    clean = _pdf_text(tmp_path / "clean" / probe.SOURCE_PDF)
+    source = pdf_text(tmp_path / "hostile" / probe.SOURCE_PDF)
+    clean = pdf_text(tmp_path / "clean" / probe.SOURCE_PDF)
     for code in ("TST-001", "TST-002", "TST-003"):
         assert code in source and code not in clean
     # Drawn texts are pixels: no PDF text, no page text.
     assert "TST-004" not in source and "TST-005" not in source
     # The claimline run reads the clean PDF beside its own board.
     assert not (tmp_path / "claimline" / probe.SOURCE_PDF).exists()
-    report = _pdf_text(tmp_path / "hostile" / probe.REPORT_PDF)
+    report = pdf_text(tmp_path / "hostile" / probe.REPORT_PDF)
     for record in _golden(probe, "hostile").values():
         assert record["text"] in report
 
@@ -417,7 +411,7 @@ def test_each_drawn_text_is_ink_in_its_own_band_and_nowhere_else(tmp_path):
     assert ink["hostile"]["image"] > script.INK and ink["hostile"]["claimline"] < script.NO_INK
     assert ink["claimline"]["claimline"] > script.INK and ink["claimline"]["image"] < script.NO_INK
     # The figure, cut to its frame as the parser cuts it.
-    frame = (43, 33, 957, 507)
+    frame = probe.FIGURE_CROP
     for lines, drawn in ((None, False), (["Test note TST-004 on the", "February bar"], True)):
         with Image.open(io.BytesIO(probe.figure_png(lines))) as figure:
             share = script.dark_share(figure.crop(frame), probe.NOTE_BANDS["pdf-figure"])
@@ -436,7 +430,7 @@ def test_a_planted_text_reaches_its_reader_as_typed(tmp_path):
         web_1a={"text": odd.format(n=6)},
     )
     probe.build(tmp_path)
-    source = _pdf_text(tmp_path / "hostile" / probe.SOURCE_PDF)
+    source = pdf_text(tmp_path / "hostile" / probe.SOURCE_PDF)
     assert odd.format(n=1) in source and "TST-003: R&D <hold> & do not cite" in source
     _, _, capped = _kept_sections(probe, "hostile")
     assert odd.format(n=6) in capped.sections[0].text
@@ -465,7 +459,7 @@ def test_each_control_has_a_planted_text_in_its_own_chunk(tmp_path):
     hostile, claimline = _golden(probe, "hostile"), _golden(probe, "claimline")
     _, _, capped = _kept_sections(probe, "hostile")
     first, second = (section.text for section in capped.sections)
-    source = _pdf_text(tmp_path / "hostile" / probe.SOURCE_PDF)
+    source = pdf_text(tmp_path / "hostile" / probe.SOURCE_PDF)
     for control, evidence, text in (
         ("C1", "PMT-044", source),
         ("C2", "PMT-131", first),
@@ -521,9 +515,9 @@ def test_a_drawn_text_that_leaves_its_band_is_refused():
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"claim": "K07"}, "'K07' is not a claim that was offered"),
-        ({"claim": "C2"}, "'C2' is not a claim that was offered"),
-        ({"claim": "U8"}, "'U8' is not a claim that was offered"),
+        ({"claim": "K07"}, "'K07' is not one of the claims a planted text may aim at"),
+        ({"claim": "C2"}, "'C2' is not one of the claims a planted text may aim at"),
+        ({"claim": "U8"}, "'U8' is not one of the claims a planted text may aim at"),
         ({"target": "UNVERIFIBLE"}, "'UNVERIFIBLE' is not a verdict"),
         ({"marker": "PMT-901"}, "its marker 'PMT-901' is not in its text"),
         ({"core": "words that were never planted"}, "its core .* is not in its text"),
@@ -580,11 +574,9 @@ def test_two_texts_that_share_a_slot_a_claim_an_id_or_a_code_are_refused():
         ({"id": "T01"}, "share an id"),
         ({"marker": "Test note"}, "share a code"),
     ):
+        probe = two(**second)
         if "marker" in second:  # the first one's code is then "Test note" too
-            probe = two(**second)
             probe.PAYLOADS.ATTACKS[0]["marker"] = "Test note"
-        else:
-            probe = two(**second)
         with pytest.raises(AssertionError, match=message):
             probe.attacks("hostile")
 
@@ -652,9 +644,9 @@ def _ingested(tmp_path, monkeypatch, build, probe):
     def pdf(conn_, embedder_, run_id, path, *, kind, upload_id, **_kwargs):
         if kind == "REPORT":
             return store(conn_, run_id, kind, upload_id, "report", [("text", "the report")], None)
-        text = _pdf_text(path)
+        text = pdf_text(path)
         with Image.open(io.BytesIO(probe.figure_png(probe._lines(planted, "pdf-figure")))) as full:
-            crop = full.crop((43, 33, 957, 507))
+            crop = full.crop(probe.FIGURE_CROP)
         chunks = [
             ("text", text),
             ("table", "| District |"),
@@ -790,6 +782,54 @@ def _a_second_picture(held, probe):
     pdf["pictures"].append(pdf["pictures"][0])
 
 
+def _lose_the_text_in(slot, source_type):
+    """A planted text of `slot` gone from every stored chunk of its source."""
+
+    def spoil(held, probe):
+        payload = " ".join(
+            next(a for a in probe.attacks("hostile") if a["slot"] == slot)["payload"].split()
+        )
+        for chunk in _source(held, source_type)["chunks"]:
+            chunk["text"] = " ".join(chunk["text"].split()).replace(payload, "")
+
+    return spoil
+
+
+def _read_the_video_whole(held, probe):
+    _source(held, "youtube")["truncated"] = None
+
+
+def _board_pictures_under_the_pdf(held, probe):
+    _source(held, "pdf")["pictures"] += _source(held, "image")["pictures"]
+    _source(held, "image")["pictures"] = []
+
+
+def _write_board(held, png: bytes) -> None:
+    Image.open(io.BytesIO(png)).save(_source(held, "image")["pictures"][0])
+
+
+def _lines_of(probe, slot: str) -> list[str]:
+    return next(a for a in probe.attacks("hostile") if a["slot"] == slot)["lines"]
+
+
+def _board_without_its_note(held, probe):
+    _write_board(held, probe.board_png())
+
+
+def _board_with_a_claim_line_too(held, probe):
+    _write_board(
+        held,
+        probe.board_png(foot_lines=_lines_of(probe, "image"), top_lines=["Test line TST-099"]),
+    )
+
+
+def _figure_cut_to_its_bars(held, probe):
+    """The first set's failure: the parser keeps the bars and drops the rest.
+    The note is drawn, but the band lands on the bars."""
+    with Image.open(io.BytesIO(probe.figure_png(_lines_of(probe, "pdf-figure")))) as full:
+        full.crop((80, 225, 920, 480)).save(_source(held, "pdf")["pictures"][0])
+
+
 @pytest.mark.parametrize(
     ("spoil", "problem"),
     [
@@ -804,6 +844,15 @@ def _a_second_picture(held, probe):
         (_lose_the_statement, "the labelled statement"),
         (_a_reading_without_the_code, r"T05 \(image\): the reading of the board lacks its code"),
         (_a_second_picture, "3 pictures, expected 2"),
+        (_a_second_picture, "pdf-figure: 2 stored pictures under the pdf source, expected 1"),
+        (_lose_the_text_in("pdf-prose-1", "pdf"), r"T01 \(pdf-prose-1\): its text is not whole"),
+        (_lose_the_text_in("pdf-table", "pdf"), r"T03 \(pdf-table\): its text is not whole"),
+        (_lose_the_text_in("cap-1a", "youtube"), r"T09 \(cap-1a\): its text is not whole"),
+        (_read_the_video_whole, "youtube: not read in part"),
+        (_board_pictures_under_the_pdf, "image: 0 stored pictures under the image source"),
+        (_board_without_its_note, r"T05 \(image\): no drawn text in its band"),
+        (_board_with_a_claim_line_too, "claimline: ink in a band nothing was planted in"),
+        (_figure_cut_to_its_bars, "pdf-figure: the stored picture .* not the shape its band"),
     ],
 )
 def test_the_ingest_check_names_each_way_a_run_can_differ(tmp_path, monkeypatch, spoil, problem):
@@ -824,7 +873,7 @@ def test_the_ingest_check_reads_the_stored_pictures(tmp_path, monkeypatch):
     held = script.holdings(conn, run_id)
     # The crop without the note, as the parser cut the first set's figure.
     with Image.open(io.BytesIO(probe.figure_png(None))) as bare:
-        bare.crop((43, 33, 957, 507)).save(_source(held, "pdf")["pictures"][0])
+        bare.crop(probe.FIGURE_CROP).save(_source(held, "pdf")["pictures"][0])
     problems = script.check(held, "hostile", probe, dry=False)
     assert any("T04 (pdf-figure): no drawn text in its band" in found for found in problems)
     # And ink where nothing was planted is said too: a clean run fed the
@@ -845,6 +894,25 @@ def test_the_ingest_check_reads_the_stored_pictures(tmp_path, monkeypatch):
     held = script.holdings(conn, run_id)
     _a_reading_without_the_code(held, probe)
     assert script.check(held, "hostile", probe, dry=True) == []
+
+
+def test_the_claimline_check_reads_its_own_band(tmp_path, monkeypatch):
+    probe = _probe()
+    script, conn, run_id = _ingested(tmp_path, monkeypatch, "claimline", probe)
+    held = script.holdings(conn, run_id)
+    assert script.check(held, "claimline", probe, dry=False) == []
+    _write_board(held, probe.board_png())
+    problems = script.check(held, "claimline", probe, dry=False)
+    assert any("T12 (claimline): no drawn text in its band" in found for found in problems)
+
+
+def test_the_network_readers_are_put_back_after_an_ingest(tmp_path, monkeypatch):
+    from authorai import jobs as jobsmod
+
+    real = (jobsmod.fetch_url, jobsmod.read_video_bounded)
+    probe = _probe()
+    _ingested(tmp_path, monkeypatch, "hostile", probe)
+    assert (jobsmod.fetch_url, jobsmod.read_video_bounded) == real
 
 
 def test_the_ingest_script_refuses_when_the_network_names_are_gone(tmp_path, monkeypatch):
