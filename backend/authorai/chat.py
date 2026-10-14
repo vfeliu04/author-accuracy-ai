@@ -20,6 +20,7 @@ import sqlite3
 
 from authorai import db as dbmod
 from authorai.config import Settings
+from authorai.db import VERDICTS
 from authorai.llm import LLM, TextDocument, render_user_content
 from authorai.log import setup_logger
 from authorai.video import channel_verified, clock
@@ -200,6 +201,22 @@ def _standing(source: dict) -> str:
     return f"tier {source['tier']}{gloss}, credibility {source['total']}/100"
 
 
+def _shows_evidence(row: dict) -> bool:
+    """A quote is shown only with the source chunk it was verified in."""
+    return bool(row["quote"] and row["evidence_doc_id"])
+
+
+def _cited(row: dict, numbers: dict) -> "int | None":
+    """The number of the listed source a claim's shown evidence is quoted
+    from: None when no evidence is shown or its document is no listed source.
+    The document and the INDEX both ask this, so they cannot disagree."""
+    return numbers.get(row["evidence_doc_id"]) if _shows_evidence(row) else None
+
+
+def _disavowed(row: dict) -> bool:
+    return row.get("stance") == "disavowed"
+
+
 def _claims(numbers: list[int]) -> str:
     return "claims " + ", ".join(map(str, numbers)) if numbers else "no claim"
 
@@ -212,12 +229,11 @@ def _analysis(verdicts: list, sources: list) -> str:
     lines = ["=== ANALYSIS ===", "", f"CLAIMS (numbered 1 to {len(verdicts)}):"]
     for number, row in enumerate(verdicts, 1):
         evidence = ""
-        # A quote is shown only with the source chunk it was verified in.
-        if row["quote"] and row["evidence_doc_id"]:
-            cited = numbers.get(row["evidence_doc_id"])
+        if _shows_evidence(row):
+            cited = _cited(row, numbers)
             where = f"source {cited}" if cited else "an unlisted source"
             evidence = f" — evidence: {_quoted(row['quote'])} ({where}{_evidence_locator(row)})"
-        disavowed = " (disavowed by the report)" if row.get("stance") == "disavowed" else ""
+        disavowed = " (disavowed by the report)" if _disavowed(row) else ""
         lines.append(
             f"{number}. [{row['verdict']}]{disavowed} {_quoted(row['text'])}"
             f" — {_quoted(row['rationale'])}{evidence}"
@@ -234,15 +250,15 @@ def _index(verdicts: list, scores: "dict | None", sources: list) -> str:
     and the app's words only. Nothing here comes from a report, a source or
     the judge's prose, so nothing an outside text says can change it."""
     numbers = _source_numbers(sources)
-    by_verdict: dict[str, list[int]] = {"SUPPORTED": [], "CONTRADICTED": [], "UNVERIFIABLE": []}
+    by_verdict: dict[str, list[int]] = {verdict: [] for verdict in VERDICTS}
     disavowed: list[int] = []
     cited_by: dict[int, list[int]] = {}
     for number, row in enumerate(verdicts, 1):
         by_verdict.setdefault(row["verdict"], []).append(number)
-        if row.get("stance") == "disavowed":
+        if _disavowed(row):
             disavowed.append(number)
-        if row["quote"] and row["evidence_doc_id"] in numbers:
-            cited_by.setdefault(numbers[row["evidence_doc_id"]], []).append(number)
+        if (cited := _cited(row, numbers)) is not None:
+            cited_by.setdefault(cited, []).append(number)
     lines = [
         "=== INDEX: the pipeline's own record of this run ===",
         "SCORES: " + _fmt_score(scores),

@@ -185,14 +185,7 @@ def test_answer_sends_the_analysis_as_a_cached_document_in_the_first_user_turn(c
     )
     assert reply == "Two claims: one supported, one contradicted."
     [call] = llm.chat_calls
-    # The system prompt is the app's own words and nothing else: the
-    # instructions, the mode, the pipeline's index of the run; no outside text,
-    # no cache marker.
-    assert call["system_blocks"] == [
-        {"type": "text", "text": chatmod.CHAT_SYSTEM},
-        {"type": "text", "text": chatmod.MODE_INSTRUCTIONS["evidence"]},
-        {"type": "text", "text": chatmod.build_index(conn, run_id)},
-    ]
+    # (The system prompt, in every mode: test_every_mode_sends_the_index_….)
     # The analysis is one plain-text document, first in the first user turn,
     # and the one block that carries the cache breakpoint.
     assert _document(call) == {
@@ -217,30 +210,20 @@ def test_answer_sends_the_analysis_as_a_cached_document_in_the_first_user_turn(c
     assert call["model"] == SETTINGS.chat_model
 
 
-def test_mode_switches_the_second_block_only(conn):
-    run_id = _scored_run(conn)
-    llm = FakeLLM()
-    chatmod.answer(conn, llm, run_id, "q", [], "guidance", SETTINGS)
-    [call] = llm.chat_calls
-    assert call["system_blocks"][0] == {"type": "text", "text": chatmod.CHAT_SYSTEM}
-    assert "MODE: guidance" in call["system_blocks"][1]["text"]
-
-
 @pytest.mark.parametrize("mode", chatmod.CHAT_MODES)
 def test_every_mode_sends_the_index_as_the_last_system_block(conn, mode):
-    """The system prompt tells the model to count from the INDEX in every mode,
-    so every mode must carry it: the app's own words, mode, then the index."""
+    """The system prompt is the app's own words and nothing else, in every mode:
+    the instructions, the mode, then the INDEX the model is told to count from;
+    no outside text, no cache marker. Only the mode block changes."""
     run_id = _scored_run(conn)
     llm = FakeLLM()
     chatmod.answer(conn, llm, run_id, "q", [], mode, SETTINGS)
     [call] = llm.chat_calls
-    blocks = call["system_blocks"]
-    assert [block["text"] for block in blocks] == [
-        chatmod.CHAT_SYSTEM,
-        chatmod.MODE_INSTRUCTIONS[mode],
-        chatmod.build_index(conn, run_id),
+    assert call["system_blocks"] == [
+        {"type": "text", "text": chatmod.CHAT_SYSTEM},
+        {"type": "text", "text": chatmod.MODE_INSTRUCTIONS[mode]},
+        {"type": "text", "text": chatmod.build_index(conn, run_id)},
     ]
-    assert not any("cache_control" in block for block in blocks)
 
 
 def test_the_index_lists_the_claims_the_report_disavows_by_their_numbers(monkeypatch):
@@ -272,7 +255,7 @@ def test_a_quote_from_a_document_that_is_no_listed_source_is_counted_for_no_sour
     for line in index.splitlines():
         if line.startswith("Source "):
             cited = line.split("Quoted as evidence for ", 1)[1]
-            assert f" {number}," not in f" {cited.replace('claims ', '').rstrip('.')},", line
+            assert number not in map(int, re.findall(r"\d+", cited)), line
     claim_line = next(
         line
         for line in chatmod.build_context(None, "run").splitlines()
