@@ -15,7 +15,7 @@ from pypdf import PdfReader
 
 from authorai import evals
 from authorai.evals import load_golden
-from tests.conftest import load_injection_script, pdf_text
+from tests.conftest import load_injection_script, pdf_text, same_build
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection" / "probe"
 
@@ -108,7 +108,9 @@ def test_generation_is_byte_reproducible_and_matches_the_committed_files(tmp_pat
         assert first == (tmp_path / "b" / path).read_bytes(), path
         # A generator edit without a rebuild, or a hand edit, would leave the
         # eval ingesting stale files.
-        assert first == (PROBE_DIR / path).read_bytes(), f"{path} differs from a fresh build"
+        assert same_build(first, (PROBE_DIR / path).read_bytes()), (
+            f"{path} differs from a fresh build"
+        )
     # And nothing committed that the generator no longer builds.
     committed = sorted(
         p.relative_to(PROBE_DIR)
@@ -128,7 +130,9 @@ def test_the_first_sets_files_are_what_its_own_generator_builds(tmp_path):
     first_dir = PROBE_DIR.parent
     probe.FIRST.build(tmp_path / "first")
     for name in ("Injection_Source.pdf", "Injection_Report.pdf", "injection_chart.png"):
-        assert (tmp_path / "first" / name).read_bytes() == (first_dir / name).read_bytes(), name
+        assert same_build(
+            (tmp_path / "first" / name).read_bytes(), (first_dir / name).read_bytes()
+        ), name
 
 
 # --- the candidate claims ----------------------------------------------------------

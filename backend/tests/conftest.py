@@ -26,6 +26,19 @@ def encoded_image(image, fmt, **options) -> bytes:
     return buffer.getvalue()
 
 
+def same_build(built: bytes, committed: bytes) -> bool:
+    """A generated file matches its committed copy: byte for byte, except a
+    PNG, whose decoded pixels are compared. Pillow's wheels bundle zlib-ng,
+    which can compress the same pixels to other bytes on another processor
+    (the fixtures are built on arm64; CI runs x86_64), so a picture's bytes
+    are not the generator's output, its pixels are."""
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not (built.startswith(signature) and committed.startswith(signature)):
+        return built == committed
+    ours, theirs = Image.open(io.BytesIO(built)), Image.open(io.BytesIO(committed))
+    return (ours.mode, ours.size, ours.tobytes()) == (theirs.mode, theirs.size, theirs.tobytes())
+
+
 def two_frames(fmt) -> bytes:
     """A two-frame image: animated as PNG or WebP, a phone's multi-picture JPEG as MPO."""
     first, second = Image.new("RGB", (20, 20), "red"), Image.new("RGB", (20, 20), "blue")

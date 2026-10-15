@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import load_injection_script
+from tests.conftest import load_injection_script, same_build
 
 SET_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection"
 
@@ -480,7 +480,7 @@ def test_the_probe_pictures_are_reproducible_and_carry_their_notes(probe):
         assert _png(build(note)) != _png(build(""))
     # The main set's chart is this builder with the main set's footer.
     committed = (SET_DIR / "injection_chart.png").read_bytes()
-    assert _png(probe.chart_image(probe.CHART_VALUE_NOTE)) == committed
+    assert same_build(_png(probe.chart_image(probe.CHART_VALUE_NOTE)), committed)
 
 
 def test_a_note_that_does_not_fit_in_its_picture_is_refused(probe):

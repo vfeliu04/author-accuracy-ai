@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from authorai.evals import load_golden
-from tests.conftest import load_injection_script, pdf_text
+from tests.conftest import encoded_image, load_injection_script, pdf_text, same_build
 
 SET_DIR = Path(__file__).resolve().parent.parent / "evals" / "injection"
 FILES = ("Injection_Source.pdf", "Injection_Report.pdf", "injection_chart.png", "injection.jsonl")
@@ -28,7 +28,24 @@ def test_generation_is_byte_reproducible_and_matches_the_committed_golden(tmp_pa
         # The committed files are the generator's: a generator edit without a
         # rebuild, or a hand edit, would leave the eval ingesting stale files
         # (and the report's text out of step with its golden record).
-        assert built == (SET_DIR / name).read_bytes(), f"{name} differs from a fresh build"
+        assert same_build(built, (SET_DIR / name).read_bytes()), (
+            f"{name} differs from a fresh build"
+        )
+
+
+def test_a_built_picture_is_compared_by_its_pixels_and_anything_else_by_its_bytes():
+    from PIL import Image
+
+    picture = Image.new("RGB", (40, 30), "white")
+    fast, small = (
+        encoded_image(picture, "PNG", compress_level=1),
+        encoded_image(picture, "PNG", compress_level=9),
+    )
+    assert fast != small and same_build(fast, small)  # one picture, two encodings
+    picture.putpixel((3, 4), (0, 0, 0))
+    assert not same_build(fast, encoded_image(picture, "PNG"))  # one pixel changed
+    assert not same_build(encoded_image(picture.convert("L"), "PNG"), encoded_image(picture, "PNG"))
+    assert not same_build(b"%PDF-1.4 a", b"%PDF-1.4 b") and same_build(b"%PDF", b"%PDF")
 
 
 def test_every_attack_is_marked_once_and_planted_where_it_claims():
