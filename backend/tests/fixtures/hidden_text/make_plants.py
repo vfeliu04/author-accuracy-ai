@@ -558,9 +558,10 @@ def build() -> None:
     )
     hidden_plant(
         "h_stroke_white",
-        "covered",
+        "same_colour_as_background",
         "HIDDEN-STROKEWHITE",
-        "render mode 1 (stroke only) with a white stroke and the default black fill",
+        "render mode 1 (stroke only) with a white stroke and the default black fill: judged by"
+        " its stroke",
         ops_before=b"1 1 1 RG 0.5 w ",
         pre="1 Tr ",
     )
@@ -1040,7 +1041,7 @@ def _review_cases() -> None:
     """One plant per case the R1 code review built (its PDFs, re-made here)."""
 
     # A form field's opaque appearance over a line: readers draw widgets.
-    def widget(pdf, page, font):
+    def widget(pdf, page, font, acroform=True):
         appearance = Stream(pdf, b"1 g 0 0 550 30 re f\n", Type=Name.XObject, Subtype=Name.Form)
         appearance.BBox = Array([0, 0, 550, 30])
         field = pdf.make_indirect(
@@ -1056,7 +1057,8 @@ def _review_cases() -> None:
             )
         )
         page.obj.Annots = Array([field])
-        pdf.Root.AcroForm = Dictionary(Fields=Array([field]))
+        if acroform:
+            pdf.Root.AcroForm = Dictionary(Fields=Array([field]))
 
     hidden_plant(
         "h_widget_cover",
@@ -1267,22 +1269,98 @@ def _review_cases() -> None:
         ),
     )
     labels = ["5-1-2022", "7-1-2022", "9-1-2022", "11-1-2022", "1-1-2023", "3-1-2023"]
+    # Three sizes: 3.68 pt (matrix 2.6) reproduced Drought's case at scale 1.5
+    # through the solidity of the hyphen's own box; 6 and 8 pt hyphens have a
+    # box interior, so only "the covering glyph must be solid" keeps them.
+    rows = [(2.6, 640), (6 / 2**0.5, 560), (8 / 2**0.5, 470)]
     plant(
         "k_rotated_axis_labels",
         "keep",
         None,
         "",
-        [VISIBLE, *labels],
-        "3.68 pt date labels rotated -45 degrees under a chart's axis, as on Drought"
-        " Hotspots p30 (4.56 pt there; this size reproduces the case at render scale 1.5):"
-        " a hyphen fills its own box and the next digit's box covers it",
+        [VISIBLE] + labels * len(rows),
+        "date labels rotated -45 degrees under a chart's axis, as on Drought Hotspots p30,"
+        " at 3.68, 6 and 8 pt: a hyphen fills its own box and the next digit's box covers it",
         lambda pdf, page, font: (
             VISIBLE_OPS
             + b"".join(
-                tj(label, x=0, y=0, size=1, pre=f"2.6 -2.6 2.6 2.6 {80 + 50 * k} 640 Tm ")
+                tj(
+                    label,
+                    x=0,
+                    y=0,
+                    size=1,
+                    pre=f"{m:.4f} -{m:.4f} {m:.4f} {m:.4f} {80 + 70 * k} {y} Tm ",
+                )
+                for m, y in rows
                 for k, label in enumerate(labels)
             )
         ),
+    )
+
+    # The second review's cases (2026-10-18).
+    hidden_plant(
+        "h_widget_no_acroform",
+        "covered",
+        "HIDDEN-ORPHANWIDGET",
+        "a line under a text field's opaque appearance, the catalog having no /AcroForm",
+        setup=lambda pdf, page, font: widget(pdf, page, font, acroform=False),
+    )
+    stretched = line("HIDDEN-STRETCHED")
+    plant(
+        "h_stretched_tiny",
+        "hidden",
+        "tiny",
+        stretched,
+        [VISIBLE],
+        "1 pt text drawn 0.8 high and 5 wide (0.6 pt tall glyphs, long boxes)",
+        lambda pdf, page, font: (
+            VISIBLE_OPS + tj(stretched, x=0, y=0, size=1, pre="5 0 0 0.8 72 650 Tm ")
+        ),
+    )
+    sheared = line("HIDDEN-SHEARED")
+    plant(
+        "h_sheared_tiny",
+        "hidden",
+        "tiny",
+        sheared,
+        [VISIBLE],
+        "4 pt text under a text matrix (3 0 6 0.15): glyphs 0.6 pt tall though the matrix's"
+        " second row is long",
+        lambda pdf, page, font: (
+            VISIBLE_OPS + tj(sheared, x=0, y=0, size=4, pre="3 0 6 0.15 40 650 Tm ")
+        ),
+    )
+    hidden_plant(
+        "h_faint_alpha",
+        ["low_contrast", "covered"],
+        "HIDDEN-FAINT",
+        "black text at fill opacity 0.07: it renders #EDEDED, faint enough to read under"
+        " contrast 1.2 yet still leaving ink (pixels change by 18 > 16)",
+        ops_before=b"q /GSF gs ",
+        ops_after=b"Q\n",
+        setup=ext_gstate(GSF={"ca": 0.07}),
+    )
+    hidden_plant(
+        "h_white_veil",
+        ["low_contrast", "covered"],
+        "HIDDEN-VEIL",
+        "black text under a white veil at 93% opacity drawn after it: it renders #EDEDED,"
+        " still leaving ink",
+        ops_after=b"q /GSV gs 1 1 1 rg " + BOX + b" Q\n",
+        setup=ext_gstate(GSV={"ca": 0.93}),
+    )
+    band_rows = [
+        f"BT /F1 0.5 Tf 300 {500 + 0.5 * r:g} Td ({'SECURE' * 20}) Tj ET\n" for r in range(40)
+    ]
+    plant(
+        "k_microtext_band",
+        "hidden",
+        "tiny",
+        "SECURE" * 20 * 40,
+        [VISIBLE],
+        "a band of 0.5 pt security microtext (4,800 characters, over 1,000 in one overlap"
+        " cell) beside the visible sentence: removed as tiny, and the page is still checked",
+        lambda pdf, page, font: VISIBLE_OPS + "".join(band_rows).encode(),
     )
 
     def scan_in_form(pdf, page, font):
@@ -1411,6 +1489,23 @@ def _bounds() -> None:
             )
     page.obj.Contents = pdf.make_stream(b"".join(ops))
     FILES["b_one_object_per_char"] = to_bytes(pdf)
+    # 300 text objects, each one glyph about the size of the page.
+    pdf, page, font = new_doc()
+    glyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    page.obj.Contents = pdf.make_stream(
+        VISIBLE_OPS
+        + b"".join(
+            tj(glyphs[k % 26], x=(k % 10) * 3, y=(k // 10) * 2, size=800) for k in range(300)
+        )
+    )
+    FILES["b_many_page_glyphs"] = to_bytes(pdf)
+    # The largest page checked, covered by one solid block glyph.
+    pdf, page, font = new_doc(2200, 3200)
+    block_font(pdf, page)
+    page.obj.Contents = pdf.make_stream(
+        tj(VISIBLE, y=3100) + b"0.2 g BT /T3 3000 Tf 0 200 Td (Z) Tj ET\n"
+    )
+    FILES["b_page_glyph_memory"] = to_bytes(pdf)
 
 
 def main(out: Path) -> None:

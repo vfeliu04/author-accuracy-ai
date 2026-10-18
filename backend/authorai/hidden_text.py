@@ -78,29 +78,36 @@ from authorai.web import (
 
 logger = setup_logger(__name__)
 
-DETECTOR_VERSION = "hidden-text v1"
+DETECTOR_VERSION = "hidden-text v2"
 
 # The rules, measured on 54 planted PDFs and 343 real pages (records in
 # author_ai/report-side-research/hidden-text), each with a planted pair on
 # either side in tests/fixtures/hidden_text.
 RULES = {
-    # share of a character's loose box inside the CropBox
+    # share of a character's loose box inside the page pdfium draws
     "MIN_IN_CROP": 0.5,
-    # effective glyph height in points: font size x the matrix's vertical scale
+    # glyph height in points across the baseline (font size x the matrix's
+    # height perpendicular to it), and the shorter side of the glyph's box
     "MIN_SIZE_PT": 1.0,
-    # the character matrix's horizontal scale over its vertical one (Tz, skew)
+    # the matrix's scale along the baseline over its height across it (Tz)
     "MIN_HSCALE": 0.2,
     # share of the tight box's pixels that change when the text is drawn ...
     "MIN_INK_SHARE": 0.02,
     # ... by at least this much in some channel (0-255)
     "MIN_INK_DIFF": 16,
-    # WCAG contrast of the fill colour against the rendered background
+    # WCAG contrast of the character's paint against what is drawn behind it
     "MIN_CONTRAST": 1.2,
+    # the declared colour is the paint when this share of the changed pixels
+    # lies on the blend from what is under them to it ...
+    "PAINT_EXPLAINED_SHARE": 0.8,
+    # ... and the strongest of them reach at least this far towards it (faint
+    # paint, a fade or a veil, is judged as rendered)
+    "PAINT_REACHED": 0.5,
     # the OCR-layer exception: share of the loose box lying on an image ...
     "OCR_MIN_OVER_IMAGE": 0.9,
     # ... whose luminance spread under the word (its most-inked character) is at least ...
     "OCR_MIN_BG_SPREAD": 8.0,
-    # ... on a page whose images cover at least this share of the CropBox
+    # ... on a page whose images cover at least this share of the page
     "OCR_MIN_PAGE_IMAGE": 0.5,
     # overlap pass: two equal characters are copies of one glyph at this IoU
     "DUPLICATE_IOU": 0.6,
@@ -130,6 +137,14 @@ PAGES_PER_OPEN = 5
 # compared pairwise in reasonable time (two 12,000-character lines printed on
 # one spot took 55 s); no real page comes near (a cell holds tens).
 MAX_CELL_CHARS = 1_000
+# Past this many page-areas of glyph boxes (summed over the page's characters,
+# loose and tight), a page's per-pixel work is unbounded in practice (300
+# page-sized glyphs took 92 s); a real page sums to a fraction of one.
+MAX_GLYPH_AREA_PAGES = 20
+# Per-character pixel statistics read at most about this many pixels, taken
+# evenly (a glyph the size of the page would otherwise copy the page several
+# times over, past the memory bound).
+SAMPLE_PIXELS = 40_000
 PAGE_MAX_CHARS = 50_000
 RESULT_MAX_GLYPHS = 2_000_000
 SAMPLE_CHARS = 120
@@ -157,11 +172,13 @@ _REMOVED = frozenset(_CODE[kind] for kind in (*HIDDEN_KINDS, DUPLICATE))
 
 _TEXT = pdfium_c.FPDF_PAGEOBJ_TEXT
 _IMAGE = pdfium_c.FPDF_PAGEOBJ_IMAGE
+_STROKING = (1, 2, 5, 6)  # text render modes that stroke the glyph outline
 
 # The reasons a page is not checked, as the run shows them.
 TOO_LARGE = "page too large to check"
 TOO_MANY_OVERLAPS = "too many overlapping text objects"
 TOO_DENSE = "too much overlapping text"
+TOO_MUCH_AREA = "glyphs covering too much of the page"
 TOO_MUCH_TEXT = "too much text on the page"
 NOT_RENDERED = "the page could not be rendered"
 RESULT_TOO_LARGE = "result too large"
@@ -245,7 +262,7 @@ class HiddenTextReport:
 
 
 def check_pdf(
-    source: str | Path | bytes,
+    source: str | Path | bytes | BinaryIO,
     *,
     pages: Iterable[int] | None = None,
     scale: float = RENDER_SCALE,
@@ -303,14 +320,24 @@ def check_pdf(
     )
 
 
-def _open(source: str | Path | bytes):
+def _open(source: str | Path | bytes | BinaryIO):
     try:
         doc = pdfium.PdfDocument(str(source) if isinstance(source, Path) else source)
     except pdfium.PdfiumError as exc:
         raise ValueError(f"the PDF could not be opened ({exc})") from exc
     # A reader draws form fields' appearances, so the renders draw them too:
-    # text under an opaque field is covered. (Before any page is loaded.)
-    doc.init_forms()
+    # text under an opaque field is covered. pypdfium2 sets up form drawing
+    # only when the catalog has an /AcroForm, while a reader draws a widget
+    # without one, so the environment is made either way (before any page).
+    if doc.get_formtype() == pdfium_c.FORMTYPE_NONE:
+        config = pdfium_c.FPDF_FORMFILLINFO(version=2)
+        raw = pdfium_c.FPDFDOC_InitFormFillEnvironment(doc, config)
+        if not raw:
+            raise ValueError("the PDF could not be opened (no form environment)")
+        doc.formenv = pdfium.PdfFormEnv(raw, doc, config)
+        doc._add_kid(doc.formenv)
+    else:
+        doc.init_forms()
     return doc
 
 
@@ -335,6 +362,10 @@ class _Char:
     bg_spread: float = 0.0
     ink_contrast: float | None = None
     declared: tuple[int, int, int] | None = None  # the colour it is painted in, as declared
+    declared_alpha: int | None = None  # and that paint's opacity (0-255)
+    ink_box: tuple[int, int, int, int] | None = None  # pixel windows, filled by _measure
+    loose_px: tuple[int, int, int, int] | None = None
+    rejudged: bool = False
     earlier_copy: bool = False
     kind: str | None = None
 
@@ -351,8 +382,8 @@ def _check_page(doc, number: int, scale: float) -> PageCheck:
         finally:
             textpage.close()
         if chars:
-            bounds = _page_space_bounds(page)
-            _measure(page, chars, scale, number, page_box, bounds)
+            bounds, order = _page_space_bounds(page)
+            _measure(page, chars, scale, number, page_box, bounds, order)
             _classify(chars, _image_cover(chars, page_box, bounds))
     finally:
         page.close()
@@ -393,18 +424,22 @@ def _characters(textpage, page_box) -> list[_Char]:
         pdfium_c.FPDFText_GetMatrix(textpage.raw, i, ctypes.byref(matrix))
         size = pdfium_c.FPDFText_GetFontSize(textpage.raw, i)
         row1 = math.hypot(matrix.a, matrix.b)
-        row2 = math.hypot(matrix.c, matrix.d)
+        # the glyph's height scale across the baseline: |det| / |baseline|, so
+        # a shear that lengthens the matrix's second row reads as it draws
+        across = abs(matrix.a * matrix.d - matrix.b * matrix.c) / row1 if row1 else 0.0
         loose = textpage.get_charbox(i, loose=True)
         clip = _clip_box(obj) if obj else None
         area = _area(loose)
         mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj) if obj else -1
         declared = (r.value, g.value, b.value) if has_fill else None
+        declared_alpha = a.value if has_fill else None
         if mode in (1, 5) and obj:  # stroke only: painted in the stroke colour
             sr, sg, sb, sa = (ctypes.c_uint() for _ in range(4))
             stroked = pdfium_c.FPDFPageObj_GetStrokeColor(
                 obj, ctypes.byref(sr), ctypes.byref(sg), ctypes.byref(sb), ctypes.byref(sa)
             )
             declared = (sr.value, sg.value, sb.value) if stroked else None
+            declared_alpha = sa.value if stroked else None
         chars.append(
             _Char(
                 index=i,
@@ -413,9 +448,10 @@ def _characters(textpage, page_box) -> list[_Char]:
                 loose=loose,
                 mode=mode,
                 declared=declared,
+                declared_alpha=declared_alpha,
                 rgba=(r.value, g.value, b.value, a.value) if has_fill else None,
-                hscale=row1 / row2 if row2 else 0.0,
-                vsize=size * row2,
+                hscale=row1 / across if across else 0.0,
+                vsize=size * across,
                 marks=_marks(obj) if obj else (),
                 clipped=clip is not None and area > 0 and _overlap(loose, clip) / area < 0.5,
                 obj=_pointer(obj),
@@ -464,25 +500,33 @@ def _image_cover(chars: list[_Char], page_box, bounds) -> float:
     return float(mask.mean())
 
 
-def _page_space_bounds(page) -> dict[int, tuple[int, tuple[float, float, float, float]]]:
-    """Every page object's type and bounds in page space, by pointer. pdfium
-    gives an object inside a Form XObject its bounds in the form's own space,
-    so each form's matrix is composed down the nesting (a scan drawn through
-    a form scaled to the page has bounds (0, 0, 1, 1) otherwise)."""
-    out: dict[int, tuple[int, tuple[float, float, float, float]]] = {}
+def _page_space_bounds(page) -> tuple[dict[int, tuple[int, tuple]], dict[int, int]]:
+    """The page-space bounds of the objects the rules read (images, and text
+    objects in a stroking render mode, whose stroke reaches past their glyph
+    boxes), by pointer, with each object's type; and every object's drawing
+    order. pdfium gives an object inside a Form XObject its bounds in the
+    form's own space, so each form's matrix is composed down the nesting (a
+    scan drawn through a form scaled to the page has bounds (0, 0, 1, 1)
+    otherwise)."""
+    bounds: dict[int, tuple[int, tuple]] = {}
+    order: dict[int, int] = {}
     forms: list[tuple[float, ...]] = []  # the composed matrix of the form at each level
-    for obj in page.get_objects():
+    for position, obj in enumerate(page.get_objects()):
         level = obj.level
         del forms[level:]
-        box = obj.get_bounds()
-        if level:
-            box = _transform_box(forms[level - 1], box)
-        out[_pointer(obj.raw)] = (obj.type, box)
+        pointer = _pointer(obj.raw)
+        order[pointer] = position
+        wanted = obj.type == _IMAGE or (
+            obj.type == _TEXT and pdfium_c.FPDFTextObj_GetTextRenderMode(obj.raw) in _STROKING
+        )
+        if wanted:
+            box = obj.get_bounds()
+            bounds[pointer] = (obj.type, _transform_box(forms[level - 1], box) if level else box)
         if obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:
             m = obj.get_matrix()
             own = (m.a, m.b, m.c, m.d, m.e, m.f)
             forms.append(_compose(forms[level - 1], own) if level else own)
-    return out
+    return bounds, order
 
 
 def _compose(outer, inner) -> tuple[float, ...]:
@@ -531,10 +575,11 @@ def _difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out
 
 
-def _measure(page, chars: list[_Char], scale: float, number: int, page_box, bounds) -> None:
-    """Fill each character's ink, ink contrast, background colour and spread
-    from the page rendered with and without its text; then re-judge the
-    characters whose ink may be another object's (_rejudge_overlaps)."""
+def _measure(page, chars: list[_Char], scale: float, number: int, page_box, bounds, order) -> None:
+    """Fill each character's ink, background colour and spread from the page
+    rendered with and without its text; re-judge the characters whose ink may
+    be another object's (_rejudge_overlaps); then read the contrast of the
+    characters that were not re-judged against the page without its text."""
     drawn = _render(page, scale, number=number)
     texts = list(page.get_objects(filter=[_TEXT]))
     for obj in texts:
@@ -544,25 +589,42 @@ def _measure(page, chars: list[_Char], scale: float, number: int, page_box, boun
         pdfium_c.FPDFPageObj_SetIsActive(obj.raw, True)
     height, width = drawn.shape[:2]
     to_px = _device_map(page, width, height)
+    work = 0
+    for char in chars:
+        char.ink_box = _pixel_box(to_px, char.box, width, height, pad=1)
+        char.loose_px = _pixel_box(to_px, char.loose, width, height, pad=0)
+        work += _pixels(char.ink_box) + _pixels(char.loose_px)
+    if work > MAX_GLYPH_AREA_PAGES * width * height:
+        raise _PageNotChecked(TOO_MUCH_AREA)
     diff = _difference(drawn, bare)
     min_diff = RULES["MIN_INK_DIFF"]
     for char in chars:
-        ink_box = _pixel_box(to_px, char.box, width, height, pad=1)
-        loose_box = _pixel_box(to_px, char.loose, width, height, pad=0)
-        x0, y0, x1, y1 = ink_box
+        x0, y0, x1, y1 = char.ink_box
         if x1 > x0 and y1 > y0:
             patch = diff[y0:y1, x0:x1]
             char.box_px = patch.size
             char.ink_px = int((patch >= min_diff).sum())
-        x0, y0, x1, y1 = loose_box
-        if x1 > x0 and y1 > y0:
-            behind = bare[y0:y1, x0:x1].reshape(-1, 3)
+        if _pixels(char.loose_px):
+            behind = _sample(bare, char.loose_px).reshape(-1, 3)
             char.bg = tuple(int(v) for v in np.median(behind, axis=0))  # type: ignore[assignment]
             char.bg_spread = float(behind.mean(axis=1, dtype=np.float32).std())
-        if char.ink_px:
-            char.ink_contrast = _ink_contrast(drawn, bare, diff, ink_box, loose_box, char.declared)
-    del bare, diff
-    _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box, bounds)
+    _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box, bounds, order)
+    for char in chars:
+        if char.ink_px and not char.rejudged and char.bg is not None:
+            char.ink_contrast = _ink_contrast(drawn, bare, diff, char.ink_box, char.bg, char)
+
+
+def _pixels(box) -> int:
+    x0, y0, x1, y1 = box
+    return max(0, x1 - x0) * max(0, y1 - y0)
+
+
+def _sample(image: np.ndarray, box) -> np.ndarray:
+    """The pixels of `image` in a pixel box, taken evenly to at most about
+    SAMPLE_PIXELS (every k-th row and column)."""
+    x0, y0, x1, y1 = box
+    step = max(1, math.ceil(math.sqrt(_pixels(box) / SAMPLE_PIXELS)))
+    return image[y0:y1:step, x0:x1:step]
 
 
 _LINEAR = np.array(
@@ -575,50 +637,63 @@ _LINEAR = np.array(
 _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 
-def _ink_contrast(drawn, reference, changed, ink_box, loose_box, declared) -> float | None:
+def _ink_contrast(drawn, reference, changed, ink_box, behind, char) -> float | None:
     """How far a character's paint stands out from what is behind it: the
-    WCAG contrast between its colour and the median of `reference` (the page
-    without the character's object, every other object drawn) over its loose
-    box. So text on a dark shape that is itself text (a badge) is compared
-    with that shape, and white text drawn over a black line is compared with
-    the paper around the line, which it matches.
+    WCAG contrast between its colour and `behind`, the median of the
+    reference render (the page without the character's object, every other
+    object drawn) over its loose box. So text on a dark shape that is itself
+    text (a badge) is compared with that shape, and white text drawn over a
+    black line is compared with the paper around the line, which it matches.
 
     Its colour is the declared one (the fill, or the stroke for outlined
     text) when that paint explains the pixels it changes — each drawn pixel
-    lies on the blend between the declared colour and that pixel of
-    `reference` (anti-aliased edges, thin glyphs that never reach full
-    coverage, white partly erasing a black line) for at least 80% of them.
-    Otherwise, as for a pattern fill (pdfium declares those white), it is
-    what was rendered: the drawn pixels where the character changes the page
-    most. Returns None when the character changes no pixel."""
-    x0, y0, x1, y1 = ink_box
-    lx0, ly0, lx1, ly1 = loose_box
-    if x1 <= x0 or y1 <= y0 or lx1 <= lx0 or ly1 <= ly0:
-        return None
-    changes = changed[y0:y1, x0:x1]
+    lies on the blend between the declared colour and that pixel of the
+    reference (anti-aliased edges, thin glyphs that never reach full
+    coverage, white partly erasing a black line) for PAINT_EXPLAINED_SHARE
+    of them — and its strongest pixels reach at least PAINT_REACHED of the
+    way to it, or when the declared paint matches what is behind anyway.
+    Otherwise it is what was rendered, the drawn pixels where the character
+    changes the page most: a pattern fill (pdfium declares those white), or
+    paint faded by opacity or a veil, which the blend explains but never
+    reaches. Returns None when the character changes no pixel."""
+    changes = _sample(changed, ink_box)
     ink = changes >= RULES["MIN_INK_DIFF"]
     if not ink.any():
         return None
-    behind = np.median(reference[ly0:ly1, lx0:lx1].reshape(-1, 3), axis=0)
-    painted = drawn[y0:y1, x0:x1][ink].astype(np.float32)
-    if declared is not None and _explained_by(
-        painted, reference[y0:y1, x0:x1][ink].astype(np.float32), declared
-    ):
-        return _wcag(np.array(declared, dtype=np.float64), behind)
-    strongest = changes >= np.percentile(changes[ink], 90)
-    return _wcag(np.median(drawn[y0:y1, x0:x1][strongest], axis=0), behind)
+    painted = _sample(drawn, ink_box)[ink].astype(np.float32)
+    behind = np.asarray(behind, dtype=np.float64)
+    if char.declared is not None:
+        declared = np.array(char.declared, dtype=np.float64)
+        under = _sample(reference, ink_box)[ink].astype(np.float32)
+        explained, reached = _paint_fit(painted, under, char.declared)
+        if explained >= RULES["PAINT_EXPLAINED_SHARE"]:
+            paint = _wcag(declared, behind)
+            # Paint that cannot stand out from what is behind (white on white,
+            # whatever black line it partly erases) is low however far it
+            # reaches; paint that could is judged as declared only if it gets there.
+            if paint < RULES["MIN_CONTRAST"] or reached >= RULES["PAINT_REACHED"]:
+                return paint
+    strongest = changes[ink] >= np.percentile(changes[ink], 90)
+    return _wcag(np.median(painted[strongest], axis=0), behind)
 
 
-def _explained_by(painted, under, declared) -> bool:
-    """Whether at least 80% of `painted` pixels lie (within one ink step) on
-    the blend from the pixel `under` them to the `declared` colour."""
+def _paint_fit(painted, under, declared) -> tuple[float, float]:
+    """The share of `painted` pixels lying (within one ink step) on the blend
+    from the pixel `under` them to the `declared` colour, and how far the
+    strongest of those reach along it (the 90th percentile, 0 to 1)."""
     tolerance = RULES["MIN_INK_DIFF"] * math.sqrt(3)
     span = np.asarray(declared, dtype=np.float32) - under
     length = (span * span).sum(axis=1)
     t = np.where(length > 0, ((painted - under) * span).sum(axis=1) / np.maximum(length, 1), 0)
-    nearest = under + np.clip(t, 0, 1)[:, None] * span
-    off = np.sqrt(((painted - nearest) ** 2).sum(axis=1))
-    return float((off <= tolerance).mean()) >= 0.8
+    t = np.clip(t, 0, 1)
+    nearest = under + t[:, None] * span
+    on_blend = np.sqrt(((painted - nearest) ** 2).sum(axis=1)) <= tolerance
+    if not on_blend.any():
+        return 0.0, 0.0
+    # a pixel where the paint and what is under it already match moves nothing
+    moved = on_blend & (length > tolerance**2)
+    reached = float(np.percentile(t[moved], 90)) if moved.any() else 1.0
+    return float(on_blend.mean()), reached
 
 
 def _wcag(first, second) -> float:
@@ -641,12 +716,17 @@ class _Extent:
     declared: None = None
 
 
-def _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box, bounds) -> None:
+def _rejudge_overlaps(
+    page, chars, texts, drawn, scale, number, to_px, page_box, bounds, order
+) -> None:
     """Re-judge every character that pass 1 called visible and whose box
     touches another text object's ink: that ink may be what it was credited
-    with. Touching is read from glyph boxes clipped to the page, padded by a
-    device pixel, and from the bounds of stroked text objects, whose stroke
-    reaches past their glyph boxes.
+    with. Touching is read from glyph boxes clipped to the page, padded by two
+    device pixels, and from the bounds of stroked text objects, whose stroke
+    reaches past their glyph boxes. Characters already decided by an
+    attribute rule (off the page, invisible render mode, tiny, squashed) or
+    with no ink take no part: they are removed whatever their neighbours do,
+    and lend no ink.
 
     A character's own ink is what changes when its object is switched off
     while every object touching it stays drawn. Objects that touch nothing in
@@ -666,21 +746,22 @@ def _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box,
 
     A character covered by a LATER glyph of its own object (a solid block
     printed back over letters in one TJ) cannot be separated by switching
-    objects: it is judged by whether its box still shows any shape at all."""
+    objects: it is covered when its box and the covering glyph's box both
+    show one flat colour (a cover that is not flat, a bar with a gap, is a
+    known gap)."""
     min_share, min_diff = RULES["MIN_INK_SHARE"], RULES["MIN_INK_DIFF"]
     # Two device pixels: the ink window is padded by one and rounded out to
     # whole pixels, so a neighbour's edge up to two pixels away can fall in it.
     pad = 2.0 / scale
-    height, width = drawn.shape[:2]
     grid: dict[tuple[int, int], list] = {}
     clipped: dict[int, tuple[float, float, float, float]] = {}
     for char in chars:
         box = _clip(char.box, page_box)
-        if char.box_px and box is not None:
+        if char.ink_px and box is not None and _attribute_kind(char) is None:
             clipped[id(char)] = box
             for cell in _cells(box):
                 grid.setdefault(cell, []).append(char)
-    stroked = {char.obj for char in chars if char.mode in (1, 2, 5, 6)}
+    stroked = {char.obj for char in chars if char.mode in _STROKING}
     for obj in stroked:
         reach = _clip(bounds[obj][1], page_box) if obj in bounds else None
         if reach is not None:
@@ -689,7 +770,6 @@ def _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box,
                 grid.setdefault(cell, []).append(extent)
     if grid and max(len(members) for members in grid.values()) > MAX_CELL_CHARS:
         raise _PageNotChecked(TOO_DENSE)
-    order = {_pointer(obj.raw): position for position, obj in enumerate(page.get_objects())}
     touching: dict[int, set[int]] = {}
     solid: dict[int, bool] = {}  # by id(char): its box shows one flat colour
     copies = _UnionFind()
@@ -716,17 +796,13 @@ def _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box,
             touching.setdefault(other.obj, set()).add(char.obj)
             shared = _overlap(char.box, other.box)
             union = area + _area(other.box) - shared
-            if (
-                other.char == char.char
-                and union
-                and shared / union >= RULES["DUPLICATE_IOU"]
-                and other.declared == char.declared  # copies are painted alike
-            ):
-                copies.join(char.obj, other.obj)
+            if other.char == char.char and union and shared / union >= RULES["DUPLICATE_IOU"]:
                 if order.get(char.obj, 0) < order.get(other.obj, 0):
-                    char.earlier_copy = True
-                else:
+                    char.earlier_copy = True  # counted apart if it leaves no ink
+                elif other.declared == char.declared:  # a copy set is painted alike
                     has_earlier_twin = True
+                if other.declared == char.declared:
+                    copies.join(char.obj, other.obj)
         if (
             covering
             and _solid(char, drawn, to_px, solid)
@@ -779,14 +855,15 @@ def _rejudge_overlaps(page, chars, texts, drawn, scale, number, to_px, page_box,
             pdfium_c.FPDFPageObj_SetIsActive(obj.raw, True)
         own = _difference(drawn, without)
         for char in judged:
-            ink_box = _pixel_box(to_px, char.box, width, height, pad=1)
-            x0, y0, x1, y1 = ink_box
+            char.rejudged = True
+            x0, y0, x1, y1 = char.ink_box
             if x1 > x0 and y1 > y0:
                 char.ink_px = int((own[y0:y1, x0:x1] >= min_diff).sum())
-                loose_box = _pixel_box(to_px, char.loose, width, height, pad=0)
-                char.ink_contrast = _ink_contrast(
-                    drawn, without, own, ink_box, loose_box, char.declared
-                )
+                if char.ink_px and _pixels(char.loose_px):
+                    behind = np.median(_sample(without, char.loose_px).reshape(-1, 3), axis=0)
+                    char.ink_contrast = _ink_contrast(
+                        drawn, without, own, char.ink_box, behind, char
+                    )
         del without, own
 
 
@@ -794,20 +871,20 @@ def _solid(char, drawn, to_px, cache: dict[int, bool]) -> bool:
     """Whether the interior of a character's tight box on the drawn page (a
     pixel in from each rounded-out edge) is one flat colour, with no glyph
     edge in it (the 2nd to 98th percentile of its pixels' brightness span
-    less than an ink step); a box with no interior is never solid. A block or a bar fills its box;
-    a covered letter shows the cover's colour across its box. Both must be
-    solid for a later glyph of the same object to count as covering: a
-    hyphen fills its own box, and a rotated digit's box laid over it is not
-    solid."""
+    less than an ink step); a box with no interior is never solid. A block or
+    a bar fills its box; a covered letter shows the cover's colour across its
+    box. Both must be solid for a later glyph of the same object to count as
+    covering: a hyphen fills its own box, and a rotated digit's box laid over
+    it is not solid."""
     key = id(char)
     if key not in cache:
         height, width = drawn.shape[:2]
         x0, y0, x1, y1 = _pixel_box(to_px, char.box, width, height, pad=0)
-        x0, y0, x1, y1 = x0 + 1, y0 + 1, x1 - 1, y1 - 1  # the interior: edges are rounded out
-        if x1 <= x0 or y1 <= y0:  # too small to show a shape either way
+        interior = (x0 + 1, y0 + 1, x1 - 1, y1 - 1)  # the edges are rounded out
+        if not _pixels(interior):  # too small to show a shape either way
             cache[key] = False
         else:
-            brightness = drawn[y0:y1, x0:x1].mean(axis=2, dtype=np.float32)
+            brightness = _sample(drawn, interior).mean(axis=2, dtype=np.float32)
             low, high = np.percentile(brightness, [2, 98])
             cache[key] = bool(high - low < RULES["MIN_INK_DIFF"])
     return cache[key]
@@ -892,19 +969,16 @@ def _classify(chars: list[_Char], image_cover: float) -> None:
         previous = char
     for char, word in zip(chars, word_of, strict=True):
         ink = char.ink_px / char.box_px if char.box_px else 0.0
-        if char.in_crop < RULES["MIN_IN_CROP"]:
-            char.kind = "off_page"
-        elif char.mode in (3, 7):
+        kind = _attribute_kind(char)
+        if kind == "invisible_render_mode":
             ocr = (
                 char.over_image >= RULES["OCR_MIN_OVER_IMAGE"]
                 and word_spread[word] >= RULES["OCR_MIN_BG_SPREAD"]
                 and image_cover >= RULES["OCR_MIN_PAGE_IMAGE"]
             )
-            char.kind = OCR_LAYER_KEPT if ocr else "invisible_render_mode"
-        elif char.vsize < RULES["MIN_SIZE_PT"] and _longest_side(char.box) < RULES["MIN_SIZE_PT"]:
-            char.kind = "tiny"
-        elif char.hscale < RULES["MIN_HSCALE"]:
-            char.kind = "squashed"
+            char.kind = OCR_LAYER_KEPT if ocr else kind
+        elif kind is not None:
+            char.kind = kind
         elif ink < RULES["MIN_INK_SHARE"]:
             char.kind = _why_no_ink(char)
         elif char.ink_contrast is not None and char.ink_contrast < RULES["MIN_CONTRAST"]:
@@ -913,18 +987,32 @@ def _classify(chars: list[_Char], image_cover: float) -> None:
             char.kind = None
 
 
-def _longest_side(box) -> float:
-    return max(box[2] - box[0], box[3] - box[1])
+def _attribute_kind(char: _Char) -> str | None:
+    """The kind the attribute rules give a character before any ink is read:
+    off the page, an invisible render mode (an OCR layer is decided later),
+    tiny, squashed; None when its ink decides."""
+    if char.in_crop < RULES["MIN_IN_CROP"]:
+        return "off_page"
+    if char.mode in (3, 7):
+        return "invisible_render_mode"
+    left, bottom, right, top = char.box
+    if char.vsize < RULES["MIN_SIZE_PT"] and min(right - left, top - bottom) < RULES["MIN_SIZE_PT"]:
+        return "tiny"  # a tiny glyph box too: a Type3 FontMatrix can draw full size
+    if char.hscale < RULES["MIN_HSCALE"]:
+        return "squashed"
+    return None
 
 
 def _why_no_ink(char: _Char) -> str:
+    """The kind of a character that leaves no ink, read from the paint it was
+    declared in (the stroke for outlined text)."""
     if char.earlier_copy:
         return DUPLICATE
-    if char.rgba and char.rgba[3] == 0:
+    if char.declared_alpha == 0:
         return "transparent"
     if "OC" in char.marks:
         return "hidden_layer"
-    if char.rgba and char.bg and _contrast(char.rgba, char.bg) < RULES["MIN_CONTRAST"]:
+    if char.declared and char.bg and _contrast(char.declared, char.bg) < RULES["MIN_CONTRAST"]:
         return "same_colour_as_background"
     if char.clipped:
         return "clipped"
@@ -1135,15 +1223,20 @@ def _check_in_child(
     bound_child_memory()
 
     def check() -> HiddenTextReport:
-        # Read and removed at once, as handover_file asks: a server killed
-        # outright never removes its copy of the user's file itself.
-        with open(payload_path, "rb") as pdf_file:
-            data = pdf_file.read()
-        Path(payload_path).unlink(missing_ok=True)
         try:
-            report = check_pdf(data, pages=pages)
+            report = _read_and_check(payload_path, pages)
         except MemoryError:  # the address-space cap, where enforced
             os._exit(READER_MEMORY_EXIT_CODE)
         return replace(report, peak_memory_bytes=peak_resident_bytes())
 
     report_outcome(sender, check, lambda exc: "value" if isinstance(exc, ValueError) else "other")
+
+
+def _read_and_check(payload_path: str, pages: tuple[int, ...] | None) -> HiddenTextReport:
+    """Open the handed-over file, remove it at once (handover_file's
+    contract: a server killed outright never removes its copy of the user's
+    file itself), and check the PDF through the open handle, which pdfium
+    reads as it needs: the file is not held in memory whole."""
+    with open(payload_path, "rb") as pdf_file:
+        Path(payload_path).unlink(missing_ok=True)
+        return check_pdf(pdf_file, pages=pages)

@@ -263,6 +263,42 @@ def test_many_small_text_objects_are_checked_in_reasonable_time():
     assert time.perf_counter() - started < 15  # was 25 s, a set rebuilt per character
 
 
+def test_many_page_sized_glyphs_leave_their_page_unchecked_quickly():
+    """300 glyphs each about the size of the page cost minutes of per-pixel
+    work and timed out the whole document; the page's pixel work is bounded."""
+    started = time.perf_counter()
+    report = ht.check_pdf(FIXTURES / "b_many_page_glyphs.pdf")
+    assert report.unmeasured == ((1, ht.TOO_MUCH_AREA),)
+    assert time.perf_counter() - started < 15
+
+
+def test_a_page_sized_glyph_on_the_largest_page_stays_under_the_memory_bound():
+    from authorai.references import READER_MEMORY_BYTES
+
+    report = ht.detect_hidden_text(FIXTURES / "b_page_glyph_memory.pdf", timeout=120)
+    assert report.unmeasured == ()
+    assert report.peak_memory_bytes is not None
+    assert report.peak_memory_bytes < READER_MEMORY_BYTES
+
+
+def test_the_child_removes_the_handed_over_file_before_checking(tmp_path, monkeypatch):
+    """handover_file's contract: the child deletes its copy of the user's file
+    as soon as it has it open, since a server killed outright never does."""
+    copy = tmp_path / "handed-over.pdf"
+    copy.write_bytes((FIXTURES / "h_covered_rect.pdf").read_bytes())
+    seen = []
+    real = ht.check_pdf
+
+    def checking(source, **kwargs):
+        seen.append(copy.exists())
+        return real(source, **kwargs)
+
+    monkeypatch.setattr(ht, "check_pdf", checking)
+    report = ht._read_and_check(str(copy), None)
+    assert seen == [False]
+    assert report.hidden_chars == len(nonws(PLANTS["h_covered_rect"]["hidden"]))
+
+
 def test_pages_can_be_chosen():
     report = ht.check_pdf(FIXTURES / "b_three_pages.pdf", pages=[3, 1])
     assert [check.page for check in report.pages] == [1, 3]
@@ -333,10 +369,10 @@ def test_the_rules_are_pinned_to_the_version():
     """A change to any rule changes what is read: it bumps DETECTOR_VERSION
     (which R2's dedup stamp names) and this pin together."""
     digest = hashlib.sha256(json.dumps(ht.RULES, sort_keys=True).encode()).hexdigest()[:12]
-    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v1", RULES_DIGEST)
+    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v2", RULES_DIGEST)
 
 
-RULES_DIGEST = "a69be0805903"
+RULES_DIGEST = "24bd3de2989e"
 
 
 def test_the_cli_prints_each_page(capsys, monkeypatch):
