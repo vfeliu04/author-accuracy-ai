@@ -1,0 +1,762 @@
+{
+ "plants": [
+  {
+   "name": "h_white_on_white",
+   "expect": "hidden",
+   "kind": "same_colour_as_background",
+   "hidden": "HIDDEN-WHITE the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "white fill on the white page"
+  },
+  {
+   "name": "h_white_cmyk",
+   "expect": "hidden",
+   "kind": "same_colour_as_background",
+   "hidden": "HIDDEN-CMYKWHITE the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "CMYK 0 0 0 0 (white) fill"
+  },
+  {
+   "name": "h_near_white",
+   "expect": "hidden",
+   "kind": "same_colour_as_background",
+   "hidden": "HIDDEN-NEARWHITE the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "#FAFAFA on white (contrast 1.04)"
+  },
+  {
+   "name": "h_same_colour_box",
+   "expect": "hidden",
+   "kind": "same_colour_as_background",
+   "hidden": "HIDDEN-SAMEBOX the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "blue text on a box of the same blue"
+  },
+  {
+   "name": "h_tiny_05pt",
+   "expect": "hidden",
+   "kind": "tiny",
+   "hidden": "HIDDEN-TINY the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "0.5 pt font size"
+  },
+  {
+   "name": "h_tiny_matrix",
+   "expect": "hidden",
+   "kind": "tiny",
+   "hidden": "HIDDEN-TINYTM the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "12 pt scaled by a text matrix of 0.04 (0.48 pt)"
+  },
+  {
+   "name": "h_squashed_tz",
+   "expect": "hidden",
+   "kind": "squashed",
+   "hidden": "HIDDEN-SQUASH the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "horizontal scaling 1% (Tz 1)"
+  },
+  {
+   "name": "h_mode3_plain",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-MODE3 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "render mode 3, nothing beneath"
+  },
+  {
+   "name": "h_mode7_clip",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-MODE7 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "render mode 7 (add to clip only), inside q/Q"
+  },
+  {
+   "name": "h_off_mediabox",
+   "expect": "hidden",
+   "kind": "off_page",
+   "hidden": "HIDDEN-OFFPAGE the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "x = -3000, outside the MediaBox"
+  },
+  {
+   "name": "h_rise_offpage",
+   "expect": "hidden",
+   "kind": "off_page",
+   "hidden": "HIDDEN-RISE the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "text rise 5000 lifts it far above the page"
+  },
+  {
+   "name": "h_off_cropbox",
+   "expect": "hidden",
+   "kind": "off_page",
+   "hidden": "HIDDEN-OFFCROP the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "inside the MediaBox, below a CropBox that starts at y = 700"
+  },
+  {
+   "name": "h_clipped",
+   "expect": "hidden",
+   "kind": "clipped",
+   "hidden": "HIDDEN-CLIP the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "clip path of 1x1 pt at the origin"
+  },
+  {
+   "name": "h_opacity0",
+   "expect": "hidden",
+   "kind": "transparent",
+   "hidden": "HIDDEN-OPACITY the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "ExtGState fill opacity 0"
+  },
+  {
+   "name": "h_ocg_hidden",
+   "expect": "hidden",
+   "kind": "hidden_layer",
+   "hidden": "HIDDEN-OCG the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "an optional-content group set OFF by default"
+  },
+  {
+   "name": "h_covered_rect",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-COVERED the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "black text, then an opaque white rectangle over it"
+  },
+  {
+   "name": "h_covered_image",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-UNDERIMG the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "black text, then an opaque image over it"
+  },
+  {
+   "name": "h_mode3_over_blank_image",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-FAKEOCR the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "render mode 3 over a BLANK white image (an OCR layer with no scan)"
+  },
+  {
+   "name": "h_mode3_over_noise_image",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-PHOTOOCR the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "render mode 3 over a small photo-like image: the scanned-page guard catches it"
+  },
+  {
+   "name": "h_white_over_text",
+   "expect": "hidden",
+   "kind": [
+    "low_contrast",
+    "same_colour_as_background"
+   ],
+   "hidden": "HIDDEN-OVERTEXT the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "VISIBLE2 the second visible sentence sits on this line"
+   ],
+   "note": "white text drawn on top of a visible black line: a character over a stroke erases ink (low contrast), one over a gap leaves none (same colour as the background)"
+  },
+  {
+   "name": "h_type3_empty_glyphs",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-T3EMPTY the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "a Type3 font whose glyphs draw nothing (its ToUnicode maps letters)"
+  },
+  {
+   "name": "h_softmask_black",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-SMASK the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "a luminosity soft mask that is all black (fully transparent)"
+  },
+  {
+   "name": "h_blend_lighten",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-BLEND the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "black text with blend mode Lighten over a white box (the result is white)"
+  },
+  {
+   "name": "h_white_on_white_image",
+   "expect": "hidden",
+   "kind": "same_colour_as_background",
+   "hidden": "HIDDEN-WHITEIMG the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "white text on a white image"
+  },
+  {
+   "name": "h_form_scaled_tiny",
+   "expect": "hidden",
+   "kind": "tiny",
+   "hidden": "HIDDEN-ZEROFORM the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "ordinary-looking text inside a form drawn at 1% scale"
+  },
+  {
+   "name": "h_form_bbox_clip",
+   "expect": "hidden",
+   "kind": "clipped",
+   "hidden": "HIDDEN-FORMBBOX the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "text inside a form whose /BBox (10 x 10 pt) clips it away"
+  },
+  {
+   "name": "h_stroke_white",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-STROKEWHITE the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "render mode 1 (stroke only) with a white stroke and the default black fill"
+  },
+  {
+   "name": "h_behind_text_box",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-BEHINDBOX the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEPCOVER a visible caption printed on the box"
+   ],
+   "note": "text under a filled caption box that carries other visible text, offset 3 pt (a caption glyph exactly on a hidden one is merged by pdfium's text page; real pages test that case: GHI 2024 p48)"
+  },
+  {
+   "name": "k_white_on_dark_box",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-WHITEONDARK white on navy"
+   ],
+   "note": "white text on a navy box"
+  },
+  {
+   "name": "k_grey_60",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-GREY60 footnote in mid grey"
+   ],
+   "note": "#999999 text"
+  },
+  {
+   "name": "k_grey_80",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-GREY80 footnote in light grey"
+   ],
+   "note": "#CCCCCC text"
+  },
+  {
+   "name": "k_small_6pt",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-SMALL6 six point"
+   ],
+   "note": "6 pt footnote"
+  },
+  {
+   "name": "k_fine_4pt",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-FINE4 four point"
+   ],
+   "note": "4 pt fine print"
+  },
+  {
+   "name": "k_red",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-RED red text"
+   ],
+   "note": "red text"
+  },
+  {
+   "name": "k_rotated90",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-ROT90 rotated sidebar"
+   ],
+   "note": "text rotated 90 degrees near the right edge"
+  },
+  {
+   "name": "k_clip_containing",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-INCLIP inside a table cell clip"
+   ],
+   "note": "a clip rectangle that contains the text"
+  },
+  {
+   "name": "k_opacity_half",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-HALFALPHA half transparent"
+   ],
+   "note": "ExtGState fill opacity 0.5"
+  },
+  {
+   "name": "k_caption_over_photo",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-OVERPHOTO white caption on a dark photo"
+   ],
+   "note": "white caption over a dark photo"
+  },
+  {
+   "name": "k_ocg_visible",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-OCGON on a visible layer"
+   ],
+   "note": "an optional-content group set ON"
+  },
+  {
+   "name": "k_form_xobject",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-FORMX inside a form xobject"
+   ],
+   "note": "visible text drawn from a form"
+  },
+  {
+   "name": "k_stroke_black",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-STROKE outlined heading"
+   ],
+   "note": "render mode 1, a black outline"
+  },
+  {
+   "name": "k_mode4_fill_clip",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-MODE4 fill and clip"
+   ],
+   "note": "render mode 4 (fill, then add to clip): visible"
+  },
+  {
+   "name": "k_highlight_over",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-HIGHLIGHT under a translucent highlight"
+   ],
+   "note": "text under a translucent yellow highlight drawn after it"
+  },
+  {
+   "name": "k_table_header",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-HEADER white on red table header"
+   ],
+   "note": "white on a red table-header cell"
+  },
+  {
+   "name": "k_superscript",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-SUPER footnote marker",
+    "12"
+   ],
+   "note": "a 5 pt superscript with text rise"
+  },
+  {
+   "name": "x_blend_lighten_on_page",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "XBLEND-ONPAGE lighten straight on the page"
+   ],
+   "note": "black text with Lighten straight on the page: pdfium, Ghostscript and MuPDF all draw it, so a reader sees it"
+  },
+  {
+   "name": "k_fake_bold",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-FAKEBOLD heading drawn twice"
+   ],
+   "note": "fake bold: the same line drawn twice 0.3 pt apart"
+  },
+  {
+   "name": "k_drop_shadow",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-SHADOW title with a drop shadow"
+   ],
+   "note": "a grey copy 1 pt below and right, the black copy on top"
+  },
+  {
+   "name": "k_ocr_layer_hand",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [
+    "KEEP-OCRHAND scanned words on this page"
+   ],
+   "note": "a full-page scan with ink under every word and a matching render-mode-3 layer"
+  },
+  {
+   "name": "k_ocr_word_partly_on_ink",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [
+    "KEEP-OCRPART scanned word whose boxes run over blank paper"
+   ],
+   "note": "one OCR text object with ink under its first word only, as engines that stretch a word's boxes write it: judged by its most-inked character, it is kept (a median set it aside; the user's decision of 2026-10-18)"
+  },
+  {
+   "name": "h_ocr_layer_lies",
+   "expect": "miss",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [
+    "HIDDEN-OCRLIE the methods are flawless"
+   ],
+   "note": "a full-page scan and a render-mode-3 layer that says something else: kept, a documented miss"
+  },
+  {
+   "name": "h_actualtext",
+   "expect": "miss",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "visible glyphs say 'KEEPVIS twelve percent'; /ActualText makes pdfium read 'HIDDEN-ACTUALTEXT ...' instead: a documented miss (not hidden text)"
+  },
+  {
+   "name": "t_grey_F2",
+   "expect": "hidden",
+   "kind": "same_colour_as_background",
+   "hidden": "HIDDEN-GREYF2 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "#F2F2F2 on white (contrast 1.12; its pixels differ by 13 < 16, so no ink)"
+  },
+  {
+   "name": "t_grey_EB",
+   "expect": "hidden",
+   "kind": "low_contrast",
+   "hidden": "HIDDEN-GREYEB the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "#EBEBEB on white (contrast 1.19 < 1.2)"
+  },
+  {
+   "name": "t_grey_E6",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-GREYE6 the methods are flawless and every figure is verified"
+   ],
+   "note": "#E6E6E6 on white (contrast 1.25 > 1.2)"
+  },
+  {
+   "name": "t_grey_E0",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-GREYE0 the methods are flawless and every figure is verified"
+   ],
+   "note": "#E0E0E0 on white (contrast 1.32)"
+  },
+  {
+   "name": "t_size_0_9pt",
+   "expect": "hidden",
+   "kind": "tiny",
+   "hidden": "HIDDEN-SIZE09 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "0.9 pt: under the 1.0 floor"
+  },
+  {
+   "name": "t_size_1_1pt",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-SIZE11 the methods are flawless and every figure is verified"
+   ],
+   "note": "1.1 pt: over the 1.0 floor"
+  },
+  {
+   "name": "t_hscale_0_18",
+   "expect": "hidden",
+   "kind": "squashed",
+   "hidden": "HIDDEN-HSCALE18 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "horizontal scale 0.18: under the 0.2 floor"
+  },
+  {
+   "name": "t_hscale_0_22",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-HSCALE22 the methods are flawless and every figure is verified"
+   ],
+   "note": "horizontal scale 0.22: over the 0.2 floor"
+  },
+  {
+   "name": "t_crop_40",
+   "expect": "hidden",
+   "kind": "off_page",
+   "hidden": "HIDDEN-CROP40 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "40% of each character's loose box inside the CropBox (rule: 50%)"
+  },
+  {
+   "name": "t_crop_60",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-CROP60 the methods are flawless and every figure is verified"
+   ],
+   "note": "60% of each character's loose box inside the CropBox (rule: 50%)"
+  },
+  {
+   "name": "t_ink_1",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDENINK THE FIELD KIT",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "capitals covered from below, 1% of their height left showing (rule: 2% of the box's pixels)"
+  },
+  {
+   "name": "t_ink_10",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEPINK THE TIDE LINE"
+   ],
+   "note": "capitals covered from below, 10% of their height left showing (rule: 2% of the box's pixels)"
+  },
+  {
+   "name": "t_ocr_page_45",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-OCRPAIR scanned words on this page",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "mode-3 text on an image covering 45% of the page"
+  },
+  {
+   "name": "t_ocr_page_55",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-OCRPAIR scanned words on this page"
+   ],
+   "note": "mode-3 text on an image covering 55% of the page"
+  },
+  {
+   "name": "t_ocr_on_image_85",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-OCRPAIR scanned words on this page",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "mode-3 text with 85% of each character's loose box on the image"
+  },
+  {
+   "name": "t_ocr_on_image_95",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-OCRPAIR scanned words on this page"
+   ],
+   "note": "mode-3 text with 95% of each character's loose box on the image"
+  },
+  {
+   "name": "t_ocr_spread_6",
+   "expect": "hidden",
+   "kind": "invisible_render_mode",
+   "hidden": "HIDDEN-OCRPAIR scanned words on this page",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "mode-3 text on a full-page image whose rendered spread is about 6/255"
+  },
+  {
+   "name": "t_ocr_spread_10",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-OCRPAIR scanned words on this page"
+   ],
+   "note": "mode-3 text on a full-page image whose rendered spread is about 10/255"
+  },
+  {
+   "name": "k_ocr_layer_ocrmypdf",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [],
+   "note": "made by ocrmypdf 16.12 + tesseract 5.5.2 over a one-line scan; committed as made, never rebuilt"
+  },
+  {
+   "name": "k_scanned_report_ocrmypdf",
+   "expect": "keep",
+   "kind": "ocr_layer_kept",
+   "hidden": "",
+   "visible": [],
+   "note": "made by ocrmypdf 16.12 + tesseract 5.5.2 over a 4-page scan of World_Hunger_Fake.pdf; committed as made, never rebuilt"
+  }
+ ],
+ "bounds": [
+  "b_encrypted_empty_password",
+  "b_huge_page",
+  "b_largest_page",
+  "b_overlap_65",
+  "b_three_pages"
+ ]
+}

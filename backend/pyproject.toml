@@ -40,6 +40,10 @@ dependencies = [
     # pypdf reads the same files in well under a second and needs no layout.
     # Not a docling dependency (docling uses pypdfium2), so it is pinned here.
     "pypdf==3.17.4",
+    # Hidden text in a report (hidden_text.py): each character's attributes
+    # and the page rendered with and without its text. Docling's own PDF
+    # library (it requires >=4.30,<6), imported directly, so pinned here.
+    "pypdfium2==5.0.0",
     # YouTube sources: a video's caption tracks and captions (video.py). The
     # [default] extra pins yt-dlp-ejs, the solver for YouTube's player code,
     # which needs a JavaScript runtime: deno, from its PyPI wheel, runs that
@@ -62,6 +66,10 @@ dev = [
     # tests/test_injection_set.py rebuilds the injection set to prove it is
     # byte-reproducible.
     "reportlab==4.5.1",
+    # Test-only: tests/fixtures/hidden_text/make_plants.py writes the hidden-text
+    # detector's planted PDFs operator by operator, and test_hidden_text.py
+    # rebuilds them to prove the committed files are its output.
+    "pikepdf==10.0.2",
 ]
 
 [tool.setuptools]

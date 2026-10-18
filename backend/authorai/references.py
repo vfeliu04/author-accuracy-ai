@@ -392,7 +392,7 @@ def read_pages(
             "could not read the PDF: it was too costly to read (the reader's result was too large)"
         ) from exc
     except ReaderExitedError as exc:
-        why = _stopped_by_a_bound(exc.exitcode)
+        why = stopped_by_a_bound(exc.exitcode)
         if why is None:
             raise
         raise ValueError(f"could not read the PDF: it was too costly to read ({why})") from exc
@@ -413,13 +413,14 @@ def read_pages(
     raise ValueError(f"could not read the PDF ({name}: {message})")
 
 
-def _stopped_by_a_bound(exitcode: int | None) -> str | None:
+def stopped_by_a_bound(exitcode: int | None) -> str | None:
     """Why a reader that exited without a result was stopped by one of its
     bounds, worded for the user — or None when the exit is not a bound's.
     A bound ends the child by signal (a negative status: the CPU limit's
     SIGXCPU, an out-of-memory kill) or with the memory exit code; a plain
     exit is an unhandled exception (1) or a return with nothing reported
-    (0) — a bug, which the caller must see as its own."""
+    (0) — a bug, which the caller must see as its own. Shared with every
+    reader that bounds its memory with bound_child_memory."""
     if exitcode == READER_MEMORY_EXIT_CODE:
         return "the reader needed too much memory"
     if exitcode is not None and exitcode < 0:
@@ -437,8 +438,7 @@ def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) 
     (RLIMIT_AS, where enforced), and a process past it may not manage the
     report."""
     end_with_parent(cpu_seconds)
-    _limit_address_space(READER_ADDRESS_SPACE_BYTES)
-    _watch_memory()
+    bound_child_memory()
 
     def read():
         try:
@@ -449,6 +449,17 @@ def _read_in_child(sender, payload_path: str, max_pages: int, cpu_seconds: int) 
             os._exit(READER_MEMORY_EXIT_CODE)
 
     report_outcome(sender, read, lambda exc: "value" if isinstance(exc, ValueError) else "other")
+
+
+def bound_child_memory() -> None:
+    """The memory bound of a reader child, called once at its start: the
+    address-space cap where the platform enforces it, and the watchdog that
+    ends the process with READER_MEMORY_EXIT_CODE past READER_MEMORY_BYTES
+    (see the constants). Shared by every reader that opens a whole PDF in a
+    child — this scan and the hidden-text check — so a hostile file meets one
+    bound, and the parent reads the exit with stopped_by_a_bound."""
+    _limit_address_space(READER_ADDRESS_SPACE_BYTES)
+    _watch_memory()
 
 
 def _limit_address_space(limit: int) -> None:
