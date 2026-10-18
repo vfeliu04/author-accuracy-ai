@@ -14,6 +14,7 @@ import io
 import json
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -92,9 +93,12 @@ def test_a_hidden_plant_loses_exactly_its_planted_line(name, scale):
     [check] = report.pages
     removed, kept = streams(check)
     assert removed == nonws(plant["hidden"]), f"{name}: removed {removed!r}"
-    kinds = plant["kind"] if isinstance(plant["kind"], list) else [plant["kind"]]
-    assert removed_kinds(check) == set(kinds)
+    if isinstance(plant["kind"], list):  # each removed character is one of these kinds
+        assert removed_kinds(check) <= set(plant["kind"])
+    else:
+        assert removed_kinds(check) == {plant["kind"]}
     assert check.hidden_chars == len(nonws(plant["hidden"]))
+    assert check.ocr_layer_kept == plant.get("ocr_kept", 0)
     # What the plant draws visibly is never removed (kept holds it whole).
     for line in plant["visible"]:
         assert nonws(line) in nonws(page_text(FIXTURES / f"{name}.pdf"))
@@ -228,6 +232,35 @@ def test_glyphs_past_the_result_budget_leave_their_page_unchecked(monkeypatch):
     report = ht.check_pdf(both)
     assert [check.page for check in report.pages] == [1]
     assert report.unmeasured == ((2, "result too large"),)
+
+
+@pytest.mark.parametrize("name", ["b_giant_glyph", "b_huge_cropbox"])
+def test_a_hostile_size_is_checked_within_the_bounds(name):
+    """One glyph far larger than the page, or a CropBox far larger than the
+    MediaBox, once took 15 s and 1.7 GB, or 2.8 GB, for one page: the check
+    now completes in the bounded child (deadline and memory bound)."""
+    report = ht.detect_hidden_text(FIXTURES / f"{name}.pdf", timeout=60)
+    assert report.unmeasured == ()
+    assert [check.page for check in report.pages] == [1]
+
+
+def test_a_huge_cropbox_reads_the_page_pdfium_draws():
+    [check] = ht.check_pdf(FIXTURES / "b_huge_cropbox.pdf").pages
+    assert check.glyphs is None  # the visible sentence lies inside the drawn page
+
+
+def test_text_too_dense_to_compare_leaves_its_page_unchecked():
+    started = time.perf_counter()
+    report = ht.check_pdf(FIXTURES / "b_dense_stack.pdf")
+    assert report.unmeasured == ((1, ht.TOO_DENSE),)
+    assert time.perf_counter() - started < 15  # was 55 s, quadratic
+
+
+def test_many_small_text_objects_are_checked_in_reasonable_time():
+    started = time.perf_counter()
+    report = ht.check_pdf(FIXTURES / "b_one_object_per_char.pdf")
+    assert report.unmeasured == ()
+    assert time.perf_counter() - started < 15  # was 25 s, a set rebuilt per character
 
 
 def test_pages_can_be_chosen():
