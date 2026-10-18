@@ -363,8 +363,8 @@ class _Char:
     ink_contrast: float | None = None
     declared: tuple[int, int, int] | None = None  # the colour it is painted in, as declared
     declared_alpha: int | None = None  # and that paint's opacity (0-255)
-    ink_box: tuple[int, int, int, int] | None = None  # pixel windows, filled by _measure
-    loose_px: tuple[int, int, int, int] | None = None
+    ink_box: tuple[int, int, int, int] = (0, 0, 0, 0)  # pixel windows, filled by _measure
+    loose_px: tuple[int, int, int, int] = (0, 0, 0, 0)
     rejudged: bool = False
     earlier_copy: bool = False
     kind: str | None = None
