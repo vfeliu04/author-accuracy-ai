@@ -807,6 +807,7 @@ def build() -> None:
     _review_cases()
     _third_review_cases()
     _fourth_review_cases()
+    _fifth_review_cases()
 
     # -- bounds ------------------------------------------------------------
     _bounds()
@@ -1592,8 +1593,8 @@ def _third_review_cases() -> None:
         ["low_contrast", "transparent"],
         faint,
         [VISIBLE],
-        "5 pt Helvetica-Bold at fill opacity 0.07: too small for the reach test, bold enough"
-        " to leave ink, so only its opacity shows it faded",
+        "5 pt Helvetica-Bold at fill opacity 0.07: too small for the reach test; at scale 2,"
+        " 47 of its 62 letters leave ink (at 1.5, 9), so only its opacity shows them faded",
         faint_bold,
     )
     veiled = line("HIDDEN-VEILSMALL")
@@ -1883,16 +1884,177 @@ def _fourth_review_cases() -> None:
         ),
     )
 
-    # Faded text under a veil: its own opacity must not lower the bar it is
-    # measured against (0.2 opacity under a 65% veil renders at contrast 1.15).
-    hidden_plant(
+    # Faded text under a veil (0.2 opacity under a 65% veil renders at
+    # contrast 1.15): a documented miss. The reach is measured against the
+    # paint at its own opacity, which keeps faint text with thin strokes that
+    # stands just above the floor; the veil alone reaches a third of that.
+    faded_veiled = line("HIDDEN-FADEDVEILED")
+    plant(
         "h_faint_under_veil",
-        ["low_contrast", "covered"],
-        "HIDDEN-FADEDVEILED",
-        "black text at fill opacity 0.2 under a 65% white veil: it renders #EDEDED-ish",
-        ops_before=b"q /GSF gs ",
-        ops_after=b"Q\nq /GSV gs 1 1 1 rg " + BOX + b" Q\n",
-        setup=ext_gstate(GSF={"ca": 0.2}, GSV={"ca": 0.65}),
+        "miss",
+        None,
+        faded_veiled,
+        [VISIBLE],
+        "black text at fill opacity 0.2 under a 65% white veil: it renders near #EDEDED, and"
+        " is judged at its faded paint (contrast 1.6)",
+        lambda pdf, page, font: (
+            _with_setup(ext_gstate(GSF={"ca": 0.2}, GSV={"ca": 0.65}), pdf, page, font)
+            + VISIBLE_OPS
+            + b"q /GSF gs "
+            + tj(faded_veiled)
+            + b"Q\nq /GSV gs 1 1 1 rg "
+            + BOX
+            + b" Q\n"
+        ),
+    )
+
+
+def _fifth_review_cases() -> None:
+    """The review of 8c9a857 (2026-10-19): its regressions, one plant each,
+    and plants for what no plant pinned."""
+
+    # A grid cell holding removed glyphs of two objects: the hidden word under
+    # an off-page block must still be judged with the block's object drawn
+    # (in 8c9a857 the cell's objects merged into one sentinel and the word's
+    # object shared a render with the block's).
+    def shared_cell(pdf, page, font):
+        block_font(pdf, page)
+        return (
+            tj(VISIBLE, y=300)
+            + b"1 g "
+            + tj("HIDE", x=595, y=646, size=4)
+            + b"0 g "
+            + b"0.1 0.1 0.1 rg BT /T3 60 Tf 524 630 Td (ZZ) Tj ET 0 g\n"
+            + tj("Visible end", x=470, y=640)
+            + tj("xx", x=600, y=652, size=0.5)
+        )
+
+    plant(
+        "h_word_in_shared_cell",
+        "hidden",
+        ["same_colour_as_background", "off_page", "tiny"],
+        "\u2588HIDExx",  # in pdfium's reading order: the block's off-page glyph first
+        [VISIBLE, "Visible end"],
+        "a white 4 pt word under a 60 pt block glyph that lies mostly off the page, sharing"
+        " its grid cell with 0.5 pt microtext of another object",
+        shared_cell,
+    )
+
+    # A word whose own last glyph is off the page, in the same cell as an
+    # off-page block of another object: the word touches the block.
+    pdf, page, font = new_doc(620, 792)
+    block_font(pdf, page)
+    page.obj.Contents = pdf.make_stream(
+        tj(VISIBLE, y=300)
+        + b"1 g "
+        + tj("HIDEX", x=609.8, y=646, size=4)
+        + b"0 g "
+        + b"0.1 0.1 0.1 rg BT /T3 60 Tf 592 630 Td (Z) Tj ET 0 g\n"
+    )
+    FILES["h_word_under_block_own_glyph_off"] = to_bytes(pdf)
+    PLANTS.append(
+        {
+            "name": "h_word_under_block_own_glyph_off",
+            "expect": "hidden",
+            "kind": ["same_colour_as_background", "off_page"],
+            "hidden": "\u2588HIDEX",
+            "visible": [VISIBLE],
+            "note": "a white word whose last glyph is off a 620 pt page, under an off-page block"
+            " glyph of another object in the same grid cell",
+        }
+    )
+
+    # One degenerate glyph of a font (a matrix 0.0001 high) must not lift the
+    # font's sub-point line out of "tiny".
+    lifted = line("HIDDEN-TINYLIFT")
+    plant(
+        "h_tiny_line_with_degenerate_glyph",
+        "hidden",
+        "tiny",
+        lifted + "W",
+        [VISIBLE],
+        "a 0.5 pt line, and one W of the same font under the matrix 12 0.0119 0 0.0001,"
+        " whose box is 110 times its size",
+        lambda pdf, page, font: (
+            VISIBLE_OPS
+            + tj(lifted, size=0.5)
+            + b"BT /F1 1 Tf 12 0.0119 0 0.0001 300 300 Tm (W) Tj ET\n"
+        ),
+    )
+
+    # A line drawn in fill and stroke, then again in fill on top: one copy set.
+    revenue = "Revenue grew by twelve percent in the year"
+    plant(
+        "k_fill_stroke_copy_then_fill",
+        "keep",
+        None,
+        "",
+        [VISIBLE, revenue, revenue + " (2)"],
+        "a line in render mode 2 (black fill, 1 pt black stroke), then the same line filled"
+        " on top (the later copy reads one label more, or pdfium would merge the two)",
+        lambda pdf, page, font: (
+            VISIBLE_OPS
+            + b"q 0 g 0 G 1 w "
+            + tj(revenue, pre="2 Tr ")
+            + b"Q\nq 0 g "
+            + tj(revenue + " (2)")
+            + b"Q\n"
+        ),
+    )
+
+    # Fill and stroke with a transparent stroke: the fill is what shows.
+    keep_plant(
+        "k_fill_with_transparent_stroke",
+        "KEEP-FILLSHOWS",
+        "a heading in fill and stroke",
+        "render mode 2 with an opaque black fill and a black stroke at stroke opacity 0",
+        ops_before=b"q /GS0 gs 0 g 0 G 0.4 w ",
+        ops_after=b"Q\n",
+        setup=ext_gstate(GS0={"CA": 0}),
+        pre="2 Tr ",
+    )
+
+    # Fill and stroke under an opaque box: covered, whatever one of its paints
+    # (a transparent white fill) would say alone.
+    hidden_plant(
+        "h_fill_and_stroke_under_box",
+        "covered",
+        "HIDDEN-UNDERBOX2",
+        "render mode 2 (white fill at opacity 0, opaque black stroke) under an opaque white box",
+        ops_before=b"q /GSZ gs 1 g 0 G 0.6 w ",
+        ops_after=b"Q\n1 g " + BOX + b"\n0 g ",
+        setup=ext_gstate(GSZ={"ca": 0}),
+        pre="2 Tr ",
+    )
+
+    # The bitmap-like Type3 font set vertically: its size read from its
+    # upright glyphs' widths.
+    vertical = "ABCABCABBACAB"
+
+    def bitmap_vertical(pdf, page, font):
+        type3_font(
+            pdf,
+            page,
+            "T5",
+            matrix=[1, 0, 0, -1, 0, 0],
+            bbox=[0, 0, 50, 70],
+            glyphs={
+                "A": b"50 0 0 0 40 70 d1 0 0 40 70 re f\n",
+                "B": b"50 0 0 0 40 70 d1 0 0 12 70 re f 12 0 28 12 re f 12 58 28 12 re f\n",
+                "C": b"50 0 0 0 40 70 d1 0 0 12 70 re f 12 0 28 12 re f\n",
+            },
+        )
+        return VISIBLE_OPS + f"BT /T5 0.12 Tf 0 1 1 0 300 300 Tm ({vertical}) Tj ET\n".encode()
+
+    plant(
+        "k_type3_bitmap_vertical",
+        "keep",
+        None,
+        "",
+        [VISIBLE, vertical],
+        "k_type3_bitmap_like's font set vertically (text matrix 0 1 1 0): its size shows in"
+        " its upright glyphs' widths",
+        bitmap_vertical,
     )
 
 

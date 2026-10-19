@@ -141,8 +141,8 @@ def test_real_ocrmypdf_output_is_kept_whole(name):
 
 def test_documented_misses_are_still_missed():
     """An OCR layer that disagrees with its scan, /ActualText (an agreed
-    follow-up), and a veil over text under 12 device pixels are known gaps: a
-    fix must change this test on purpose."""
+    follow-up), a veil over text under 12 device pixels, and faded text under
+    a veil are known gaps: a fix must change this test on purpose."""
     lies = ht.check_pdf(FIXTURES / "h_ocr_layer_lies.pdf").pages[0]
     assert lies.glyphs is None
     assert lies.ocr_layer_kept == len(nonws("HIDDEN-OCRLIE the methods are flawless"))
@@ -155,11 +155,15 @@ def test_documented_misses_are_still_missed():
     removed, _ = streams(veiled)
     assert removed_kinds(veiled) <= {"covered"}
     assert len(removed) < len(nonws(PLANTS["h_white_veil_5pt"]["hidden"]))
+    # Faded text under a veil is judged at its faded paint: at scale 2 it is
+    # kept whole.
+    faded = ht.check_pdf(FIXTURES / "h_faint_under_veil.pdf").pages[0]
+    assert faded.glyphs is None
 
 
 def test_every_plant_in_the_manifest_is_tested():
     tested = set(HIDDEN) | set(KEEP) | {"k_ocr_layer_ocrmypdf", "k_scanned_report_ocrmypdf"}
-    tested |= {"h_ocr_layer_lies", "h_actualtext", "h_white_veil_5pt"}
+    tested |= {"h_ocr_layer_lies", "h_actualtext", "h_white_veil_5pt", "h_faint_under_veil"}
     assert tested == set(PLANTS)
     on_disk = {path.stem for path in FIXTURES.glob("*.pdf")}
     assert on_disk == set(PLANTS) | set(MANIFEST["bounds"])
@@ -354,6 +358,25 @@ def test_the_child_reads_the_handed_over_file_through_read_and_check(monkeypatch
     assert sent == [report] and sent[0].peak_memory_bytes is not None
 
 
+def test_faint_paint_is_measured_against_its_own_opacity():
+    """A glyph of 12 device pixels or more whose strongest pixels reach its
+    black only 0.07 of the way is not taken as veiled when its paint is black
+    at opacity 0.09: measured against that faded paint it reaches 0.8 (thin
+    strokes), so it is judged at the faded paint (contrast 1.225, over the 1.2
+    floor), not as rendered (1.16). Real faint text of thin strokes (Times
+    8 pt at opacity 0.09) was removed whole without this."""
+    size = 40
+    changed = np.zeros((size, size), np.uint8)
+    drawn = np.full((size, size, 3), 255, np.uint8)
+    changed[10:30, 18:22] = 18  # 0.8 coverage of black at opacity 0.09
+    drawn[10:30, 18:22] = 237
+    reference = np.full((size, size, 3), 255, np.uint8)
+    char = SimpleNamespace(paints=(((0, 0, 0), 23),), vsize=10.0)  # 20 px at scale 2
+    white = (255.0, 255.0, 255.0)
+    contrast = ht._ink_contrast(drawn, reference, changed, (0, 0, size, size), white, char, 2.0)
+    assert contrast is not None and contrast >= ht.RULES["MIN_CONTRAST"]
+
+
 def test_ink_the_sample_misses_is_judged_at_its_declared_paint():
     """Per-character pixels are read from an even sample of the ink window. A
     glyph whose ink lies only between the sampled rows (hairlines on a huge
@@ -441,7 +464,7 @@ def test_the_rules_are_pinned_to_the_version():
     """A change to any rule changes what is read: it bumps DETECTOR_VERSION
     (which R2's dedup stamp names) and this pin together."""
     digest = hashlib.sha256(json.dumps(ht.RULES, sort_keys=True).encode()).hexdigest()[:12]
-    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v4", RULES_DIGEST)
+    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v5", RULES_DIGEST)
 
 
 RULES_DIGEST = "1966c69cbfbc"

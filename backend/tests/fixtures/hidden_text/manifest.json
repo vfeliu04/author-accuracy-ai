@@ -1067,7 +1067,7 @@
    "visible": [
     "VISIBLE rainfall in the basin fell by twelve percent"
    ],
-   "note": "5 pt Helvetica-Bold at fill opacity 0.07: too small for the reach test, bold enough to leave ink, so only its opacity shows it faded"
+   "note": "5 pt Helvetica-Bold at fill opacity 0.07: too small for the reach test; at scale 2, 47 of its 62 letters leave ink (at 1.5, 9), so only its opacity shows them faded"
   },
   {
    "name": "h_white_veil_5pt",
@@ -1190,16 +1190,95 @@
   },
   {
    "name": "h_faint_under_veil",
-   "expect": "hidden",
-   "kind": [
-    "low_contrast",
-    "covered"
-   ],
+   "expect": "miss",
+   "kind": null,
    "hidden": "HIDDEN-FADEDVEILED the methods are flawless and every figure is verified",
    "visible": [
     "VISIBLE rainfall in the basin fell by twelve percent"
    ],
-   "note": "black text at fill opacity 0.2 under a 65% white veil: it renders #EDEDED-ish"
+   "note": "black text at fill opacity 0.2 under a 65% white veil: it renders near #EDEDED, and is judged at its faded paint (contrast 1.6)"
+  },
+  {
+   "name": "h_word_in_shared_cell",
+   "expect": "hidden",
+   "kind": [
+    "same_colour_as_background",
+    "off_page",
+    "tiny"
+   ],
+   "hidden": "\u2588HIDExx",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "Visible end"
+   ],
+   "note": "a white 4 pt word under a 60 pt block glyph that lies mostly off the page, sharing its grid cell with 0.5 pt microtext of another object"
+  },
+  {
+   "name": "h_word_under_block_own_glyph_off",
+   "expect": "hidden",
+   "kind": [
+    "same_colour_as_background",
+    "off_page"
+   ],
+   "hidden": "\u2588HIDEX",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "a white word whose last glyph is off a 620 pt page, under an off-page block glyph of another object in the same grid cell"
+  },
+  {
+   "name": "h_tiny_line_with_degenerate_glyph",
+   "expect": "hidden",
+   "kind": "tiny",
+   "hidden": "HIDDEN-TINYLIFT the methods are flawless and every figure is verifiedW",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "a 0.5 pt line, and one W of the same font under the matrix 12 0.0119 0 0.0001, whose box is 110 times its size"
+  },
+  {
+   "name": "k_fill_stroke_copy_then_fill",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "Revenue grew by twelve percent in the year",
+    "Revenue grew by twelve percent in the year (2)"
+   ],
+   "note": "a line in render mode 2 (black fill, 1 pt black stroke), then the same line filled on top (the later copy reads one label more, or pdfium would merge the two)"
+  },
+  {
+   "name": "k_fill_with_transparent_stroke",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "KEEP-FILLSHOWS a heading in fill and stroke"
+   ],
+   "note": "render mode 2 with an opaque black fill and a black stroke at stroke opacity 0"
+  },
+  {
+   "name": "h_fill_and_stroke_under_box",
+   "expect": "hidden",
+   "kind": "covered",
+   "hidden": "HIDDEN-UNDERBOX2 the methods are flawless and every figure is verified",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent"
+   ],
+   "note": "render mode 2 (white fill at opacity 0, opaque black stroke) under an opaque white box"
+  },
+  {
+   "name": "k_type3_bitmap_vertical",
+   "expect": "keep",
+   "kind": null,
+   "hidden": "",
+   "visible": [
+    "VISIBLE rainfall in the basin fell by twelve percent",
+    "ABCABCABBACAB"
+   ],
+   "note": "k_type3_bitmap_like's font set vertically (text matrix 0 1 1 0): its size shows in its upright glyphs' widths"
   },
   {
    "name": "k_ocr_layer_ocrmypdf",
