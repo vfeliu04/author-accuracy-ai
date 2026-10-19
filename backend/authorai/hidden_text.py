@@ -21,13 +21,13 @@ hidden line under a box that carries visible text would otherwise keep the
 letters near the box's text); objects that do not touch share a render. A
 character under a solid glyph of its own text object (a block printed back
 over letters in one TJ) is judged by whether its box shows any shape. Low
-contrast is read from the paint, at its declared opacity, against what is
-drawn behind the character, with the rendered colour used where pdfium's
-declared colour does not explain the pixels (a pattern fill) or where a
-glyph large enough to reach its paint does not (a veil drawn over it). The
-rules are RULES, and the module's
-judgment is named by DETECTOR_VERSION; a change to either is a change to
-what every reader reads.
+contrast is read from the paint (fill, stroke, or the more visible of the
+two), at its declared opacity, against what is drawn behind the character,
+with the rendered colour used where pdfium's declared colour does not
+explain the pixels (a pattern fill) or where a glyph large enough to reach
+its paint does not (a veil drawn over it). The rules are RULES, and the
+module's judgment is named by DETECTOR_VERSION; a change to either is a
+change to what every reader reads.
 
 The OCR exception: a scanned page carries its text as an invisible layer
 (render mode 3) over the scan's image. That layer is the only text such a
@@ -80,7 +80,7 @@ from authorai.web import (
 
 logger = setup_logger(__name__)
 
-DETECTOR_VERSION = "hidden-text v3"
+DETECTOR_VERSION = "hidden-text v4"
 
 # The rules, measured on 54 planted PDFs and 343 real pages (records in
 # author_ai/report-side-research/hidden-text), each with a planted pair on
@@ -91,9 +91,10 @@ RULES = {
     # the font size across the baseline in points (font size x the matrix's
     # height perpendicular to the baseline) ...
     "MIN_SIZE_PT": 1.0,
-    # ... read that many times larger when the font's ascent-to-descent spans
-    # more than this many times its size (a Type3 FontMatrix drawing glyphs
-    # larger than the size says; the 25 real PDFs' fonts span 0.89-1.73)
+    # ... read that many times larger when the font draws taller than this
+    # many times its size: its ascent-to-descent, or its tallest upright glyph
+    # on the page (a Type3 FontMatrix drawing glyphs larger than the size
+    # says; the 25 real PDFs' fonts span 0.89-1.73 by their metrics)
     "LARGE_FONT_EM": 2.0,
     # the matrix's length along the baseline over its up vector's (Tz squashes
     # the first, a shear lengthens the second)
@@ -110,9 +111,10 @@ RULES = {
     "PAINT_EXPLAINED_SHARE": 0.8,
     # ... and, for a glyph of at least PAINT_REACH_MIN_PX device pixels (font
     # size across the baseline x scale), the strongest of them reach at least
-    # this far towards it: one that does not is veiled and judged as rendered
-    # (at 12 px letters reach 0.47 and more and an '=' 0.35, under a 93% veil
-    # 0.07; smaller glyphs never reach full coverage, so their paint stands)
+    # this far towards it: one that does not is veiled or faded, and judged as
+    # rendered (at 12 px letters reach 0.47 and more and an '=' 0.35, under a
+    # 93% veil 0.07; smaller glyphs never reach full coverage, so their paint
+    # stands)
     "PAINT_REACHED": 0.25,
     "PAINT_REACH_MIN_PX": 12.0,
     # the OCR-layer exception: share of the loose box lying on an image ...
@@ -377,8 +379,9 @@ class _Char:
     bg: tuple[int, int, int] | None = None
     bg_spread: float = 0.0
     ink_contrast: float | None = None
-    declared: tuple[int, int, int] | None = None  # the colour it is painted in, as declared
-    declared_alpha: int | None = None  # and that paint's opacity (0-255)
+    # the paints it is drawn in, as declared: (colour, opacity 0-255) for the
+    # fill, the stroke, or both (render modes 2 and 6)
+    paints: tuple[tuple[tuple[int, int, int], int], ...] = ()
     ink_box: tuple[int, int, int, int] = (0, 0, 0, 0)  # pixel windows, filled by _measure
     loose_px: tuple[int, int, int, int] = (0, 0, 0, 0)
     rejudged: bool = False
@@ -422,7 +425,8 @@ def _characters(textpage, page_box) -> list[_Char]:
     attributes the rules read. `page_box` is the page pdfium draws
     (page.get_bbox: get_cropbox ignores a box inherited from the page tree)."""
     chars: list[_Char] = []
-    font_scale: dict[int, float] = {}
+    font_em: dict[int, float] = {}  # by font: how many times its size it draws, at most
+    sized: list[tuple[_Char, int, float]] = []  # each character, its font, its size x matrix
     for i in range(textpage.count_chars()):
         if pdfium_c.FPDFText_IsGenerated(textpage.raw, i) == 1:
             continue
@@ -444,57 +448,84 @@ def _characters(textpage, page_box) -> list[_Char]:
         # the glyph's height scale across the baseline: |det| / |baseline|, so
         # a shear that lengthens the matrix's second row reads as it draws
         across = abs(matrix.a * matrix.d - matrix.b * matrix.c) / row1 if row1 else 0.0
+        box = textpage.get_charbox(i)
         loose = textpage.get_charbox(i, loose=True)
         clip = _clip_box(obj) if obj else None
         area = _area(loose)
         mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj) if obj else -1
-        declared = (r.value, g.value, b.value) if has_fill else None
-        declared_alpha = a.value if has_fill else None
-        drawn_larger = 1.0  # how much larger than its size the font draws
-        if obj:
-            font = pdfium_c.FPDFTextObj_GetFont(obj)
-            key = _pointer(font)
-            if key not in font_scale:
-                font_scale[key] = _font_scale(font)
-            drawn_larger = font_scale[key]
-        if mode in (1, 5) and obj:  # stroke only: painted in the stroke colour
-            sr, sg, sb, sa = (ctypes.c_uint() for _ in range(4))
-            stroked = pdfium_c.FPDFPageObj_GetStrokeColor(
-                obj, ctypes.byref(sr), ctypes.byref(sg), ctypes.byref(sb), ctypes.byref(sa)
-            )
-            declared = (sr.value, sg.value, sb.value) if stroked else None
-            declared_alpha = sa.value if stroked else None
+        fill = ((r.value, g.value, b.value), a.value) if has_fill else None
+        stroke = _stroke(obj) if obj and mode in _STROKING else None
+        if mode in (1, 5):  # stroke only
+            paints = (stroke,) if stroke else ()
+        elif mode in (2, 6):  # fill, then stroke
+            paints = tuple(paint for paint in (fill, stroke) if paint)
+        else:
+            paints = (fill,) if fill else ()
+        key = _pointer(pdfium_c.FPDFTextObj_GetFont(obj)) if obj else 0
+        if obj and key not in font_em:
+            font_em[key] = _metric_em(pdfium_c.FPDFTextObj_GetFont(obj))
+        raw = size * across
+        upright = _upright_extent(matrix, row1, box)
+        if obj and raw and upright is not None:
+            font_em[key] = max(font_em[key], upright / raw)
         chars.append(
             _Char(
                 index=i,
                 char=char,
-                box=textpage.get_charbox(i),
+                box=box,
                 loose=loose,
                 mode=mode,
-                declared=declared,
-                declared_alpha=declared_alpha,
+                paints=paints,
                 hscale=row1 / row2 if row2 else 0.0,  # Tz shortens row 1, a shear lengthens row 2
-                vsize=size * across * drawn_larger,
+                vsize=raw,
                 marks=_marks(obj) if obj else (),
                 clipped=clip is not None and area > 0 and _overlap(loose, clip) / area < 0.5,
                 obj=_pointer(obj),
                 in_crop=_overlap(loose, page_box) / area if area else 0.0,
             )
         )
+        sized.append((chars[-1], key, raw))
+    # A font that draws much taller than its size (a Type3 FontMatrix scaling
+    # glyphs drawn at 0.8 Tf, or 0.12 Tf as Ghostscript writes TeX's bitmap
+    # fonts, to full size) is read at the size it draws, a narrow or short
+    # glyph of it included.
+    for char, key, raw in sized:
+        char.vsize = raw * max(1.0, font_em.get(key, 0.0) / RULES["LARGE_FONT_EM"])
     return chars
 
 
-def _font_scale(font) -> float:
-    """How much larger than its size a font draws: its ascent-to-descent per
-    point of size over LARGE_FONT_EM, when it spans more than that (a Type3
-    font whose FontMatrix draws 8 pt glyphs at 0.8 Tf spans 10), else 1."""
+def _stroke(obj) -> tuple[tuple[int, int, int], int] | None:
+    r, g, b, a = (ctypes.c_uint() for _ in range(4))
+    if not pdfium_c.FPDFPageObj_GetStrokeColor(
+        obj, ctypes.byref(r), ctypes.byref(g), ctypes.byref(b), ctypes.byref(a)
+    ):
+        return None
+    return (r.value, g.value, b.value), a.value
+
+
+def _metric_em(font) -> float:
+    """A font's ascent-to-descent per point of size, as pdfium reports it
+    (0 when it cannot; a flipped Type3 FontMatrix reports it inverted)."""
     ascent, descent = ctypes.c_float(), ctypes.c_float()
     if not (
         pdfium_c.FPDFFont_GetAscent(font, ctypes.c_float(1.0), ctypes.byref(ascent))
         and pdfium_c.FPDFFont_GetDescent(font, ctypes.c_float(1.0), ctypes.byref(descent))
     ):
-        return 1.0
-    return max(1.0, (ascent.value - descent.value) / RULES["LARGE_FONT_EM"])
+        return 0.0
+    return abs(ascent.value - descent.value)
+
+
+def _upright_extent(matrix, row1: float, box) -> float | None:
+    """A glyph's extent across its baseline, read from its box when the
+    baseline runs along an axis (its height, or its width for vertical
+    text); None for a slanted baseline, whose box mixes the two."""
+    if not row1:
+        return None
+    if abs(matrix.b) <= 1e-3 * row1:
+        return box[3] - box[1]
+    if abs(matrix.a) <= 1e-3 * row1:
+        return box[2] - box[0]
+    return None
 
 
 def _as_char(code: int) -> str:
@@ -681,35 +712,37 @@ def _ink_contrast(drawn, reference, changed, ink_box, behind, char, scale) -> fl
     text (a badge) is compared with that shape, and white text drawn over a
     black line is compared with the paper around the line, which it matches.
 
-    Its colour is the declared one (the fill, or the stroke for outlined
-    text) laid over `behind` at its declared opacity, when that paint
-    explains the pixels it changes — each drawn pixel lies on the blend
-    between the declared colour and that pixel of the reference (anti-aliased
-    edges, thin glyphs that never reach full coverage, white partly erasing a
-    black line) for PAINT_EXPLAINED_SHARE of them — unless the glyph is large
-    enough to reach its paint (PAINT_REACH_MIN_PX) and its strongest pixels
-    still fall short of PAINT_REACHED of the way there: something drawn over
-    it (a veil) fades it, and it is judged as rendered. Otherwise its colour
-    is what was rendered, the drawn pixels where the character changes the
-    page most: a pattern fill (pdfium declares those white), or a veil.
+    Its colour is its declared paint (the fill, the stroke for outlined text,
+    or whichever of the two stands out more when both are drawn) laid over
+    `behind` at its declared opacity, when that paint explains the pixels it
+    changes — each drawn pixel lies on the blend between the paint's colour
+    and that pixel of the reference (anti-aliased edges, thin glyphs that
+    never reach full coverage, white partly erasing a black line) for
+    PAINT_EXPLAINED_SHARE of them — unless the glyph is large enough to reach
+    its paint (PAINT_REACH_MIN_PX) and its strongest pixels still fall short
+    of PAINT_REACHED of the way there: something drawn over it (a veil), or
+    its own opacity, fades it, and it is judged as rendered. Otherwise its
+    colour is what was rendered, the drawn pixels where the character changes
+    the page most: a pattern fill (pdfium declares those white), or a veil.
 
     Pixels are read from an even sample of the ink window (_sample); a
     character whose ink the sample misses entirely (hairlines between the
     sampled rows of a huge glyph) is judged at its declared paint. Returns
     None when it changes no pixel and declares no paint."""
     behind = np.asarray(behind, dtype=np.float64)
-    paint = alpha = None
-    if char.declared is not None:
-        alpha = (255 if char.declared_alpha is None else char.declared_alpha) / 255
-        paint = _wcag(behind + alpha * (np.array(char.declared, dtype=np.float64) - behind), behind)
+    paint = colour = None
+    for rgb, alpha in char.paints:
+        contrast = _wcag(behind + alpha / 255 * (np.array(rgb, dtype=np.float64) - behind), behind)
+        if paint is None or contrast > paint:
+            paint, colour = contrast, rgb
     changes = _sample(changed, ink_box)
     ink = changes >= RULES["MIN_INK_DIFF"]
     if not ink.any():
         return paint
     painted = _sample(drawn, ink_box)[ink].astype(np.float32)
-    if paint is not None and alpha is not None:
+    if paint is not None and colour is not None:
         under = _sample(reference, ink_box)[ink].astype(np.float32)
-        explained, reached = _paint_fit(painted, under, char.declared)
+        explained, reached = _paint_fit(painted, under, colour)
         if explained >= RULES["PAINT_EXPLAINED_SHARE"]:
             # Paint that cannot stand out from what is behind (white on white,
             # whatever black line it partly erases; or too faint) is low however
@@ -717,7 +750,7 @@ def _ink_contrast(drawn, reference, changed, ink_box, behind, char, scale) -> fl
             # glyph that should reach it falls short.
             veiled = (
                 char.vsize * scale >= RULES["PAINT_REACH_MIN_PX"]
-                and reached < RULES["PAINT_REACHED"] * alpha
+                and reached < RULES["PAINT_REACHED"]
             )
             if paint < RULES["MIN_CONTRAST"] or not veiled:
                 return paint
@@ -747,22 +780,27 @@ def _wcag(first, second) -> float:
     return (max(l_first, l_second) + 0.05) / (min(l_first, l_second) + 0.05)
 
 
+_SHARED = -1  # an _Extent of characters from several objects: never "the same object"
+
+
 @dataclass
 class _Extent:
     """Ink of a text object that is not judged in the overlap pass but can
     lie over a character that is: a stroked object's reach beyond its glyph
     boxes (its bounds include the stroke), and the characters an attribute
     rule removed that still draw (a band glyph off the page, a hairline of
-    tiny text, squashed bars). One per object, the union of those boxes,
-    entered in the overlap grid like a character that touches everything
-    under it."""
+    tiny text, squashed bars). A stroked object has one, its bounds; the
+    removed characters have one per grid cell, the union of their boxes
+    within it, whatever objects they belong to (_SHARED when several), so
+    microtext drawn a glyph per object adds one entry to a cell, not
+    thousands."""
 
     obj: int
     box: tuple[float, float, float, float]
     char: str = ""
     index: int = -1
     box_px: int = 1
-    declared: None = None
+    paints: tuple = ()
 
 
 def _rejudge_overlaps(
@@ -771,12 +809,12 @@ def _rejudge_overlaps(
     """Re-judge every character that pass 1 called visible and whose box
     touches another text object's ink: that ink may be what it was credited
     with. Touching is read from glyph boxes clipped to the page, padded by two
-    device pixels, and from each object's _Extent: a stroked object's
-    bounds, and the boxes of its characters an attribute rule decided (off
-    the page, tiny, squashed) that still draw. Those characters are removed
-    whatever their neighbours do, so they are not judged, and one extent per
-    object keeps a band of microtext from filling the grid; characters with
-    no ink take no part at all.
+    device pixels, and from _Extents: a stroked object's bounds, and the
+    boxes of characters an attribute rule decided (off the page, tiny,
+    squashed) that still draw. Those characters are removed whatever their
+    neighbours do, so they are not judged, and they enter the grid as one
+    extent per cell, so microtext cannot fill it; characters with no ink
+    take no part at all.
 
     A character's own ink is what changes when its object is switched off
     while every object touching it stays drawn. Objects that touch nothing in
@@ -805,7 +843,7 @@ def _rejudge_overlaps(
     pad = 2.0 / scale
     grid: dict[tuple[int, int], list] = {}
     clipped: dict[int, tuple[float, float, float, float]] = {}
-    reaches: dict[int, tuple[float, float, float, float]] = {}  # by object: its _Extent's box
+    lent: dict[tuple[int, int], tuple[tuple[float, float, float, float], set[int]]] = {}
     for char in chars:
         box = _clip(char.box, page_box)
         if not char.ink_px or box is None:
@@ -814,16 +852,25 @@ def _rejudge_overlaps(
             clipped[id(char)] = box
             for cell in _cells(box):
                 grid.setdefault(cell, []).append(char)
-        else:
-            reaches[char.obj] = _union(reaches[char.obj], box) if char.obj in reaches else box
+            continue
+        for cell in _cells(box):  # removed but drawing: lends ink to whatever is under it
+            part = _clip(box, (cell[0] * 16, cell[1] * 16, cell[0] * 16 + 16, cell[1] * 16 + 16))
+            if part is None:
+                continue
+            if cell in lent:
+                union, objects = lent[cell]
+                lent[cell] = (_union(union, part), objects | {char.obj})
+            else:
+                lent[cell] = (part, {char.obj})
+    for cell, (union, objects) in lent.items():
+        obj = next(iter(objects)) if len(objects) == 1 else _SHARED
+        grid.setdefault(cell, []).append(_Extent(obj, union))
     for obj in {char.obj for char in chars if char.mode in _STROKING}:
         reach = _clip(bounds[obj][1], page_box) if obj in bounds else None
         if reach is not None:
-            reaches[obj] = _union(reaches[obj], reach) if obj in reaches else reach
-    for obj, reach in reaches.items():
-        extent = _Extent(obj, reach)
-        for cell in _cells(reach):
-            grid.setdefault(cell, []).append(extent)
+            extent = _Extent(obj, reach)
+            for cell in _cells(reach):
+                grid.setdefault(cell, []).append(extent)
     if grid and max(len(members) for members in grid.values()) > MAX_CELL_CHARS:
         raise _PageNotChecked(TOO_DENSE)
     touching: dict[int, set[int]] = {}
@@ -855,9 +902,9 @@ def _rejudge_overlaps(
             if other.char == char.char and union and shared / union >= RULES["DUPLICATE_IOU"]:
                 if order.get(char.obj, 0) < order.get(other.obj, 0):
                     char.earlier_copy = True  # counted apart if it leaves no ink
-                elif other.declared == char.declared:  # a copy set is painted alike
+                elif other.paints == char.paints:  # a copy set is painted alike
                     has_earlier_twin = True
-                if other.declared == char.declared:
+                if other.paints == char.paints:
                     copies.join(char.obj, other.obj)
         if (
             covering
@@ -1014,7 +1061,7 @@ def _classify(chars: list[_Char], image_cover: float) -> None:
     written as one object.
 
     A character is tiny when its font size across the baseline is, read
-    larger for a font that draws larger than its size (_font_scale). Low
+    larger for a font that draws larger than its size (see _characters). Low
     contrast is read from the paint as _ink_contrast finds it."""
     word_spread: list[float] = []
     word_of: list[int] = []
@@ -1062,24 +1109,27 @@ def _attribute_kind(char: _Char) -> str | None:
 
 
 def _why_no_ink(char: _Char) -> str:
-    """The kind of a character that leaves no ink, read from the paint it was
-    declared in (the stroke for outlined text) and its opacity."""
+    """The kind of a character that leaves no ink, read from the paints it was
+    declared in (fill, stroke or both) and their opacity."""
     if char.earlier_copy:
         return DUPLICATE
-    if char.declared_alpha == 0:
+    if char.paints and all(alpha == 0 for _, alpha in char.paints):
         return "transparent"
     if "OC" in char.marks:
         return "hidden_layer"
-    if char.declared and char.bg:
-        if _contrast(char.declared, char.bg) < RULES["MIN_CONTRAST"]:
+    if char.paints and char.bg:
+        low = RULES["MIN_CONTRAST"]
+        if all(_contrast(rgb, char.bg) < low for rgb, _ in char.paints):
             return "same_colour_as_background"
-        alpha = (255 if char.declared_alpha is None else char.declared_alpha) / 255
-        faded = [b + alpha * (d - b) for d, b in zip(char.declared, char.bg, strict=True)]
-        if _contrast(faded, char.bg) < RULES["MIN_CONTRAST"]:
+        if all(_contrast(_faded(rgb, alpha, char.bg), char.bg) < low for rgb, alpha in char.paints):
             return "transparent"  # faded by its opacity until it matches what is behind
     if char.clipped:
         return "clipped"
     return "covered"
+
+
+def _faded(rgb, alpha: int, behind) -> list[float]:
+    return [b + alpha / 255 * (c - b) for c, b in zip(rgb, behind, strict=True)]
 
 
 def _summary(number: int, chars: list[_Char], scale: float, seconds: float) -> PageCheck:

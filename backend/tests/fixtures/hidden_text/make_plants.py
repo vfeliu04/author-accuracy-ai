@@ -806,6 +806,7 @@ def build() -> None:
     # -- cases from the R1 code review (2026-10-18) ---------------------------
     _review_cases()
     _third_review_cases()
+    _fourth_review_cases()
 
     # -- bounds ------------------------------------------------------------
     _bounds()
@@ -1512,40 +1513,41 @@ def _third_review_cases() -> None:
 
     # Small light grey print a reader sees: its thin strokes never reach full
     # coverage at the render's scale, so only its declared paint shows that.
+    # (The review's 4 pt Courier in #CCCCCC is not a plant: its glyphs sit at
+    # the 2% ink floor, and Linux draws Courier, which the PDF does not embed,
+    # with another font that puts three of them under it.)
     source = "Source: national statistics office, 2023 survey (n = 1,204)"
-    for name, key, base, grey, size, note in [
-        ("k_small_grey_courier", "F2", "Courier", "0.8", 4, "4 pt Courier in #CCCCCC"),
-        ("k_small_grey_times", "F3", "Times-Roman", "0.75", 6, "6 pt Times in #BFBFBF"),
-    ]:
-        plant(
-            name,
-            "keep",
-            None,
-            "",
-            [VISIBLE, source],
-            f"a source line in {note}: thin strokes that never reach full coverage",
-            lambda pdf, page, font, key=key, base=base, grey=grey, size=size: (
-                _with_setup(standard_font(key, base), pdf, page, font)
-                + VISIBLE_OPS
-                + f"{grey} g ".encode()
-                + tj(source, size=size, font=key)
-                + b"0 g "
-            ),
-        )
+    plant(
+        "k_small_grey_times",
+        "keep",
+        None,
+        "",
+        [VISIBLE, source],
+        "a source line in 6 pt Times in #BFBFBF: thin strokes that never reach full coverage",
+        lambda pdf, page, font: (
+            _with_setup(standard_font("F3", "Times-Roman"), pdf, page, font)
+            + VISIBLE_OPS
+            + b"0.75 g "
+            + tj(source, size=6, font="F3")
+            + b"0 g "
+        ),
+    )
 
     # The threshold and the size gate of the veil test, each with a plant that
-    # fails without it: thin '=' signs at 12 device pixels reach 0.35 of their
-    # paint (removed at a threshold of 0.5), and 4 pt punctuation under 12
-    # pixels reaches less than the threshold (removed without the gate).
+    # fails without it: thin '|' and '_' marks at 15 device pixels reach a
+    # third of their paint (removed at a threshold of 0.5), and 4 pt
+    # punctuation under 12 pixels reaches less than the threshold (removed
+    # without the gate).
     for name, key, base, grey, size, text, note in [
         (
-            "k_grey_equals_italic",
+            "k_grey_rules_italic",
             "F4",
             "Times-Italic",
             "0.8",
-            6,
-            "a = b = c = d = e = f = g = h (n = 1,204)",
-            "6 pt Times-Italic in #CCCCCC: thin '=' signs reach 0.35 of their paint at scale 2",
+            7.5,
+            "a | b _ c | d _ e | f _ g | h _ i",
+            "7.5 pt Times-Italic in #CCCCCC: thin '|' and '_' marks reach a third of their"
+            " paint at scale 2 (15 device pixels)",
         ),
         (
             "k_small_grey_punctuation",
@@ -1578,20 +1580,21 @@ def _third_review_cases() -> None:
     # which only glyphs of 12 device pixels and more do: under that, it is a
     # documented miss.
     faint = line("HIDDEN-FAINTSMALL")
+
+    def faint_bold(pdf, page, font):
+        standard_font("F6", "Helvetica-Bold")(pdf, page, font)
+        ext_gstate(GSF={"ca": 0.07})(pdf, page, font)
+        return VISIBLE_OPS + b"q /GSF gs " + tj(faint, size=5, font="F6") + b"Q\n"
+
     plant(
         "h_faint_alpha_5pt",
         "hidden",
         ["low_contrast", "transparent"],
         faint,
         [VISIBLE],
-        "5 pt black text at fill opacity 0.07 (too small for the reach test)",
-        lambda pdf, page, font: (
-            _with_setup(ext_gstate(GSF={"ca": 0.07}), pdf, page, font)
-            + VISIBLE_OPS
-            + b"q /GSF gs "
-            + tj(faint, size=5)
-            + b"Q\n"
-        ),
+        "5 pt Helvetica-Bold at fill opacity 0.07: too small for the reach test, bold enough"
+        " to leave ink, so only its opacity shows it faded",
+        faint_bold,
     )
     veiled = line("HIDDEN-VEILSMALL")
     plant(
@@ -1724,6 +1727,175 @@ def _third_review_cases() -> None:
     )
 
 
+def type3_font(pdf, page, key, *, matrix, bbox, glyphs) -> None:
+    """A Type3 font under `key`: `glyphs` maps a letter to its CharProc (its
+    d1 line and drawing), each letter's width the d1's first number."""
+    codes = sorted(glyphs)
+    cmap = (
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"/CMapName /T3 def /CMapType 2 def\n"
+        b"1 begincodespacerange <00> <FF> endcodespacerange\n"
+        + f"{len(codes)} beginbfchar\n".encode()
+        + b"".join(f"<{ord(c):02X}> <{ord(c):04X}>\n".encode() for c in codes)
+        + b"endbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end\n"
+    )
+    first, last = ord(codes[0]), ord(codes[-1])
+    widths: list[float] = [0] * (last - first + 1)
+    for c in codes:
+        widths[ord(c) - first] = float(glyphs[c].split()[0])
+    page.obj.Resources.Font[f"/{key}"] = pdf.make_indirect(
+        Dictionary(
+            Type=Name.Font,
+            Subtype=Name.Type3,
+            FontBBox=Array(bbox),
+            FontMatrix=Array(matrix),
+            CharProcs=Dictionary({f"/g{ord(c)}": Stream(pdf, glyphs[c]) for c in codes}),
+            Encoding=Dictionary(
+                Type=Name.Encoding,
+                Differences=Array([x for c in codes for x in (ord(c), Name(f"/g{ord(c)}"))]),
+            ),
+            FirstChar=first,
+            LastChar=last,
+            Widths=Array(widths),
+            Resources=Dictionary(),
+            ToUnicode=Stream(pdf, cmap),
+        )
+    )
+
+
+def _fourth_review_cases() -> None:
+    """The review of 999eed5 (2026-10-19): two regressions, one per way
+    visible text was removed, and plants for what no plant pinned."""
+
+    # TeX's bitmap fonts as Ghostscript writes them: a FontMatrix that flips
+    # y, glyphs drawn y-down, 0.12 Tf under a flipping text matrix. pdfium
+    # reports no ascent or descent for it; the glyphs draw 8.4 pt tall.
+    bitmap_like = "ABCABCABBACABABACABBCAABC"
+
+    def bitmap(pdf, page, font):
+        type3_font(
+            pdf,
+            page,
+            "T5",
+            matrix=[1, 0, 0, -1, 0, 0],
+            bbox=[0, 0, 50, 70],
+            glyphs={
+                "A": b"50 0 0 0 40 70 d1 0 0 40 70 re f\n",
+                "B": b"50 0 0 0 40 70 d1 0 0 12 70 re f 12 0 28 12 re f 12 58 28 12 re f\n",
+                "C": b"50 0 0 0 40 70 d1 0 0 12 70 re f 12 0 28 12 re f\n",
+            },
+        )
+        return VISIBLE_OPS + f"BT /T5 0.12 Tf 1 0 0 -1 72 636 Tm ({bitmap_like}) Tj ET\n".encode()
+
+    plant(
+        "k_type3_bitmap_like",
+        "keep",
+        None,
+        "",
+        [VISIBLE, bitmap_like],
+        "a Type3 font as Ghostscript writes TeX's bitmap fonts (FontMatrix 1 0 0 -1, 0.12 Tf,"
+        " a flipping text matrix): pdfium reports no ascent, the glyphs draw 8.4 pt tall",
+        bitmap,
+    )
+
+    # The flipped font drawn only at 45 degrees: no upright glyph shows its
+    # size, and pdfium reports its ascent and descent inverted (0 and 10).
+    slanted = "abababab"
+
+    def flipped_slanted(pdf, page, font):
+        type3_font(
+            pdf,
+            page,
+            "T6",
+            matrix=[1, 0, 0, -1, 0, 0],
+            bbox=[0, -10, 6, 0],
+            glyphs={
+                "a": b"8 0 0 -10 6 0 d1 0 -10 6 10 re f\n",
+                "b": b"8 0 0 -10 6 0 d1 0 -10 3 10 re f 3 -4 3 4 re f\n",
+            },
+        )
+        return (
+            VISIBLE_OPS
+            + f"BT /T6 0.8 Tf 0.7071 0.7071 -0.7071 0.7071 72 400 Tm ({slanted}) Tj ET\n".encode()
+        )
+
+    plant(
+        "k_type3_flipped_slanted",
+        "keep",
+        None,
+        "",
+        [VISIBLE, slanted],
+        "a Type3 font with a flipped FontMatrix at 0.8 Tf, its glyphs 8 pt tall, drawn at"
+        " 45 degrees only: its size shows only in its (inverted) ascent and descent",
+        flipped_slanted,
+    )
+
+    # Fill and stroke (render mode 2) with a transparent fill: the opaque
+    # outline is what a reader sees.
+    keep_plant(
+        "k_outline_transparent_fill",
+        "KEEP-OUTLINEFILL",
+        "outlined heading",
+        "render mode 2 (fill, then stroke) with fill opacity 0 and an opaque black stroke",
+        ops_before=b"q /GSA gs 0 g 0 G 0.6 w ",
+        ops_after=b"Q\n",
+        setup=ext_gstate(GSA={"ca": 0}),
+        pre="2 Tr ",
+    )
+
+    # Microtext drawn a glyph per text object (as along a curve): 4,800
+    # objects in one band, the page still checked.
+    widths = {"S": 667, "E": 667, "C": 722, "U": 722, "R": 722}  # Helvetica, /1000 em
+    glyph_ops = []
+    for r in range(40):
+        x = 300.0
+        for ch in "SECURE" * 20:
+            glyph_ops.append(f"BT /F1 0.5 Tf {x:.4f} {500 + 0.5 * r:g} Td ({ch}) Tj ET\n")
+            x += widths[ch] * 0.5 / 1000
+    plant(
+        "k_microtext_one_glyph_per_object",
+        "hidden",
+        "tiny",
+        "SECURE" * 20 * 40,
+        [VISIBLE],
+        "k_microtext_band's 4,800 characters of 0.5 pt microtext, one text object per glyph:"
+        " removed as tiny, and the page is still checked",
+        lambda pdf, page, font: VISIBLE_OPS + "".join(glyph_ops).encode(),
+    )
+
+    # The veil test's gate from above: a 93% veil over 9 pt text, 18 device
+    # pixels at scale 2 and 13.5 at 1.5, is caught at both.
+    veiled_nine = line("HIDDEN-VEILNINE")
+    plant(
+        "h_white_veil_9pt",
+        "hidden",
+        ["low_contrast", "covered"],
+        veiled_nine,
+        [VISIBLE],
+        "9 pt black text under a 93% white veil (13.5 device pixels at scale 1.5)",
+        lambda pdf, page, font: (
+            _with_setup(ext_gstate(GSV={"ca": 0.93}), pdf, page, font)
+            + VISIBLE_OPS
+            + tj(veiled_nine, size=9)
+            + b"q /GSV gs 1 1 1 rg "
+            + BOX
+            + b" Q\n"
+        ),
+    )
+
+    # Faded text under a veil: its own opacity must not lower the bar it is
+    # measured against (0.2 opacity under a 65% veil renders at contrast 1.15).
+    hidden_plant(
+        "h_faint_under_veil",
+        ["low_contrast", "covered"],
+        "HIDDEN-FADEDVEILED",
+        "black text at fill opacity 0.2 under a 65% white veil: it renders #EDEDED-ish",
+        ops_before=b"q /GSF gs ",
+        ops_after=b"Q\nq /GSV gs 1 1 1 rg " + BOX + b" Q\n",
+        setup=ext_gstate(GSF={"ca": 0.2}, GSV={"ca": 0.65}),
+    )
+
+
 def _bounds() -> None:
     """Files for the detector's bounds, not plants: listed under "bounds"."""
     # A page past the pixel cap even at the lowest scale: 2400 x 4800 pt is
@@ -1822,17 +1994,19 @@ def _bounds() -> None:
         )
     )
     FILES["b_many_page_glyphs"] = to_bytes(pdf)
-    # The largest page checked, covered by one solid block glyph with a white
-    # line on it: the line is visible only once the overlap pass has rendered
-    # the page without it (pass 1 compares it with the paper), so the file
-    # also runs that pass, whose renders are the page's largest memory cost.
+    # The largest page checked, covered by one solid block glyph (y -550 to
+    # 3050), and above it a white line under black text: pass 1 credits the
+    # line with the text's ink, so only the overlap pass, whose renders are
+    # the page's largest memory cost, sets it aside.
     pdf, page, font = new_doc(2200, 3200)
     block_font(pdf, page)
     page.obj.Contents = pdf.make_stream(
-        tj(VISIBLE, y=3100)
+        tj(VISIBLE, y=3150)
         + b"0.2 g BT /T3 3000 Tf 0 200 Td (Z) Tj ET\n"
         + b"1 g "
-        + tj(line("KEEP-ONBLOCK", "white on the page-sized glyph"), y=1000)
+        + tj(line("HIDDEN-UNDERM"), y=3075)
+        + b"0 g "
+        + tj("M" * 45, x=60, y=3075)
     )
     FILES["b_page_glyph_memory"] = to_bytes(pdf)
 

@@ -275,26 +275,33 @@ def test_many_small_text_objects_are_checked_in_reasonable_time():
     assert time.perf_counter() - started < 15  # was 25 s, a set rebuilt per character
 
 
-def test_many_page_sized_glyphs_leave_their_page_unchecked_before_rendering():
+def test_many_page_sized_glyphs_leave_their_page_unchecked_before_rendering(monkeypatch):
     """300 glyphs each about the size of the page: their boxes sum past
     MAX_GLYPH_AREA_PAGES page-areas, so the page is reported unchecked from
-    its text page alone, before any render (well under a second; without the
-    bound it is rendered and ends at another bound after several seconds)."""
-    started = time.perf_counter()
+    its text page alone, before any render."""
+    renders = []
+    real = ht._render
+
+    def rendering(page, scale, *, number):
+        renders.append(number)
+        return real(page, scale, number=number)
+
+    monkeypatch.setattr(ht, "_render", rendering)
     report = ht.check_pdf(FIXTURES / "b_many_page_glyphs.pdf")
     assert report.unmeasured == ((1, ht.TOO_MUCH_AREA),)
-    assert time.perf_counter() - started < 3
+    assert renders == []
 
 
 def test_a_page_sized_glyph_on_the_largest_page_stays_under_the_memory_bound(capsys):
-    """The largest page checked, covered by one solid glyph with a white line
-    on it: the line reads as visible only once the overlap pass has rendered
-    the page without it, so its renders (the page's largest memory cost) ran."""
+    """The largest page checked, covered by one solid glyph, with a white line
+    under black text: pass 1 credits the line with the text's ink, so only the
+    overlap pass, whose renders are the page's largest memory cost, sets it
+    aside. Its removal shows that pass ran inside the measured peak."""
     from authorai.references import READER_MEMORY_BYTES
 
     report = ht.detect_hidden_text(FIXTURES / "b_page_glyph_memory.pdf", timeout=120)
     assert report.unmeasured == ()
-    assert report.hidden_chars == 0  # the white line was judged against the glyph under it
+    assert report.hidden_chars == len(nonws("HIDDEN-UNDERM " + BODY))
     peak = report.peak_memory_bytes
     assert peak is not None
     with capsys.disabled():
@@ -358,7 +365,7 @@ def test_ink_the_sample_misses_is_judged_at_its_declared_paint():
     drawn = np.full((size, size, 3), 255, np.uint8)
     drawn[1::2] = 239
     reference = np.full((size, size, 3), 255, np.uint8)
-    char = SimpleNamespace(declared=(239, 239, 239), declared_alpha=255, vsize=100.0)
+    char = SimpleNamespace(paints=(((239, 239, 239), 255),), vsize=100.0)
     white = (255.0, 255.0, 255.0)
     contrast = ht._ink_contrast(drawn, reference, changed, (0, 0, size, size), white, char, 2.0)
     assert contrast is not None and contrast < ht.RULES["MIN_CONTRAST"]
@@ -434,7 +441,7 @@ def test_the_rules_are_pinned_to_the_version():
     """A change to any rule changes what is read: it bumps DETECTOR_VERSION
     (which R2's dedup stamp names) and this pin together."""
     digest = hashlib.sha256(json.dumps(ht.RULES, sort_keys=True).encode()).hexdigest()[:12]
-    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v3", RULES_DIGEST)
+    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v4", RULES_DIGEST)
 
 
 RULES_DIGEST = "1966c69cbfbc"
