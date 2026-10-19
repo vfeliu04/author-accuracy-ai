@@ -24,6 +24,7 @@ from authorai.evals import (
     score_verdicts,
     verdict_pairs,
 )
+from authorai.hidden_text import HiddenTextCheckError, detect_hidden_text
 from authorai.ingest import figure_describer, image_source_reader, ingest_image, ingest_pdf
 from authorai.llm import AnthropicClient
 from authorai.scoring import score_run
@@ -586,6 +587,55 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"[{hit.score:.4f} {channels}{page} {hit.kind}] {hit.text[:160]}")
 
 
+def cmd_hidden_text(args: argparse.Namespace) -> None:
+    """Check a PDF for text a reader cannot see, in a bounded child, and
+    print what each page holds. Needs no database and no keys."""
+    try:
+        report = detect_hidden_text(args.file, timeout=args.timeout)
+    except HiddenTextCheckError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        print(json.dumps(_hidden_text_json(report), indent=1))
+        return
+    pages = ", ".join(str(page) for page in report.pages_with_hidden) or "none"
+    print(
+        f"{args.file}: {len(report.pages)} of {report.page_count} pages checked "
+        f"({report.version}); {report.hidden_chars} hidden characters, on pages: {pages}"
+    )
+    for check in report.pages:
+        parts = [f"{kind} {count} {sample!r}" for kind, (count, sample) in check.hidden.items()]
+        if check.duplicates:
+            parts.append(f"duplicate copies {check.duplicates}")
+        if check.ocr_layer_kept:
+            parts.append(f"OCR layer kept {check.ocr_layer_kept}")
+        detail = "; ".join(parts) or "nothing hidden"
+        print(f"page {check.page}: {check.chars} characters, {detail} ({check.seconds:.2f} s)")
+    for page, reason in report.unmeasured:
+        print(f"page {page}: NOT CHECKED ({reason})")
+
+
+def _hidden_text_json(report) -> dict:
+    return {
+        "version": report.version,
+        "page_count": report.page_count,
+        "hidden_chars": report.hidden_chars,
+        "pages": [
+            {
+                "page": check.page,
+                "chars": check.chars,
+                "hidden": {kind: list(value) for kind, value in check.hidden.items()},
+                "duplicates": check.duplicates,
+                "ocr_layer_kept": check.ocr_layer_kept,
+                "scale": check.scale,
+                "seconds": check.seconds,
+            }
+            for check in report.pages
+        ],
+        "unmeasured": [list(item) for item in report.unmeasured],
+        "peak_memory_bytes": report.peak_memory_bytes,
+    }
+
+
 def _add_eval_args(
     parser: argparse.ArgumentParser,
     golden: Path = GOLDEN_PATH,
@@ -710,6 +760,16 @@ def main() -> None:
     search.add_argument("query", nargs="+")
     search.add_argument("-k", type=int, default=10)
     search.set_defaults(func=cmd_search)
+
+    hidden = subparsers.add_parser(
+        "hidden-text", help="Check a PDF for text a reader cannot see (no database, no keys)"
+    )
+    hidden.add_argument("file", type=Path)
+    hidden.add_argument(
+        "--timeout", type=float, default=300.0, help="Seconds before the check gives up"
+    )
+    hidden.add_argument("--json", action="store_true", help="Print the report as JSON")
+    hidden.set_defaults(func=cmd_hidden_text)
 
     args = parser.parse_args()
     args.func(args)
