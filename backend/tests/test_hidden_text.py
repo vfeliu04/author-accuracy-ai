@@ -17,7 +17,9 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import authorai.cli as cli
@@ -97,7 +99,10 @@ def test_a_hidden_plant_loses_exactly_its_planted_line(name, scale):
         assert removed_kinds(check) <= set(plant["kind"])
     else:
         assert removed_kinds(check) == {plant["kind"]}
-    assert check.hidden_chars == len(nonws(plant["hidden"]))
+    # An earlier copy of a glyph is removed but counted apart from the hidden.
+    duplicates = plant.get("duplicates", 0)
+    assert check.duplicates == duplicates
+    assert check.hidden_chars == len(nonws(plant["hidden"])) - duplicates
     assert check.ocr_layer_kept == plant.get("ocr_kept", 0)
     # What the plant draws visibly is never removed (kept holds it whole).
     for line in plant["visible"]:
@@ -135,19 +140,26 @@ def test_real_ocrmypdf_output_is_kept_whole(name):
 
 
 def test_documented_misses_are_still_missed():
-    """An OCR layer that disagrees with its scan, and /ActualText (an agreed
-    follow-up), are known gaps: a fix must change this test on purpose."""
+    """An OCR layer that disagrees with its scan, /ActualText (an agreed
+    follow-up), and a veil over text under 12 device pixels are known gaps: a
+    fix must change this test on purpose."""
     lies = ht.check_pdf(FIXTURES / "h_ocr_layer_lies.pdf").pages[0]
     assert lies.glyphs is None
     assert lies.ocr_layer_kept == len(nonws("HIDDEN-OCRLIE the methods are flawless"))
     actual = ht.check_pdf(FIXTURES / "h_actualtext.pdf").pages[0]
     assert actual.glyphs is None
     assert "HIDDEN-ACTUALTEXT" in page_text(FIXTURES / "h_actualtext.pdf")
+    # Its letters are judged at their declared black: at scale 2, those that
+    # still leave ink under the veil reach the reading.
+    veiled = ht.check_pdf(FIXTURES / "h_white_veil_5pt.pdf").pages[0]
+    removed, _ = streams(veiled)
+    assert removed_kinds(veiled) <= {"covered"}
+    assert len(removed) < len(nonws(PLANTS["h_white_veil_5pt"]["hidden"]))
 
 
 def test_every_plant_in_the_manifest_is_tested():
     tested = set(HIDDEN) | set(KEEP) | {"k_ocr_layer_ocrmypdf", "k_scanned_report_ocrmypdf"}
-    tested |= {"h_ocr_layer_lies", "h_actualtext"}
+    tested |= {"h_ocr_layer_lies", "h_actualtext", "h_white_veil_5pt"}
     assert tested == set(PLANTS)
     on_disk = {path.stem for path in FIXTURES.glob("*.pdf")}
     assert on_disk == set(PLANTS) | set(MANIFEST["bounds"])
@@ -263,40 +275,93 @@ def test_many_small_text_objects_are_checked_in_reasonable_time():
     assert time.perf_counter() - started < 15  # was 25 s, a set rebuilt per character
 
 
-def test_many_page_sized_glyphs_leave_their_page_unchecked_quickly():
-    """300 glyphs each about the size of the page cost minutes of per-pixel
-    work and timed out the whole document; the page's pixel work is bounded."""
+def test_many_page_sized_glyphs_leave_their_page_unchecked_before_rendering():
+    """300 glyphs each about the size of the page: their boxes sum past
+    MAX_GLYPH_AREA_PAGES page-areas, so the page is reported unchecked from
+    its text page alone, before any render (well under a second; without the
+    bound it is rendered and ends at another bound after several seconds)."""
     started = time.perf_counter()
     report = ht.check_pdf(FIXTURES / "b_many_page_glyphs.pdf")
     assert report.unmeasured == ((1, ht.TOO_MUCH_AREA),)
-    assert time.perf_counter() - started < 15
+    assert time.perf_counter() - started < 3
 
 
-def test_a_page_sized_glyph_on_the_largest_page_stays_under_the_memory_bound():
+def test_a_page_sized_glyph_on_the_largest_page_stays_under_the_memory_bound(capsys):
+    """The largest page checked, covered by one solid glyph with a white line
+    on it: the line reads as visible only once the overlap pass has rendered
+    the page without it, so its renders (the page's largest memory cost) ran."""
     from authorai.references import READER_MEMORY_BYTES
 
     report = ht.detect_hidden_text(FIXTURES / "b_page_glyph_memory.pdf", timeout=120)
     assert report.unmeasured == ()
-    assert report.peak_memory_bytes is not None
-    assert report.peak_memory_bytes < READER_MEMORY_BYTES
+    assert report.hidden_chars == 0  # the white line was judged against the glyph under it
+    peak = report.peak_memory_bytes
+    assert peak is not None
+    with capsys.disabled():
+        print(f"\npage-sized glyph with an overlap: peak resident {peak / 2**20:.0f} MiB")
+    assert peak < READER_MEMORY_BYTES
 
 
-def test_the_child_removes_the_handed_over_file_before_checking(tmp_path, monkeypatch):
+def test_the_child_removes_the_handed_over_file_and_checks_it_through_the_handle(
+    tmp_path, monkeypatch
+):
     """handover_file's contract: the child deletes its copy of the user's file
-    as soon as it has it open, since a server killed outright never does."""
+    as soon as it has it open, since a server killed outright never does; and
+    it checks the PDF through that open handle, which pdfium reads as it
+    needs, rather than reading the whole file into memory first."""
     copy = tmp_path / "handed-over.pdf"
     copy.write_bytes((FIXTURES / "h_covered_rect.pdf").read_bytes())
     seen = []
     real = ht.check_pdf
 
     def checking(source, **kwargs):
-        seen.append(copy.exists())
+        handle = isinstance(source, io.BufferedReader)
+        seen.append((copy.exists(), handle, handle and not source.closed and source.tell() == 0))
         return real(source, **kwargs)
 
     monkeypatch.setattr(ht, "check_pdf", checking)
     report = ht._read_and_check(str(copy), None)
-    assert seen == [False]
+    assert seen == [(False, True, True)]  # gone from disk; an open, unread handle
     assert report.hidden_chars == len(nonws(PLANTS["h_covered_rect"]["hidden"]))
+
+
+def test_the_child_reads_the_handed_over_file_through_read_and_check(monkeypatch):
+    """The child's entry point applies its bounds and goes through
+    _read_and_check (tested above), with the pages it was given."""
+    import authorai.references as references
+
+    report = ht.check_pdf(FIXTURES / "h_covered_rect.pdf")
+    calls, bounded, sent = [], [], []
+    monkeypatch.setattr(ht, "end_with_parent", lambda cpu_seconds: bounded.append(cpu_seconds))
+    monkeypatch.setattr(references, "bound_child_memory", lambda: bounded.append("memory"))
+
+    def reading(path, pages):
+        calls.append((path, pages))
+        return report
+
+    monkeypatch.setattr(ht, "_read_and_check", reading)
+    monkeypatch.setattr(ht, "report_outcome", lambda sender, work, classify: sender.append(work()))
+    ht._check_in_child(sent, "handed-over.pdf", (1,), 30)
+    assert bounded == [30, "memory"]
+    assert calls == [("handed-over.pdf", (1,))]
+    assert sent == [report] and sent[0].peak_memory_bytes is not None
+
+
+def test_ink_the_sample_misses_is_judged_at_its_declared_paint():
+    """Per-character pixels are read from an even sample of the ink window. A
+    glyph whose ink lies only between the sampled rows (hairlines on a huge
+    glyph) is judged at its declared paint, here near-white: it is not taken
+    as visible for want of a reading."""
+    size = 400  # 160,000 pixels: every other row and column is sampled
+    changed = np.zeros((size, size), np.uint8)
+    changed[1::2] = 40  # ink on the odd rows only
+    drawn = np.full((size, size, 3), 255, np.uint8)
+    drawn[1::2] = 239
+    reference = np.full((size, size, 3), 255, np.uint8)
+    char = SimpleNamespace(declared=(239, 239, 239), declared_alpha=255, vsize=100.0)
+    white = (255.0, 255.0, 255.0)
+    contrast = ht._ink_contrast(drawn, reference, changed, (0, 0, size, size), white, char, 2.0)
+    assert contrast is not None and contrast < ht.RULES["MIN_CONTRAST"]
 
 
 def test_pages_can_be_chosen():
@@ -369,10 +434,10 @@ def test_the_rules_are_pinned_to_the_version():
     """A change to any rule changes what is read: it bumps DETECTOR_VERSION
     (which R2's dedup stamp names) and this pin together."""
     digest = hashlib.sha256(json.dumps(ht.RULES, sort_keys=True).encode()).hexdigest()[:12]
-    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v2", RULES_DIGEST)
+    assert (ht.DETECTOR_VERSION, digest) == ("hidden-text v3", RULES_DIGEST)
 
 
-RULES_DIGEST = "24bd3de2989e"
+RULES_DIGEST = "1966c69cbfbc"
 
 
 def test_the_cli_prints_each_page(capsys, monkeypatch):

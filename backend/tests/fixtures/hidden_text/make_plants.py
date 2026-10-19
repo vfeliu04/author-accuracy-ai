@@ -11,11 +11,14 @@ Every operator is written raw (pikepdf), so each plant is exactly what its
 name says. No system font is used (text inside an image is drawn as ink
 bars) and every random value comes from a seeded generator, so the build is
 the same on any machine. Where a plant needs a geometry it cannot know in
-advance (a character's loose box, the rendered spread of an image), the
-script measures it with pdfium — the plant's own property, independent of
-the detector's rules.
+advance (a character's loose box, the rendered spread of an image), it was
+measured with pdfium — the plant's own property, independent of the
+detector's rules — and is written below as a constant: pdfium measures
+differently on Linux (a Helvetica loose box, an image's smoothing), and the
+build must be the same everywhere. `--measure` prints them again.
 
 Usage, from backend/:  python tests/fixtures/hidden_text/make_plants.py [OUTDIR]
+                        python tests/fixtures/hidden_text/make_plants.py --measure
 OUTDIR defaults to this folder. tests/test_hidden_text.py rebuilds into a
 temporary folder and compares the result with the committed files.
 
@@ -35,7 +38,6 @@ import zlib
 from pathlib import Path
 
 import pikepdf
-import pypdfium2 as pdfium
 from pikepdf import Array, Dictionary, Name, Stream
 from PIL import Image, ImageDraw
 
@@ -56,9 +58,14 @@ BOX = b"40 640 550 30 re f"
 # 0.61 pt under the 8.4 pt line's glyph bottoms (measured with pdfium).
 WHITE_NOTE_BASELINE = 645.75
 
-# pdfium's loose box for 12 pt Helvetica, relative to the baseline (measured
-# once below, from a probe page).
-LOOSE_BELOW = LOOSE_ABOVE = 0.0
+# pdfium's loose box for 12 pt Helvetica, relative to the baseline, and the
+# noise amplitudes (128 +/- half, seed 11) whose rendered spread at scale 2 is
+# nearest 6/255 and 10/255: measured with pypdfium2 5.0.0 (pdfium 143) on
+# macOS arm64 by measured_constants().
+LOOSE_BELOW = 3.88800048828125
+LOOSE_ABOVE = 12.072021484375
+NOISE_HALF = {6.0: 10, 10.0: 17}
+NOISE_SEED = 11
 
 OCR_INFO = {
     "k_ocr_layer_ocrmypdf": "ocrmypdf 16.12 + tesseract 5.5.2 over a one-line scan",
@@ -299,10 +306,11 @@ def black_soft_mask(pdf, page, font):
     )
 
 
-def measure_loose_box() -> None:
-    """pdfium's loose box of a 12 pt Helvetica line, relative to its
-    baseline, for the plants that place a line across an edge."""
-    global LOOSE_BELOW, LOOSE_ABOVE
+def measured_constants() -> dict:
+    """LOOSE_BELOW, LOOSE_ABOVE and NOISE_HALF as this machine's pdfium
+    measures them (run with --measure; the build itself never calls pdfium)."""
+    import pypdfium2 as pdfium
+
     pdf, page, font = new_doc()
     page.obj.Contents = pdf.make_stream(tj("HIDDEN probe line"))
     doc = pdfium.PdfDocument(to_bytes(pdf))
@@ -311,7 +319,19 @@ def measure_loose_box() -> None:
         _, bottom, _, top = textpage.get_charbox(0, loose=True)
     finally:
         doc.close()
-    LOOSE_BELOW, LOOSE_ABOVE = 650 - bottom, top - 650
+    halves = {}
+    for target in NOISE_HALF:
+        best = None
+        for half in range(1, 60):
+            img = noise_image(W // 3, H // 3, 128 - half, 128 + half, NOISE_SEED)
+            spread = rendered_spread(pdfium, img)
+            if best is None or abs(spread - target) < abs(best[0] - target):
+                best = (spread, half)
+            if spread > target:
+                break
+        assert best is not None
+        halves[target] = best[1]
+    return {"LOOSE_BELOW": 650 - bottom, "LOOSE_ABOVE": top - 650, "NOISE_HALF": halves}
 
 
 def baseline_for_share(edge: float, share_above: float) -> float:
@@ -321,9 +341,10 @@ def baseline_for_share(edge: float, share_above: float) -> float:
     return edge + share_above * height - LOOSE_ABOVE
 
 
-def rendered_spread(img: Image.Image) -> float:
+def rendered_spread(pdfium, img: Image.Image) -> float:
     """The luminance std pdfium renders for `img` placed over the whole page
-    at scale 2, measured over the line's box — what the OCR rule reads."""
+    at scale 2, measured over the line's box — what the OCR rule reads
+    (rendering smooths the noise, so its amplitude was searched)."""
     pdf, page, font = new_doc()
     page.obj.Resources.XObject = Dictionary(Im1=gray_image(pdf, img))
     page.obj.Contents = pdf.make_stream(f"q {W} 0 0 {H} 0 0 cm /Im1 Do Q\n".encode())
@@ -337,27 +358,16 @@ def rendered_spread(img: Image.Image) -> float:
     return float(pixels[rows, cols].std())
 
 
-def noise_with_spread(target: float, seed: int) -> Image.Image:
-    """A page-sized noise image whose RENDERED spread is near `target`
-    (rendering smooths it, so the amplitude is searched)."""
-    best = None
-    for half in range(1, 60):
-        img = noise_image(W // 3, H // 3, 128 - half, 128 + half, seed)
-        spread = rendered_spread(img)
-        if best is None or abs(spread - target) < abs(best[0] - target):
-            best = (spread, img)
-        if spread > target:
-            break
-    assert best is not None
-    return best[1]
+def noise_with_spread(target: float) -> Image.Image:
+    """The page-sized noise image whose rendered spread is nearest `target`."""
+    half = NOISE_HALF[target]
+    return noise_image(W // 3, H // 3, 128 - half, 128 + half, NOISE_SEED)
 
 
 # ------------------------------------------------------------------ plants
 
 
 def build() -> None:
-    measure_loose_box()
-
     # -- hidden, one per way a PDF hides text ---------------------------------
     hidden_plant(
         "h_white_on_white",
@@ -795,6 +805,7 @@ def build() -> None:
 
     # -- cases from the R1 code review (2026-10-18) ---------------------------
     _review_cases()
+    _third_review_cases()
 
     # -- bounds ------------------------------------------------------------
     _bounds()
@@ -907,13 +918,15 @@ def _crop_pair() -> None:
 def _ink_pair() -> None:
     # Flat-topped capitals only (no O, S, C, G: their overshoot rises above the
     # cap height and would put a sliver of ink past the cover), covered by a
-    # white box from below up to all but `uncovered` of the cap height.
+    # white box from below up to all but `uncovered` of the cap height. The
+    # visible one uses capitals whose top is a bar across most of their width
+    # (an L or an H shows only its stems up there: about 1% of its box at 10%).
     cap = 8.59  # pdfium's tight box of 12 pt Helvetica capitals, above the baseline
     for name, uncovered, expect in [
         ("t_ink_1", 0.01, "hidden"),
         ("t_ink_10", 0.10, "keep"),
     ]:
-        text = "HIDDENINK THE FIELD KIT" if expect == "hidden" else "KEEPINK THE TIDE LINE"
+        text = "HIDDENINK THE FIELD KIT" if expect == "hidden" else "TEE FEZ BRED TREE"
         top = 650 + cap * (1 - uncovered)
         cover = f"1 1 1 rg 40 640 550 {top - 640:.3f} re f\n".encode()
         plant(
@@ -996,7 +1009,7 @@ def _ocr_pairs() -> None:
             expect,
             kind,
             f"mode-3 text on a full-page image whose rendered spread is about {target:g}/255",
-            image=noise_with_spread(target, 11),
+            image=noise_with_spread(target),
             rect=(0, 0, W, H),
         )
 
@@ -1332,7 +1345,7 @@ def _review_cases() -> None:
     )
     hidden_plant(
         "h_faint_alpha",
-        ["low_contrast", "covered"],
+        ["low_contrast", "transparent"],
         "HIDDEN-FAINT",
         "black text at fill opacity 0.07: it renders #EDEDED, faint enough to read under"
         " contrast 1.2 yet still leaving ink (pixels change by 18 > 16)",
@@ -1399,6 +1412,316 @@ def _review_cases() -> None:
         ),
     ]:
         plant(name, "keep", "ocr_layer_kept", "", [text], note, build)
+
+
+def standard_font(key: str, base: str):
+    """A setup adding one of the standard 14 fonts under `key`."""
+
+    def setup(pdf, page, font):
+        page.obj.Resources.Font[f"/{key}"] = pdf.make_indirect(
+            Dictionary(
+                Type=Name.Font,
+                Subtype=Name.Type1,
+                BaseFont=Name(f"/{base}"),
+                Encoding=Name.WinAnsiEncoding,
+            )
+        )
+
+    return setup
+
+
+def _third_review_cases() -> None:
+    """The third review's cases (2026-10-19): regressions of 4f1c096, and one
+    plant per behaviour of it that had none."""
+
+    # Characters an attribute rule removes still draw ink: a white line under
+    # it must not be credited with that ink (one plant per attribute kind).
+    under_band = line("HIDDEN-UNDERBAND")
+
+    def under_off_page_band(pdf, page, font):
+        block_font(pdf, page)
+        return (
+            tj(VISIBLE, y=300)
+            + tj(under_band)
+            + b"0.1 0.1 0.1 rg BT /T3 1000 Tf -100 650 Td (Z) Tj ET\n"
+        )
+
+    plant(
+        "h_line_under_off_page_band",
+        "hidden",
+        ["covered", "off_page"],
+        "\u2588" + under_band,
+        [VISIBLE],
+        "a black line under a dark band that is one block glyph lying mostly above the page"
+        " (off the page itself, it still covers the line)",
+        under_off_page_band,
+    )
+    under_hairline = line("HIDDEN-UNDERHAIRLINE")
+    hairline = "W" * 34
+    plant(
+        "h_white_under_tiny_hairline",
+        "hidden",
+        ["same_colour_as_background", "tiny"],
+        hairline + under_hairline,
+        [VISIBLE],
+        "a white line under a 0.65 pt hairline drawn as stretched 1 pt W's (tiny): the"
+        " hairline's ink is not the white line's",
+        lambda pdf, page, font: (
+            VISIBLE_OPS
+            + b"1 g "
+            + tj(under_hairline)
+            + b"0 g "
+            + tj(hairline, x=0, y=0, size=1, pre="12 0 0 0.9 70 653 Tm ")
+        ),
+    )
+    under_bars = line("HIDDEN-UNDERBARS")
+    plant(
+        "h_white_under_squashed_bars",
+        "hidden",
+        ["same_colour_as_background", "squashed"],
+        under_bars + "W" * 95,
+        [VISIBLE],
+        "a white line under 95 W's squashed to bars (Tz 15), one text object each",
+        lambda pdf, page, font: (
+            VISIBLE_OPS
+            + b"1 g "
+            + tj(under_bars)
+            + b"0 g "
+            + b"".join(tj("W", x=72 + 4 * k, pre="15 Tz ") for k in range(95))
+        ),
+    )
+
+    # A shear smears glyphs past reading though the baseline and the height
+    # across it are unchanged; an oblique heading's slant is legible.
+    hidden_plant(
+        "h_sheared_smear",
+        "squashed",
+        "HIDDEN-SMEAR",
+        "12 pt text under a text matrix (1 0 10 1): each glyph leans ten times its height",
+        pre="1 0 10 1 40 600 Tm ",
+        at=(0, 0),
+    )
+    keep_plant(
+        "k_oblique_heading",
+        "KEEP-OBLIQUE",
+        "a slanted heading",
+        "a synthetic oblique (text matrix 1 0 0.33 1), as an italic without an italic font",
+        pre="1 0 0.33 1 72 650 Tm ",
+        at=(0, 0),
+    )
+
+    # Small light grey print a reader sees: its thin strokes never reach full
+    # coverage at the render's scale, so only its declared paint shows that.
+    source = "Source: national statistics office, 2023 survey (n = 1,204)"
+    for name, key, base, grey, size, note in [
+        ("k_small_grey_courier", "F2", "Courier", "0.8", 4, "4 pt Courier in #CCCCCC"),
+        ("k_small_grey_times", "F3", "Times-Roman", "0.75", 6, "6 pt Times in #BFBFBF"),
+    ]:
+        plant(
+            name,
+            "keep",
+            None,
+            "",
+            [VISIBLE, source],
+            f"a source line in {note}: thin strokes that never reach full coverage",
+            lambda pdf, page, font, key=key, base=base, grey=grey, size=size: (
+                _with_setup(standard_font(key, base), pdf, page, font)
+                + VISIBLE_OPS
+                + f"{grey} g ".encode()
+                + tj(source, size=size, font=key)
+                + b"0 g "
+            ),
+        )
+
+    # The threshold and the size gate of the veil test, each with a plant that
+    # fails without it: thin '=' signs at 12 device pixels reach 0.35 of their
+    # paint (removed at a threshold of 0.5), and 4 pt punctuation under 12
+    # pixels reaches less than the threshold (removed without the gate).
+    for name, key, base, grey, size, text, note in [
+        (
+            "k_grey_equals_italic",
+            "F4",
+            "Times-Italic",
+            "0.8",
+            6,
+            "a = b = c = d = e = f = g = h (n = 1,204)",
+            "6 pt Times-Italic in #CCCCCC: thin '=' signs reach 0.35 of their paint at scale 2",
+        ),
+        (
+            "k_small_grey_punctuation",
+            "F3",
+            "Times-Roman",
+            "0.6",
+            4,
+            "Notes: a, b; c. d: e, f; g. h: i, j; k. l: m, n; o. p: q, r; s. (1:2, 3:4)",
+            "4 pt Times in #999999, full of punctuation that never reaches its paint",
+        ),
+    ]:
+        plant(
+            name,
+            "keep",
+            None,
+            "",
+            [VISIBLE, text],
+            note,
+            lambda pdf, page, font, key=key, base=base, grey=grey, size=size, text=text: (
+                _with_setup(standard_font(key, base), pdf, page, font)
+                + VISIBLE_OPS
+                + f"{grey} g ".encode()
+                + tj(text, size=size, font=key)
+                + b"0 g "
+            ),
+        )
+
+    # Opacity is read from the declared paint at any size; a veil (another
+    # object over the text) is read from how far the glyphs reach their paint,
+    # which only glyphs of 12 device pixels and more do: under that, it is a
+    # documented miss.
+    faint = line("HIDDEN-FAINTSMALL")
+    plant(
+        "h_faint_alpha_5pt",
+        "hidden",
+        ["low_contrast", "transparent"],
+        faint,
+        [VISIBLE],
+        "5 pt black text at fill opacity 0.07 (too small for the reach test)",
+        lambda pdf, page, font: (
+            _with_setup(ext_gstate(GSF={"ca": 0.07}), pdf, page, font)
+            + VISIBLE_OPS
+            + b"q /GSF gs "
+            + tj(faint, size=5)
+            + b"Q\n"
+        ),
+    )
+    veiled = line("HIDDEN-VEILSMALL")
+    plant(
+        "h_white_veil_5pt",
+        "miss",
+        None,
+        veiled,
+        [VISIBLE],
+        "5 pt black text under a 93% white veil: under 12 device pixels its glyphs are judged"
+        " at their declared colour (at scale 2 some letters keep enough ink to reach the"
+        " reading; at 1.5 none does, and the line is removed as covered)",
+        lambda pdf, page, font: (
+            _with_setup(ext_gstate(GSV={"ca": 0.93}), pdf, page, font)
+            + VISIBLE_OPS
+            + tj(veiled, size=5)
+            + b"q /GSV gs 1 1 1 rg "
+            + BOX
+            + b" Q\n"
+        ),
+    )
+
+    # A Type3 font whose FontMatrix draws full-size glyphs at 0.8 Tf, narrow
+    # ones included: an 'l' 0.64 pt wide, a hyphen 0.72 pt tall.
+    def type3_narrow(pdf, page, font):
+        procs = Dictionary(
+            a=Stream(pdf, b"8 0 0 0 6 10 d1 0 0 6 10 re f\n"),
+            l=Stream(pdf, b"3 0 0 0 0.8 10 d1 0 0 0.8 10 re f\n"),
+            h=Stream(pdf, b"8 0 0 4 6 5 d1 0 4 6 0.9 re f\n"),
+        )
+        cmap = (
+            b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+            b"/CMapName /T3 def /CMapType 2 def\n"
+            b"1 begincodespacerange <00> <FF> endcodespacerange\n"
+            b"3 beginbfchar\n<61> <0061>\n<6C> <006C>\n<68> <002D>\nendbfchar\n"
+            b"endcmap CMapName currentdict /CMap defineresource pop end end\n"
+        )
+        page.obj.Resources.Font.T4 = pdf.make_indirect(
+            Dictionary(
+                Type=Name.Font,
+                Subtype=Name.Type3,
+                FontBBox=Array([0, 0, 6, 10]),
+                FontMatrix=Array([1, 0, 0, 1, 0, 0]),
+                CharProcs=procs,
+                Encoding=Dictionary(
+                    Type=Name.Encoding, Differences=Array([97, Name.a, 104, Name.h, 108, Name.l])
+                ),
+                FirstChar=97,
+                LastChar=108,
+                Widths=Array([8, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 3]),
+                Resources=Dictionary(),
+                ToUnicode=Stream(pdf, cmap),
+            )
+        )
+        return VISIBLE_OPS + b"BT /T4 0.8 Tf 72 650 Td (alalahaha) Tj ET\n"
+
+    plant(
+        "k_type3_narrow_glyphs",
+        "keep",
+        None,
+        "",
+        [VISIBLE, "alala-a-a"],
+        "the k_type3_scaled_font case with narrow glyphs: 'l' 0.64 pt wide and a hyphen"
+        " 0.72 pt tall, in a font whose glyphs draw 8 pt tall at 0.8 Tf",
+        type3_narrow,
+    )
+    rotated = line("HIDDEN-ROTATEDTINY")
+    plant(
+        "h_rotated_stretched_tiny",
+        "hidden",
+        "tiny",
+        rotated,
+        [VISIBLE],
+        "1 pt text at 45 degrees, ten times wide along its baseline and half a point across"
+        " it: no side of a glyph's upright box is under 1 pt",
+        lambda pdf, page, font: (
+            VISIBLE_OPS
+            + tj(rotated, x=0, y=0, size=1, pre="7.0711 7.0711 -0.3536 0.3536 72 400 Tm ")
+        ),
+    )
+
+    # Characters with no ink take no part in the overlap pass: 120 overlapping
+    # rows of white 1.2 pt text (2,160 characters, 2,116 in one 16 pt overlap
+    # cell) leave the page checked, where entering them would pass the
+    # per-cell bound.
+    rows = [("SECURE"[r % 6 :] + "SECURE"[: r % 6]) * 3 for r in range(120)]
+    plant(
+        "h_white_rows_dense",
+        "hidden",
+        "same_colour_as_background",
+        "".join(rows),
+        [VISIBLE],
+        "120 rows of white 1.2 pt text 0.11 pt apart: 2,160 characters, over 1,000 in one"
+        " overlap cell, none leaving ink",
+        lambda pdf, page, font: (
+            VISIBLE_OPS
+            + b"1 g "
+            + b"".join(
+                tj(text, x=81 + 0.01 * r, y=593 + 0.11 * r, size=1.2) for r, text in enumerate(rows)
+            )
+            + b"0 g "
+        ),
+    )
+
+    # An earlier copy of a glyph under a later copy in another paint is a
+    # duplicate (the reader sees one copy), not hidden text: a white copy
+    # under the black one leaves no ink. The black object reads one label
+    # more, or pdfium's text page would merge the two objects.
+    copy = "COPY-WHITE a subtitle printed twice"
+    plant(
+        "d_white_copy_under_black",
+        "hidden",
+        "duplicate",
+        copy,
+        [VISIBLE, copy + " (2)"],
+        "a white copy of a subtitle, then the same subtitle in black on top of it",
+        lambda pdf, page, font: VISIBLE_OPS + b"1 g " + tj(copy) + b"0 g " + tj(copy + " (2)"),
+    )
+    PLANTS[-1]["duplicates"] = len(copy.replace(" ", ""))
+
+    # Outlined text is painted in its stroke colour at the stroke's opacity.
+    hidden_plant(
+        "h_outline_transparent_stroke",
+        "transparent",
+        "HIDDEN-NOSTROKE",
+        "render mode 1 (stroke only) with a black stroke at stroke opacity 0",
+        ops_before=b"q /GSS gs 0 G 0.5 w ",
+        ops_after=b"Q\n",
+        setup=ext_gstate(GSS={"CA": 0}),
+        pre="1 Tr ",
+    )
 
 
 def _bounds() -> None:
@@ -1499,11 +1822,17 @@ def _bounds() -> None:
         )
     )
     FILES["b_many_page_glyphs"] = to_bytes(pdf)
-    # The largest page checked, covered by one solid block glyph.
+    # The largest page checked, covered by one solid block glyph with a white
+    # line on it: the line is visible only once the overlap pass has rendered
+    # the page without it (pass 1 compares it with the paper), so the file
+    # also runs that pass, whose renders are the page's largest memory cost.
     pdf, page, font = new_doc(2200, 3200)
     block_font(pdf, page)
     page.obj.Contents = pdf.make_stream(
-        tj(VISIBLE, y=3100) + b"0.2 g BT /T3 3000 Tf 0 200 Td (Z) Tj ET\n"
+        tj(VISIBLE, y=3100)
+        + b"0.2 g BT /T3 3000 Tf 0 200 Td (Z) Tj ET\n"
+        + b"1 g "
+        + tj(line("KEEP-ONBLOCK", "white on the page-sized glyph"), y=1000)
     )
     FILES["b_page_glyph_memory"] = to_bytes(pdf)
 
@@ -1533,4 +1862,7 @@ def main(out: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]) if len(sys.argv) > 1 else HERE)
+    if sys.argv[1:] == ["--measure"]:
+        print(measured_constants())
+    else:
+        main(Path(sys.argv[1]) if len(sys.argv) > 1 else HERE)
